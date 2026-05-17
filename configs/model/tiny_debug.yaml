@@ -1,0 +1,13 @@
+# Minimal model config used for Phase 1 smoke tests.
+# This is not the research model. It only validates project plumbing.
+
+model:
+  name: debug_tiny_lm
+  params:
+    vocab_size: 128
+    block_size: 32
+    embedding_dim: 64
+
+runtime:
+  seed: 1234
+  device: auto
