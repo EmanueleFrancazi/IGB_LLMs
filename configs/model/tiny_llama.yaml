@@ -1,0 +1,23 @@
+# Tiny LLaMA-style config for Phase 2 sanity checks.
+# This is intentionally small enough to run quickly on CPU while preserving
+# the key architectural components: RMSNorm, RoPE, grouped-query attention,
+# SwiGLU feed-forward blocks, residual connections, and LM logits.
+
+model:
+  name: llama_tiny
+  params:
+    vocab_size: 256
+    dim: 128
+    n_layers: 2
+    n_heads: 4
+    n_kv_heads: 2
+    multiple_of: 64
+    ffn_dim_multiplier: null
+    norm_eps: 1.0e-5
+    max_batch_size: 8
+    max_seq_len: 64
+    rope_theta: 10000.0
+
+runtime:
+  seed: 1234
+  device: auto
