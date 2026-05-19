@@ -1,0 +1,19 @@
+# Tiny text data config for Phase 3 pipeline checks.
+# The tokenizer is deliberately character-level so the project can run without
+# external tokenizer downloads during early development.
+
+dataset:
+  name: tiny_local_text
+  path: data/raw/tiny_corpus.txt
+  val_fraction: 0.2
+
+tokenizer:
+  type: char
+
+batching:
+  batch_size: 4
+  block_size: 16
+
+runtime:
+  seed: 1234
+  device: auto

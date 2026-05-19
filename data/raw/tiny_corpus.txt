@@ -1,0 +1,9 @@
+The quick brown fox studies language models.
+A small corpus is enough for checking shapes.
+We are not training yet; we are validating the data path.
+Tokens become batches, batches become model inputs, and targets are shifted by one step.
+
+This repository will later measure loss, perplexity, entropy, token preferences, and output distribution changes.
+For now, the goal is simpler: load text, build a tokenizer, split data, sample causal language-model batches, and pass one batch through the LLaMA-style model.
+
+Clear interfaces make later experiments easier to reproduce and easier to debug.
