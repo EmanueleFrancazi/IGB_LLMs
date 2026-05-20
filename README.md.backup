@@ -16,7 +16,7 @@ The project avoids treating models as black-box imports. Model components are im
 
 ## Current phase
 
-The repository now includes **Phase 3: Data Pipeline Integration and Repository Cleanup**.
+The repository now includes **Phase 4: Inference Utilities**.
 
 Previous phases added:
 
@@ -26,17 +26,27 @@ Previous phases added:
 - utility functions for seeding, device selection, and parameter counting
 - a LLaMA-style decoder-only model scaffold
 - a LLaMA model sanity-check script
-
-Phase 3 adds:
-
 - a small local text corpus
 - a deterministic character-level tokenizer
 - train/validation token splitting
 - causal language-model batch creation
 - a data-to-model compatibility script
-- tests for the tokenizer and batcher
 
-The Phase 1 toy/debug model files have been removed. The active baseline is now the LLaMA-style model.
+Phase 4 adds:
+
+- prompt-to-token conversion
+- model-ready prompt tensors
+- full-logits extraction
+- next-token logits extraction
+- next-token probability extraction with softmax
+- top-k next-token inspection
+- greedy decoding
+- sampling decoding with temperature and optional top-k filtering
+- short text generation
+- a runnable inference script
+- lightweight inference tests
+
+The model is still untrained. Generated text is expected to be random or meaningless at this stage. The goal is to validate the inference infrastructure before adding analysis, logging, checkpointing, and training.
 
 ## Repository structure
 
@@ -55,6 +65,7 @@ llm_behavior_lab/
   scripts/
     smoke_test_llama.py
     check_data_pipeline.py
+    run_inference.py
 
   src/
     llm_behavior_lab/
@@ -65,6 +76,10 @@ llm_behavior_lab/
         dataloader.py
         text_dataset.py
         tokenizer.py
+
+      inference/
+        __init__.py
+        generation.py
 
       models/
         __init__.py
@@ -84,6 +99,7 @@ llm_behavior_lab/
   tests/
     test_data_pipeline.py
     test_imports.py
+    test_inference.py
     test_llama_shapes.py
 
   pyproject.toml
@@ -94,9 +110,10 @@ llm_behavior_lab/
 
 - `configs/`: YAML configuration files for models and data.
 - `data/raw/`: tiny local text data used for early pipeline checks.
-- `scripts/`: runnable checks for model integration and data/model compatibility.
+- `scripts/`: runnable checks for model integration, data/model compatibility, and inference.
 - `src/llm_behavior_lab/models/`: model interface, registry, and LLaMA-style implementation.
 - `src/llm_behavior_lab/data/`: tokenizer, text loading, splitting, and causal LM batching utilities.
+- `src/llm_behavior_lab/inference/`: prompt preparation, logits inspection, decoding, and short generation utilities.
 - `src/llm_behavior_lab/utils/`: reproducibility, device, and parameter-count helpers.
 - `tests/`: lightweight sanity tests for the current implementation.
 
@@ -119,7 +136,7 @@ The model includes explicit implementations of:
 
 ### Data pipeline
 
-The Phase 3 data pipeline includes:
+The data pipeline includes:
 
 - local text loading
 - character-level tokenizer construction
@@ -130,23 +147,23 @@ The Phase 3 data pipeline includes:
 
 For a token window of length `block_size + 1`, the first `block_size` tokens become `input_ids`, and the next `block_size` tokens become `targets`.
 
-### Data/model compatibility check
+### Inference utilities
 
-The Phase 3 script verifies that one training batch can be passed through the LLaMA-style model and that logits have shape:
+The inference utilities include:
 
-```text
-(batch_size, block_size, model_vocab_size)
-```
+- `prepare_prompt_tensor`: encode text prompts and create `[1, sequence]` input tensors
+- `extract_logits`: run the model in `eval()` mode with gradients disabled
+- `extract_next_token_logits`: extract final-position logits, optionally restricted to tokenizer-valid IDs
+- `next_token_probabilities`: convert logits to probabilities with temperature scaling
+- `top_k_predictions`: inspect likely next tokens and decode them into readable strings
+- `select_next_token`: choose the next token by greedy or sampling decoding
+- `generate_text`: generate a short continuation and decode it back into text
 
-For the default configs, this is:
-
-```text
-(4, 16, 256)
-```
+The current tiny LLaMA config uses a model vocabulary of 256, while the character tokenizer has fewer valid token IDs. During Phase 4 generation, next-token choices are restricted to the tokenizer vocabulary so generated IDs can be decoded.
 
 ## Removed legacy files
 
-The Phase 1 toy/debug model artifacts were removed because the LLaMA-style model is now the active baseline.
+The Phase 1 toy/debug model artifacts were removed in Phase 3 because the LLaMA-style model became the active baseline.
 
 Removed files:
 
@@ -218,6 +235,47 @@ Logits shape: (4, 16, 256)
 Loss shape: ()
 ```
 
+## Run the Phase 4 inference check
+
+```bash
+python3 scripts/run_inference.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml
+```
+
+Expected output includes:
+
+- prompt text
+- encoded prompt token IDs
+- input tensor shape
+- full logits shape
+- next-token logits shape after tokenizer-vocabulary restriction
+- top-k next-token predictions with probabilities
+- generated token IDs
+- decoded generated text
+- a note that the model is untrained
+
+For the default prompt, the key shapes should look like:
+
+```text
+Input tensor shape: (1, 4)
+Full logits shape: (1, 4, 256)
+Next-token logits shape after tokenizer-vocab restriction: (1, <tokenizer_vocab_size>)
+```
+
+The default run generates only 4 new tokens to keep the CPU check lightweight. The generated text may be random or repetitive because the model has not been trained yet.
+
+You can also try sampling:
+
+```bash
+python3 scripts/run_inference.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml \
+  --strategy sample \
+  --temperature 0.8 \
+  --top-k 10
+```
+
 ## Run tests
 
 ```bash
@@ -226,12 +284,11 @@ python3 -m pytest
 
 ## What is intentionally not included yet
 
-Phase 3 does not add:
+Phase 4 does not add:
 
 - full training loops
 - optimizer or scheduler setup
 - checkpointing
-- generation utilities
 - tokenizer persistence
 - large dataset support
 - validation loss evaluation over a full split
@@ -244,8 +301,7 @@ Those components will be added in later phases.
 
 Planned next steps:
 
-1. **Phase 4 — Inference utilities**: prompt encoding, logits extraction, text generation, greedy/sampling decoding, and model-output inspection.
-2. **Phase 5 — Baseline untrained-model analysis**: entropy, top-k statistics, token probability summaries, and initialization behavior checks.
-3. **Phase 6 — Logging and checkpoint infrastructure**: experiment folders, JSON/CSV logs, metadata, and reproducible run records.
-4. **Phase 7 — Pre-training loop**: optimizer, learning-rate schedule, loss logging, validation checks, and checkpoint evaluation.
-5. **Phase 8+ — Training dynamics, fine-tuning, and multi-model extensions**.
+1. **Phase 5 — Baseline untrained-model analysis**: entropy, top-k statistics, token probability summaries, and initialization behavior checks.
+2. **Phase 6 — Logging and checkpoint infrastructure**: experiment folders, JSON/CSV logs, metadata, and reproducible run records.
+3. **Phase 7 — Pre-training loop**: optimizer, learning-rate schedule, loss logging, validation checks, and checkpoint evaluation.
+4. **Phase 8+ — Training dynamics, fine-tuning, and multi-model extensions**.
