@@ -16,7 +16,7 @@ The project avoids treating models as black-box imports. Model components are im
 
 ## Current phase
 
-The repository now includes **Phase 4: Inference Utilities**.
+The repository now includes **Phase 5: Baseline Untrained-Model Analysis**.
 
 Previous phases added:
 
@@ -31,22 +31,22 @@ Previous phases added:
 - train/validation token splitting
 - causal language-model batch creation
 - a data-to-model compatibility script
+- inference utilities for prompt encoding, logits inspection, top-k predictions, and short generation
 
-Phase 4 adds:
+Phase 5 adds:
 
-- prompt-to-token conversion
-- model-ready prompt tensors
-- full-logits extraction
-- next-token logits extraction
-- next-token probability extraction with softmax
-- top-k next-token inspection
-- greedy decoding
-- sampling decoding with temperature and optional top-k filtering
-- short text generation
-- a runnable inference script
-- lightweight inference tests
+- output-distribution statistics for the untrained model
+- entropy and probability-concentration summaries
+- top-k prediction examples at selected positions
+- empirical token-frequency computation from the tiny corpus
+- comparison between average model probabilities and empirical token frequencies
+- largest positive and negative probability-frequency gaps
+- top-1 predicted-token frequency summaries
+- simple KL and Jensen-Shannon divergence summaries
+- a runnable untrained-model analysis script
+- lightweight tests for the evaluation utilities
 
-The model is still untrained. Generated text is expected to be random or meaningless at this stage. The goal is to validate the inference infrastructure before adding analysis, logging, checkpointing, and training.
+The model is still untrained. Phase 5 does not measure model quality; it establishes a reproducible baseline for how the randomly initialized model behaves before any optimization.
 
 ## Repository structure
 
@@ -66,6 +66,7 @@ llm_behavior_lab/
     smoke_test_llama.py
     check_data_pipeline.py
     run_inference.py
+    analyze_untrained_model.py
 
   src/
     llm_behavior_lab/
@@ -76,6 +77,12 @@ llm_behavior_lab/
         dataloader.py
         text_dataset.py
         tokenizer.py
+
+      evaluation/
+        __init__.py
+        output_stats.py
+        token_frequency.py
+        untrained_analysis.py
 
       inference/
         __init__.py
@@ -98,6 +105,7 @@ llm_behavior_lab/
 
   tests/
     test_data_pipeline.py
+    test_evaluation.py
     test_imports.py
     test_inference.py
     test_llama_shapes.py
@@ -106,73 +114,59 @@ llm_behavior_lab/
   README.md
 ```
 
-### Key folders
+## File/function map
 
-- `configs/`: YAML configuration files for models and data.
-- `data/raw/`: tiny local text data used for early pipeline checks.
-- `scripts/`: runnable checks for model integration, data/model compatibility, and inference.
-- `src/llm_behavior_lab/models/`: model interface, registry, and LLaMA-style implementation.
-- `src/llm_behavior_lab/data/`: tokenizer, text loading, splitting, and causal LM batching utilities.
-- `src/llm_behavior_lab/inference/`: prompt preparation, logits inspection, decoding, and short generation utilities.
-- `src/llm_behavior_lab/utils/`: reproducibility, device, and parameter-count helpers.
-- `tests/`: lightweight sanity tests for the current implementation.
+### Model files
 
-## Current implemented features
+- `src/llm_behavior_lab/models/base.py`: shared `BaseLanguageModel` interface and `ModelOutput` container.
+- `src/llm_behavior_lab/models/registry.py`: model registry and config-based model construction.
+- `src/llm_behavior_lab/models/llama/config.py`: `LlamaConfig` dataclass and validation.
+- `src/llm_behavior_lab/models/llama/model.py`: explicit LLaMA-style decoder-only model implementation.
 
-### LLaMA-style model integration
+The LLaMA-style model includes token embeddings, RMSNorm, RoPE, grouped-query self-attention, an optional KV-cache path, SwiGLU feed-forward blocks, residual decoder blocks, final normalization, logits, and optional cross-entropy loss.
 
-The model includes explicit implementations of:
+### Data files
 
-- token embeddings
-- RMSNorm
-- rotary position embeddings
-- grouped-query self-attention
-- optional KV-cache path for incremental inference
-- SwiGLU feed-forward blocks
-- residual decoder blocks
-- final normalization
-- language-modeling logits
-- optional cross-entropy loss when targets are provided
+- `data/raw/tiny_corpus.txt`: tiny local text corpus used for early pipeline checks.
+- `src/llm_behavior_lab/data/tokenizer.py`: deterministic character-level tokenizer.
+- `src/llm_behavior_lab/data/text_dataset.py`: local text loading and train/validation splitting.
+- `src/llm_behavior_lab/data/dataloader.py`: causal language-model batch construction.
 
-### Data pipeline
+### Inference files
 
-The data pipeline includes:
+- `src/llm_behavior_lab/inference/generation.py`: prompt preparation, logits extraction, probability extraction, top-k inspection, greedy decoding, sampling decoding, and short generation.
+- `scripts/run_inference.py`: runnable inference check for the untrained model.
 
-- local text loading
-- character-level tokenizer construction
-- text-to-token encoding
-- deterministic train/validation splitting
-- random causal language-model batch sampling
-- shifted input/target pair creation
+### Evaluation/analysis files
 
-For a token window of length `block_size + 1`, the first `block_size` tokens become `input_ids`, and the next `block_size` tokens become `targets`.
+- `src/llm_behavior_lab/evaluation/output_stats.py`: entropy, top-k mass, top-1 probability, and output-distribution summaries.
+- `src/llm_behavior_lab/evaluation/token_frequency.py`: empirical token counts/frequencies, average predicted probabilities, probability-frequency gaps, KL divergence, and JS divergence.
+- `src/llm_behavior_lab/evaluation/untrained_analysis.py`: high-level baseline analysis that combines output statistics, top-k examples, top-1 prediction summaries, and token-frequency comparisons.
+- `scripts/analyze_untrained_model.py`: runnable Phase 5 script for baseline analysis at initialization.
 
-### Inference utilities
+### Scripts
 
-The inference utilities include:
+- `scripts/smoke_test_llama.py`: verifies model construction, dummy-token forward pass, logits shape, loss shape, and parameter count.
+- `scripts/check_data_pipeline.py`: verifies tokenizer/data batching and model compatibility.
+- `scripts/run_inference.py`: verifies prompt-based inference and short generation.
+- `scripts/analyze_untrained_model.py`: analyzes output behavior of the randomly initialized model.
 
-- `prepare_prompt_tensor`: encode text prompts and create `[1, sequence]` input tensors
-- `extract_logits`: run the model in `eval()` mode with gradients disabled
-- `extract_next_token_logits`: extract final-position logits, optionally restricted to tokenizer-valid IDs
-- `next_token_probabilities`: convert logits to probabilities with temperature scaling
-- `top_k_predictions`: inspect likely next tokens and decode them into readable strings
-- `select_next_token`: choose the next token by greedy or sampling decoding
-- `generate_text`: generate a short continuation and decode it back into text
+## Phase 5 execution flow
 
-The current tiny LLaMA config uses a model vocabulary of 256, while the character tokenizer has fewer valid token IDs. During Phase 4 generation, next-token choices are restricted to the tokenizer vocabulary so generated IDs can be decoded.
+The untrained-model analysis script follows this flow:
 
-## Removed legacy files
-
-The Phase 1 toy/debug model artifacts were removed in Phase 3 because the LLaMA-style model became the active baseline.
-
-Removed files:
-
-- `configs/model/tiny_debug.yaml`
-- `scripts/smoke_test_model.py`
-- `src/llm_behavior_lab/models/debug.py`
-- `tests/test_registry.py`
-
-The shared base model interface, model registry, and utility modules remain because they are still used by the LLaMA-style model and future phases.
+1. Load data and model configs.
+2. Load the tiny local text corpus.
+3. Build the character-level tokenizer.
+4. Tokenize the corpus and create train/validation splits.
+5. Sample causal LM windows from the requested split.
+6. Instantiate the randomly initialized LLaMA-style model from config.
+7. Run a no-grad forward pass.
+8. Convert logits to probabilities over tokenizer-valid tokens.
+9. Compute output entropy and probability concentration.
+10. Compute empirical token frequencies from the corpus.
+11. Compare average predicted probabilities with empirical frequencies.
+12. Print top-k examples, top-1 prediction summaries, probability-frequency gaps, and divergence summaries.
 
 ## Install
 
@@ -263,17 +257,45 @@ Full logits shape: (1, 4, 256)
 Next-token logits shape after tokenizer-vocab restriction: (1, <tokenizer_vocab_size>)
 ```
 
-The default run generates only 4 new tokens to keep the CPU check lightweight. The generated text may be random or repetitive because the model has not been trained yet.
-
-You can also try sampling:
+## Run the Phase 5 untrained-model analysis
 
 ```bash
-python3 scripts/run_inference.py \
+python3 scripts/analyze_untrained_model.py \
   --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml \
-  --strategy sample \
-  --temperature 0.8 \
-  --top-k 10
+  --model-config configs/model/tiny_llama.yaml
+```
+
+Expected output includes:
+
+- selected device
+- dataset path
+- tokenizer vocabulary size
+- number of analyzed batches/windows/positions
+- logits shape
+- probability tensor shape
+- mean, minimum, and maximum output entropy
+- mean top-1 probability
+- mean top-k probability mass
+- top-1 assignment concentration
+- KL and JS divergence summaries
+- top-k predictions for a few example positions
+- most frequent empirical dataset tokens
+- most frequent top-1 predicted model tokens
+- largest positive probability-frequency gaps
+- largest negative probability-frequency gaps
+
+For the default configs, the key shapes should look like:
+
+```text
+Input tensor shape: (16, 16)
+Logits shape: (16, 16, 256)
+Probability tensor shape: (16, 16, <tokenizer_vocab_size>)
+```
+
+The exact metric values will depend on random initialization and device, but the script should end with:
+
+```text
+Phase 5 untrained-model analysis completed successfully.
 ```
 
 ## Run tests
@@ -282,18 +304,18 @@ python3 scripts/run_inference.py \
 python3 -m pytest
 ```
 
-## What is intentionally not included yet
+## Current limitations
 
-Phase 4 does not add:
+The repository still does not include:
 
 - full training loops
 - optimizer or scheduler setup
 - checkpointing
-- tokenizer persistence
-- large dataset support
-- validation loss evaluation over a full split
-- output-distribution or bias metrics
-- experiment logging infrastructure
+- persistent experiment logging
+- full validation-set evaluation
+- fine-tuning
+- multi-model comparison
+- advanced bias or group-based evaluation metrics
 
 Those components will be added in later phases.
 
@@ -301,7 +323,8 @@ Those components will be added in later phases.
 
 Planned next steps:
 
-1. **Phase 5 — Baseline untrained-model analysis**: entropy, top-k statistics, token probability summaries, and initialization behavior checks.
-2. **Phase 6 — Logging and checkpoint infrastructure**: experiment folders, JSON/CSV logs, metadata, and reproducible run records.
-3. **Phase 7 — Pre-training loop**: optimizer, learning-rate schedule, loss logging, validation checks, and checkpoint evaluation.
-4. **Phase 8+ — Training dynamics, fine-tuning, and multi-model extensions**.
+1. **Phase 6 — Logging and checkpoint infrastructure**: experiment folders, JSON/CSV logs, metadata, config snapshots, and reproducible run records.
+2. **Phase 7 — Pre-training loop**: optimizer, learning-rate schedule, loss logging, validation checks, and checkpoint evaluation.
+3. **Phase 8 — Training-dynamics analysis**: compare Phase 5 initialization metrics against metrics collected during training.
+4. **Phase 9 — Fine-tuning pipeline**: supervised fine-tuning data handling, fine-tuning loop, and checkpoint-based analysis.
+5. **Phase 10 — Model extension phase**: add additional model implementations and compare behavior across architectures.
