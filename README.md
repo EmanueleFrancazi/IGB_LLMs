@@ -156,17 +156,29 @@ The LLaMA-style model includes token embeddings, RMSNorm, RoPE, grouped-query se
 The untrained-model analysis script follows this flow:
 
 1. Load data and model configs.
+   - Code path: `scripts/analyze_untrained_model.py` (`parse_args`, `main`, `load_yaml_config`) → `configs/data/tiny_text.yaml` + `configs/model/tiny_llama.yaml`.
 2. Load the tiny local text corpus.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`, `resolve_repo_path`) → `src/llm_behavior_lab/data/text_dataset.py` (`load_text_file`) → `data/raw/tiny_corpus.txt`.
 3. Build the character-level tokenizer.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`) → `src/llm_behavior_lab/data/tokenizer.py` (`CharTokenizer.from_text`).
 4. Tokenize the corpus and create train/validation splits.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`) → `src/llm_behavior_lab/data/tokenizer.py` (`CharTokenizer.encode`) → `src/llm_behavior_lab/data/text_dataset.py` (`split_token_ids`).
 5. Sample causal LM windows from the requested split.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`) → `src/llm_behavior_lab/data/dataloader.py` (`CausalLMBatcher`, `get_batch`) → `torch.cat`.
 6. Instantiate the randomly initialized LLaMA-style model from config.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`) → `src/llm_behavior_lab/models/registry.py` (`build_model_from_config`) → `src/llm_behavior_lab/models/llama/model.py` (`build_llama_model`, `LlamaForCausalLM`).
 7. Run a no-grad forward pass.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`) → `torch.no_grad` → `src/llm_behavior_lab/models/llama/model.py` (`LlamaForCausalLM.forward`).
 8. Convert logits to probabilities over tokenizer-valid tokens.
+   - Code path: `scripts/analyze_untrained_model.py` (`main`) → `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`analyze_untrained_outputs`) → `src/llm_behavior_lab/evaluation/output_stats.py` (`logits_to_probabilities`).
 9. Compute output entropy and probability concentration.
+   - Code path: `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`analyze_untrained_outputs`) → `src/llm_behavior_lab/evaluation/output_stats.py` (`summarize_output_distribution`, `entropy_from_probabilities`, `top1_probability_values`, `topk_probability_mass`).
 10. Compute empirical token frequencies from the corpus.
+    - Code path: `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`analyze_untrained_outputs`) → `src/llm_behavior_lab/evaluation/token_frequency.py` (`empirical_token_counts`, `empirical_token_frequencies`, `top_token_frequencies`).
 11. Compare average predicted probabilities with empirical frequencies.
+    - Code path: `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`analyze_untrained_outputs`) → `src/llm_behavior_lab/evaluation/token_frequency.py` (`average_predicted_probabilities`, `top_probability_gaps`, `kl_divergence`, `js_divergence`).
 12. Print top-k examples, top-1 prediction summaries, probability-frequency gaps, and divergence summaries.
+    - Code path: `scripts/analyze_untrained_model.py` (`main`, `_format_token`) → `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`collect_topk_examples`, `summarize_top1_predictions`) → `src/llm_behavior_lab/inference/generation.py` (`top_k_predictions`).
 
 ## Install
 
