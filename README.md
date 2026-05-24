@@ -151,6 +151,15 @@ The LLaMA-style model includes token embeddings, RMSNorm, RoPE, grouped-query se
 - `scripts/run_inference.py`: verifies prompt-based inference and short generation.
 - `scripts/analyze_untrained_model.py`: analyzes output behavior of the randomly initialized model.
 
+## Script-to-module map
+
+| Script | Purpose | Main modules used |
+|---|---|---|
+| `scripts/smoke_test_llama.py` | Check that the LLaMA-style model builds and runs on dummy token IDs. | `models.registry` (`build_model_from_config`), `models.llama.model` (`LlamaForCausalLM`), `utils.device` (`get_device`), `utils.seed` (`seed_everything`) |
+| `scripts/check_data_pipeline.py` | Check that local text data becomes causal LM batches compatible with the model. | `data.text_dataset` (`load_text_file`, `split_token_ids`), `data.tokenizer` (`CharTokenizer`), `data.dataloader` (`CausalLMBatcher`), `models.registry` (`build_model_from_config`) |
+| `scripts/run_inference.py` | Check prompt encoding, logits extraction, top-k next-token inspection, and short generation. | `data.tokenizer` (`CharTokenizer`), `inference.generation` (`prepare_prompt_tensor`, `extract_logits`, `top_k_predictions`, `generate_text`), `models.registry` (`build_model_from_config`) |
+| `scripts/analyze_untrained_model.py` | Analyze initialization-time output behavior of the untrained model. | `data.*`, `models.registry`, `evaluation.output_stats`, `evaluation.token_frequency`, `evaluation.untrained_analysis` |
+
 ## Phase 5 execution flow
 
 The untrained-model analysis script follows this flow:
@@ -180,6 +189,78 @@ The untrained-model analysis script follows this flow:
 12. Print top-k examples, top-1 prediction summaries, probability-frequency gaps, and divergence summaries.
     - Code path: `scripts/analyze_untrained_model.py` (`main`, `_format_token`) → `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`collect_topk_examples`, `summarize_top1_predictions`) → `src/llm_behavior_lab/inference/generation.py` (`top_k_predictions`).
 
+## Phase 5 flow diagram
+
+```text
+configs/*.yaml
+   |
+   v
+scripts/analyze_untrained_model.py
+   |
+   +--> data/raw/tiny_corpus.txt
+   |       |
+   |       v
+   |   load_text_file
+   |       |
+   |       v
+   |   CharTokenizer.from_text / encode
+   |       |
+   |       v
+   |   split_token_ids
+   |       |
+   |       v
+   |   CausalLMBatcher.get_batch
+   |
+   +--> build_model_from_config
+   |       |
+   |       v
+   |   LlamaForCausalLM.forward
+   |       |
+   |       v
+   |   logits
+   |
+   +--> analyze_untrained_outputs
+           |
+           +--> logits_to_probabilities
+           +--> summarize_output_distribution
+           +--> empirical_token_frequencies
+           +--> average_predicted_probabilities
+           +--> top_probability_gaps
+           +--> collect_topk_examples
+           |
+           v
+        printed Phase 5 report
+```
+
+## Why probabilities are restricted to tokenizer-valid tokens
+
+The tiny LLaMA config currently uses a model vocabulary size of `256`, while the character-level tokenizer built from `data/raw/tiny_corpus.txt` has fewer valid token IDs. During Phase 4 inference and Phase 5 analysis, logits are restricted to the tokenizer vocabulary before softmax when the output needs to be decoded or compared with empirical token frequencies.
+
+This keeps the analysis aligned with the active tokenizer:
+
+- generated token IDs can be decoded by `CharTokenizer.decode`
+- predicted probabilities can be compared against empirical frequencies from the corpus
+- probability-frequency gaps use the same token index space on both sides
+
+The relevant utilities are:
+
+- `src/llm_behavior_lab/inference/generation.py` (`extract_next_token_logits`)
+- `src/llm_behavior_lab/evaluation/output_stats.py` (`logits_to_probabilities`)
+- `src/llm_behavior_lab/evaluation/untrained_analysis.py` (`analyze_untrained_outputs`)
+
+## Common debugging paths
+
+| Symptom | Where to look |
+|---|---|
+| Config file not found or malformed | `scripts/analyze_untrained_model.py` (`load_yaml_config`), `configs/data/tiny_text.yaml`, `configs/model/tiny_llama.yaml` |
+| Dataset path error | `scripts/analyze_untrained_model.py` (`resolve_repo_path`), `src/llm_behavior_lab/data/text_dataset.py` (`load_text_file`) |
+| Tokenizer cannot decode a token ID | `src/llm_behavior_lab/data/tokenizer.py` (`decode`), check whether model logits were restricted to `tokenizer.vocab_size` |
+| Train/validation split too small | `src/llm_behavior_lab/data/text_dataset.py` (`split_token_ids`), `configs/data/tiny_text.yaml` (`batching.block_size`, `dataset.val_fraction`) |
+| Batch shape mismatch | `src/llm_behavior_lab/data/dataloader.py` (`CausalLMBatcher.get_batch`), `scripts/check_data_pipeline.py`, `scripts/analyze_untrained_model.py` |
+| Model construction failure | `src/llm_behavior_lab/models/registry.py` (`build_model_from_config`), `src/llm_behavior_lab/models/llama/config.py` (`LlamaConfig.validate`) |
+| Forward-pass shape error | `src/llm_behavior_lab/models/llama/model.py` (`LlamaForCausalLM.forward`), check `max_seq_len` and `block_size` |
+| Analysis metric shape error | `src/llm_behavior_lab/evaluation/output_stats.py`, `src/llm_behavior_lab/evaluation/token_frequency.py`, `src/llm_behavior_lab/evaluation/untrained_analysis.py` |
+
 ## Install
 
 From the repository root:
@@ -194,19 +275,19 @@ python3 -m pip install -e ".[dev]"
 python3 scripts/smoke_test_llama.py --config configs/model/tiny_llama.yaml
 ```
 
-Expected output includes:
-
-- registered models including `llama` and `llama_tiny`
-- selected device
-- parameter count
-- input and target shapes
-- logits shape
-- scalar loss value
-
-For the default model sanity check, the logits shape should be:
+Successful output should include:
 
 ```text
-(2, 16, 256)
+Smoke test completed successfully.
+Available registered models: ['llama', 'llama_tiny']
+Selected model: llama_tiny
+Device: cpu
+Parameter count: 459392 (459.39K)
+Input shape: (2, 16)
+Target shape: (2, 16)
+Logits shape: (2, 16, 256)
+Loss shape: ()
+Loss value: ...
 ```
 
 ## Run the Phase 3 data-pipeline check
@@ -217,22 +298,12 @@ python3 scripts/check_data_pipeline.py \
   --model-config configs/model/tiny_llama.yaml
 ```
 
-Expected output includes:
-
-- dataset path
-- raw text character count
-- tokenizer vocabulary size
-- train and validation token counts
-- train batch shapes
-- validation batch shapes
-- model parameter count
-- logits shape
-- scalar loss value
-- decoded previews showing the input/target shift
-
-For the default configs, the key shapes should be:
+Successful output should include:
 
 ```text
+Phase 3 data pipeline check completed successfully.
+Tokenizer type: char
+Tokenizer vocab size: ...
 Train input shape: (4, 16)
 Train target shape: (4, 16)
 Validation input shape: (4, 16)
@@ -249,24 +320,20 @@ python3 scripts/run_inference.py \
   --model-config configs/model/tiny_llama.yaml
 ```
 
-Expected output includes:
-
-- prompt text
-- encoded prompt token IDs
-- input tensor shape
-- full logits shape
-- next-token logits shape after tokenizer-vocabulary restriction
-- top-k next-token predictions with probabilities
-- generated token IDs
-- decoded generated text
-- a note that the model is untrained
-
-For the default prompt, the key shapes should look like:
+Successful output should include:
 
 ```text
+Phase 4 inference check completed successfully.
+Prompt: 'The '
+Encoded prompt token IDs: [...]
 Input tensor shape: (1, 4)
 Full logits shape: (1, 4, 256)
 Next-token logits shape after tokenizer-vocab restriction: (1, <tokenizer_vocab_size>)
+Top-k next-token predictions:
+  1. token_id=...
+Generated token IDs: [...]
+Decoded generated text: ...
+Note: the model is untrained, so generated text is expected to be random or meaningless.
 ```
 
 ## Run the Phase 5 untrained-model analysis
@@ -277,44 +344,55 @@ python3 scripts/analyze_untrained_model.py \
   --model-config configs/model/tiny_llama.yaml
 ```
 
-Expected output includes:
-
-- selected device
-- dataset path
-- tokenizer vocabulary size
-- number of analyzed batches/windows/positions
-- logits shape
-- probability tensor shape
-- mean, minimum, and maximum output entropy
-- mean top-1 probability
-- mean top-k probability mass
-- top-1 assignment concentration
-- KL and JS divergence summaries
-- top-k predictions for a few example positions
-- most frequent empirical dataset tokens
-- most frequent top-1 predicted model tokens
-- largest positive probability-frequency gaps
-- largest negative probability-frequency gaps
-
-For the default configs, the key shapes should look like:
-
-```text
-Input tensor shape: (16, 16)
-Logits shape: (16, 16, 256)
-Probability tensor shape: (16, 16, <tokenizer_vocab_size>)
-```
-
-The exact metric values will depend on random initialization and device, but the script should end with:
+Successful output should include:
 
 ```text
 Phase 5 untrained-model analysis completed successfully.
+Note: the model is randomly initialized. These numbers describe baseline behavior, not quality.
+Tokenizer vocab size: ...
+Analyzed batches: 4
+Analyzed windows: 16
+Analyzed positions: 256
+Input tensor shape: (16, 16)
+Logits shape: (16, 16, 256)
+Probability tensor shape: (16, 16, <tokenizer_vocab_size>)
+Mean output entropy: ...
+Mean top-1 probability: ...
+Mean top-5 probability mass: ...
+Top-1 assignment concentration: ...
+KL(predicted || empirical): ...
+JS(predicted, empirical): ...
 ```
+
+The script also prints:
+
+```text
+Example top-k next-token predictions:
+  batch=..., position=..., input_token_id=..., input_token=...
+    1. token_id=... token=... probability=...
+
+Most frequent empirical dataset tokens:
+  token_id=... token=... count=... frequency=...
+
+Most frequent top-1 predicted tokens:
+  token_id=... token=... count=... frequency=...
+
+Largest positive probability-frequency gaps:
+  token_id=... token=... predicted=... empirical=... gap=...
+
+Largest negative probability-frequency gaps:
+  token_id=... token=... predicted=... empirical=... gap=...
+```
+
+The exact metric values depend on random initialization and device.
 
 ## Run tests
 
 ```bash
 python3 -m pytest
 ```
+
+Successful output should show all tests passing.
 
 ## Current limitations
 
