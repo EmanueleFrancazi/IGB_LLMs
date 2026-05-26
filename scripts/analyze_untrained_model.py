@@ -5,8 +5,13 @@ text corpus, builds the character tokenizer, samples causal LM windows, runs the
 randomly initialized model in inference mode, and prints simple output
 statistics plus token-frequency comparisons.
 
-This script intentionally does not train, checkpoint, or persist experiment
-logs. Those features are planned for later phases.
+This refinement also optionally computes per-layer squared L2 gradient norms
+with respect to decoder-block outputs. That gradient diagnostic is disabled by
+default because it requires a backward pass. Enable it with
+``--compute-grad-norms``.
+
+This script intentionally does not train, checkpoint, or introduce full
+experiment logging. Those features are planned for later phases.
 """
 
 from __future__ import annotations
@@ -31,7 +36,11 @@ from llm_behavior_lab.data import (  # noqa: E402
     load_text_file,
     split_token_ids,
 )
-from llm_behavior_lab.evaluation import analyze_untrained_outputs  # noqa: E402
+from llm_behavior_lab.evaluation import (  # noqa: E402
+    analyze_untrained_outputs,
+    compute_per_layer_gradient_norms,
+    save_gradient_norm_result,
+)
 from llm_behavior_lab.models import build_model_from_config, list_models  # noqa: E402
 from llm_behavior_lab.utils import format_parameter_count, get_device, seed_everything  # noqa: E402
 
@@ -100,6 +109,29 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of example positions for detailed top-k predictions.",
     )
+    parser.add_argument(
+        "--compute-grad-norms",
+        action="store_true",
+        help="Compute per-layer squared L2 gradient norms. Disabled by default.",
+    )
+    parser.add_argument(
+        "--grad-norm-num-batches",
+        type=int,
+        default=1,
+        help="Number of batches to use for gradient-norm analysis when enabled.",
+    )
+    parser.add_argument(
+        "--grad-norm-eps",
+        type=float,
+        default=1e-12,
+        help="Numerical stabilizer used in log(g_l + eps) trend fitting.",
+    )
+    parser.add_argument(
+        "--grad-norm-output-dir",
+        type=Path,
+        default=REPO_ROOT / "outputs" / "phase5_gradient_norms",
+        help="Directory where gradient-norm JSON and CSV files are saved when enabled.",
+    )
     return parser.parse_args()
 
 
@@ -107,6 +139,14 @@ def _format_token(token: str) -> str:
     """Make whitespace tokens readable in printed reports."""
 
     return repr(token)
+
+
+def _format_optional_float(value: float | None) -> str:
+    """Format optional fit diagnostics for printing."""
+
+    if value is None:
+        return "not available"
+    return f"{value:.6f}"
 
 
 def main() -> None:
@@ -117,6 +157,10 @@ def main() -> None:
         raise ValueError("--num-batches must be positive.")
     if args.top_k <= 0:
         raise ValueError("--top-k must be positive.")
+    if args.compute_grad_norms and args.grad_norm_num_batches <= 0:
+        raise ValueError("--grad-norm-num-batches must be positive when gradient norms are enabled.")
+    if args.compute_grad_norms and args.grad_norm_eps <= 0:
+        raise ValueError("--grad-norm-eps must be positive when gradient norms are enabled.")
 
     data_config = load_yaml_config(args.data_config)
     model_config = load_yaml_config(args.model_config)
@@ -259,6 +303,54 @@ def main() -> None:
             f"predicted={item.predicted_probability:.6f} "
             f"empirical={item.empirical_frequency:.6f} gap={item.gap:.6f}"
         )
+
+    if args.compute_grad_norms:
+        print("\nComputing per-layer gradient norms...")
+        grad_batches = [batcher.get_batch(args.split) for _ in range(args.grad_norm_num_batches)]
+        grad_result = compute_per_layer_gradient_norms(
+            model,
+            grad_batches,
+            eps=args.grad_norm_eps,
+        )
+        metadata = {
+            "data_config": str(args.data_config),
+            "model_config": str(args.model_config),
+            "dataset_path": str(text_path),
+            "model_name": model_config["model"]["name"],
+            "analysis_split": args.split,
+            "seed": seed,
+            "device": str(device),
+            "batch_size": batch_size,
+            "block_size": block_size,
+            "grad_norm_num_batches": args.grad_norm_num_batches,
+        }
+        json_path, csv_path = save_gradient_norm_result(
+            grad_result,
+            args.grad_norm_output_dir,
+            metadata=metadata,
+        )
+
+        print("\nPer-layer gradient norm diagnostic:")
+        print(f"  Definition: {grad_result.definition}")
+        print(f"  Gradient batches: {grad_result.num_batches}")
+        print(f"  Mean gradient-diagnostic loss: {grad_result.mean_loss:.6f}")
+        print(
+            "  Squared L2 gradient norms: "
+            f"{[round(item.squared_l2_norm, 6) for item in grad_result.layer_norms]}"
+        )
+        print(
+            "  Log squared L2 gradient norms: "
+            f"{[round(item.log_squared_l2_norm, 6) for item in grad_result.layer_norms]}"
+        )
+        print(f"  Log-linear slope: {grad_result.trend_fit.slope:.6f}")
+        print(f"  Log-linear intercept: {grad_result.trend_fit.intercept:.6f}")
+        print(
+            "  Slope standard error: "
+            f"{_format_optional_float(grad_result.trend_fit.slope_standard_error)}"
+        )
+        print(f"  R^2: {_format_optional_float(grad_result.trend_fit.r_squared)}")
+        print(f"  Saved gradient JSON: {json_path}")
+        print(f"  Saved gradient CSV: {csv_path}")
 
 
 if __name__ == "__main__":

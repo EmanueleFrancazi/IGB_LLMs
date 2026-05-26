@@ -1,3 +1,17 @@
+Metadata-Version: 2.4
+Name: llm-behavior-lab
+Version: 0.1.0
+Summary: Incremental experimentation codebase for studying LLM behavior across initialization, training, and fine-tuning.
+Author: Emanuele Francazi
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: torch>=2.1
+Requires-Dist: numpy>=1.24
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+
 # LLM Behavior Lab
 
 LLM Behavior Lab is an incremental research codebase for studying how language-model behavior evolves from random initialization through inference, pre-training, and fine-tuning.
