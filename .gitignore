@@ -1,0 +1,35 @@
+# Large or generated datasets should not be committed.
+# Keep dataset configs under configs/data/ tracked; store raw/downloaded data under data/.
+data/
+
+# Experiment outputs and lightweight analysis artifacts.
+outputs/
+experiments/
+runs/
+wandb/
+
+# Python caches and build artifacts.
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local environment files.
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Notebook/editor/system metadata.
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store

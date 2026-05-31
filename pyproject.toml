@@ -14,18 +14,13 @@ authors = [
 ]
 dependencies = [
   "torch>=2.1",
-  "numpy>=1.24,<2.0",
+  "numpy>=1.24",
   "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=7.4",
-]
-hf = [
-  "datasets>=2.19",
-  "numpy>=1.24,<2.0",
-  "scipy>=1.11.4",
 ]
 
 [tool.setuptools.packages.find]

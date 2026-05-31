@@ -26,7 +26,7 @@ if str(SRC_ROOT) not in sys.path:
 from llm_behavior_lab.data import (  # noqa: E402
     CausalLMBatcher,
     CharTokenizer,
-    load_text_dataset_from_config,
+    load_text_file,
     split_token_ids,
 )
 from llm_behavior_lab.models import build_model_from_config, list_models  # noqa: E402
@@ -46,6 +46,15 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
         raise TypeError(f"Expected config dictionary, got {type(config)!r}")
 
     return config
+
+
+def resolve_repo_path(path_value: str | Path) -> Path:
+    """Resolve paths relative to the repository root."""
+
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,13 +92,14 @@ def main() -> None:
 
     dataset_config = data_config["dataset"]
     batching_config = data_config["batching"]
+    text_path = resolve_repo_path(dataset_config["path"])
     val_fraction = float(dataset_config.get("val_fraction", 0.1))
     batch_size = int(batching_config["batch_size"])
     block_size = int(batching_config["block_size"])
 
-    loaded_dataset = load_text_dataset_from_config(data_config, repo_root=REPO_ROOT)
-    tokenizer = CharTokenizer.from_text(loaded_dataset.text)
-    token_ids = tokenizer.encode(loaded_dataset.text)
+    text = load_text_file(text_path)
+    tokenizer = CharTokenizer.from_text(text)
+    token_ids = tokenizer.encode(text)
     splits = split_token_ids(
         token_ids,
         val_fraction=val_fraction,
@@ -140,11 +150,8 @@ def main() -> None:
 
     print("Phase 3 data pipeline check completed successfully.")
     print(f"Available registered models: {list_models()}")
-    print(f"Dataset source type: {loaded_dataset.source_type}")
-    print(f"Dataset source name: {loaded_dataset.source_name}")
-    print(f"Dataset metadata: {loaded_dataset.metadata}")
-    print(f"Raw examples used: {loaded_dataset.num_examples}")
-    print(f"Raw text characters: {len(loaded_dataset.text)}")
+    print(f"Dataset path: {text_path}")
+    print(f"Raw text characters: {len(text)}")
     print(f"Tokenizer type: char")
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     print(f"Total token count: {len(token_ids)}")
