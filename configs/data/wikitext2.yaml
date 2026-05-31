@@ -1,0 +1,29 @@
+# WikiText-2 raw config for standard language-modeling experiments.
+# Requires the optional Hugging Face dependency:
+#   python3 -m pip install -e ".[hf]"
+#
+# The split slice and max_examples keep the example lightweight. Increase these
+# values later for larger experiments.
+
+dataset:
+  source_type: huggingface
+  name: Salesforce/wikitext
+  subset: wikitext-2-raw-v1
+  split: train[:1000]
+  text_field: text
+  val_fraction: 0.1
+  max_examples: 1000
+  max_characters: 200000
+  document_separator: "\n\n"
+  streaming: false
+
+tokenizer:
+  type: char
+
+batching:
+  batch_size: 4
+  block_size: 16
+
+runtime:
+  seed: 1234
+  device: auto

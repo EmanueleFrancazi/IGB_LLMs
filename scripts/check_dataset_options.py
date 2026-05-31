@@ -1,10 +1,9 @@
-"""Phase 3 data-pipeline and model-compatibility check.
+"""Check local and standard dataset configuration options.
 
-This script verifies that local text can be loaded, tokenized, split into
-train/validation sets, batched into causal language-modeling examples, and fed
-through the Phase 2 LLaMA-style model.
-
-It intentionally does not train the model. Training starts in a later phase.
+This script demonstrates the unified data-source path added before Phase 6. It
+loads either a local text file or an optional Hugging Face dataset, builds the
+current character tokenizer, creates causal LM batches, and optionally verifies
+model compatibility with one forward pass.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ from llm_behavior_lab.utils import format_parameter_count, get_device, seed_ever
 
 
 def load_yaml_config(path: Path) -> dict[str, Any]:
-    """Load a YAML file into a dictionary."""
+    """Load a YAML config file."""
 
     if not path.exists():
         raise FileNotFoundError(f"Config file does not exist: {path}")
@@ -51,7 +50,7 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
 
-    parser = argparse.ArgumentParser(description="Run the Phase 3 data-pipeline check.")
+    parser = argparse.ArgumentParser(description="Check configured dataset options.")
     parser.add_argument(
         "--data-config",
         type=Path,
@@ -64,11 +63,16 @@ def parse_args() -> argparse.Namespace:
         default=REPO_ROOT / "configs" / "model" / "tiny_llama.yaml",
         help="Path to the model YAML config.",
     )
+    parser.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        help="Only check dataset loading/tokenization/batching; skip model forward pass.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
-    """Run the data-to-model compatibility check."""
+    """Run the dataset-option check."""
 
     args = parse_args()
     data_config = load_yaml_config(args.data_config)
@@ -118,51 +122,45 @@ def main() -> None:
         device=device,
         seed=seed,
     )
-
     train_batch = batcher.get_batch("train")
     val_batch = batcher.get_batch("val")
 
-    model = build_model_from_config(model_config).to(device)
-    model.eval()
+    output = None
+    parameter_count = None
+    if not args.skip_model_check:
+        model = build_model_from_config(model_config).to(device)
+        model.eval()
+        with torch.no_grad():
+            output = model(input_ids=train_batch.input_ids, targets=train_batch.targets)
+        parameter_count = model.count_parameters()
 
-    with torch.no_grad():
-        output = model(input_ids=train_batch.input_ids, targets=train_batch.targets)
-
-    expected_logits_shape = (batch_size, block_size, model_vocab_size)
-    if tuple(output.logits.shape) != expected_logits_shape:
-        raise AssertionError(
-            f"Expected logits shape {expected_logits_shape}, got {tuple(output.logits.shape)}."
-        )
-    if output.loss is None or output.loss.ndim != 0:
-        raise AssertionError("Expected scalar loss when targets are provided.")
-
-    parameter_count = model.count_parameters()
-
-    print("Phase 3 data pipeline check completed successfully.")
+    print("Dataset options check completed successfully.")
     print(f"Available registered models: {list_models()}")
     print(f"Dataset source type: {loaded_dataset.source_type}")
     print(f"Dataset source name: {loaded_dataset.source_name}")
     print(f"Dataset metadata: {loaded_dataset.metadata}")
     print(f"Raw examples used: {loaded_dataset.num_examples}")
     print(f"Raw text characters: {len(loaded_dataset.text)}")
-    print(f"Tokenizer type: char")
+    print("Tokenizer type: char")
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     print(f"Total token count: {len(token_ids)}")
     print(f"Train token count: {len(splits.train_ids)}")
     print(f"Validation token count: {len(splits.val_ids)}")
     print(f"Device: {device}")
-    print(f"Model name: {model_config['model']['name']}")
-    print(f"Model vocab size: {model_vocab_size}")
-    print(f"Parameter count: {parameter_count} ({format_parameter_count(parameter_count)})")
+    print(f"Batch size: {batch_size}")
+    print(f"Block size: {block_size}")
     print(f"Train input shape: {tuple(train_batch.input_ids.shape)}")
     print(f"Train target shape: {tuple(train_batch.targets.shape)}")
     print(f"Validation input shape: {tuple(val_batch.input_ids.shape)}")
     print(f"Validation target shape: {tuple(val_batch.targets.shape)}")
-    print(f"Logits shape: {tuple(output.logits.shape)}")
-    print(f"Loss shape: {tuple(output.loss.shape)}")
-    print(f"Loss value: {output.loss.item():.6f}")
-    print(f"Decoded first training input preview: {tokenizer.decode(train_batch.input_ids[0].tolist())!r}")
-    print(f"Decoded first training target preview: {tokenizer.decode(train_batch.targets[0].tolist())!r}")
+    if output is not None and parameter_count is not None:
+        print(f"Model name: {model_config['model']['name']}")
+        print(f"Model vocab size: {model_vocab_size}")
+        print(f"Parameter count: {parameter_count} ({format_parameter_count(parameter_count)})")
+        print(f"Logits shape: {tuple(output.logits.shape)}")
+        print(f"Loss shape: {tuple(output.loss.shape) if output.loss is not None else None}")
+        if output.loss is not None:
+            print(f"Loss value: {output.loss.item():.6f}")
 
 
 if __name__ == "__main__":

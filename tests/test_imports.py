@@ -1,7 +1,7 @@
 """Basic import tests for the Phase 5 package skeleton."""
 
 from llm_behavior_lab import __version__
-from llm_behavior_lab.data import CharTokenizer, CausalLMBatcher
+from llm_behavior_lab.data import CharTokenizer, CausalLMBatcher, load_text_dataset_from_config
 from llm_behavior_lab.evaluation import (
     analyze_untrained_outputs,
     compute_per_layer_gradient_norms,
@@ -21,6 +21,7 @@ def test_package_imports() -> None:
     assert callable(seed_everything)
     assert CharTokenizer is not None
     assert CausalLMBatcher is not None
+    assert callable(load_text_dataset_from_config)
     assert callable(prepare_prompt_tensor)
     assert callable(generate_text)
     assert callable(logits_to_probabilities)
