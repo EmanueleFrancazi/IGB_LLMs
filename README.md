@@ -124,7 +124,7 @@ IGB_LLMs/
 | Path | Purpose |
 |---|---|
 | `configs/` | YAML files controlling model size, data source, batching, seed, and device. |
-| `data/raw/` | Small local corpus used for smoke tests, inference checks, and initialization analysis. |
+| `data/` | Local raw/downloaded datasets for smoke tests, inference checks, and initialization analysis.. See [`data/README.md`](data/README.md) for dataset-source details, config usage, and data-pipeline commands. |
 | `scripts/` | Runnable entry points for sanity checks, inference, and Phase 5 analysis. |
 | `src/llm_behavior_lab/models/` | Model interface, registry, and explicit LLaMA-style implementation. |
 | `src/llm_behavior_lab/data/` | Text loading, tokenization, splitting, and causal LM batching utilities. |
