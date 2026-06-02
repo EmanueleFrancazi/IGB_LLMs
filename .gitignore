@@ -1,6 +1,16 @@
 # Large or generated datasets should not be committed.
 # Keep dataset configs under configs/data/ tracked; store raw/downloaded data under data/.
-data/
+
+# Ignore all dataset contents by default.
+data/**
+
+# Re-include directories so Git can find allowed files inside them.
+!data/
+!data/**/
+
+# Keep Markdown documentation inside data/.
+!data/**/*.md
+
 
 # Experiment outputs and lightweight analysis artifacts.
 outputs/
