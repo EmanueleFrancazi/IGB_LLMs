@@ -13,6 +13,16 @@ At the current project stage, the source package includes:
 - evaluation utilities for untrained-model output analysis and gradient-norm diagnostics
 - shared utilities for device selection, parameter counting, and seeding
 
+Quick subfolder overview:
+
+| Path | Role |
+|---|---|
+| `src/llm_behavior_lab/models/` | Model interface, registry, and explicit LLaMA-style implementation. |
+| `src/llm_behavior_lab/data/` | Text loading, tokenization, splitting, and causal LM batching utilities. |
+| `src/llm_behavior_lab/inference/` | Prompt preparation, logits extraction, probability extraction, decoding, and generation. |
+| `src/llm_behavior_lab/evaluation/` | Output-distribution, token-frequency, untrained-analysis, and gradient-norm diagnostics. |
+| `src/llm_behavior_lab/utils/` | Shared helpers for seeds, device selection, and parameter counting. |
+
 ---
 
 ## Purpose of the `src/` folder
