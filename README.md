@@ -127,11 +127,6 @@ IGB_LLMs/
 | `data/` | Local raw/downloaded datasets for smoke tests, inference checks, and initialization analysis.. See [`data/README.md`](data/README.md) for dataset-source details, config usage, and data-pipeline commands. |
 | `scripts/` | Runnable entry points for sanity checks, inference, and Phase 5 analysis. |
 | `src/` | Reusable Python package code. See [`src/README.md`](src/README.md) for source-module navigation and extension guidance. |
-| `src/llm_behavior_lab/models/` | Model interface, registry, and explicit LLaMA-style implementation. |
-| `src/llm_behavior_lab/data/` | Text loading, tokenization, splitting, and causal LM batching utilities. |
-| `src/llm_behavior_lab/inference/` | Prompt preparation, logits extraction, probability extraction, decoding, and generation. |
-| `src/llm_behavior_lab/evaluation/` | Output-distribution, token-frequency, untrained-analysis, and gradient-norm diagnostics. |
-| `src/llm_behavior_lab/utils/` | Shared helpers for seeds, device selection, and parameter counting. |
 | `tests/` | Lightweight tests covering imports, model shapes, data pipeline, inference, evaluation, and gradient norms. See [`tests/README.md`](tests/README.md) for detailed test-suite guidance. |
 
 
