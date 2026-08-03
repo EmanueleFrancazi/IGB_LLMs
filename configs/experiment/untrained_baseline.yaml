@@ -1,0 +1,25 @@
+# Structured persistence settings for the Phase 5 initialization analysis.
+
+experiment:
+  name: untrained_baseline
+  output_dir: outputs
+  phase: phase5_untrained_analysis
+  seed: 1234
+  notes: null
+  tags:
+    - initialization
+    - baseline
+    - phase5
+
+logging:
+  log_every_steps: 10
+  evaluate_every_steps: 100
+  flush_every_records: 1
+  training_metrics_filename: training_metrics.jsonl
+  evaluation_metrics_filename: evaluation_metrics.jsonl
+
+checkpointing:
+  enabled: true
+  save_every_steps: 500
+  save_latest_pointer: true
+  filename_width: 6

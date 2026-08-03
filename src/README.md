@@ -90,6 +90,15 @@ src/llm_behavior_lab/
     token_frequency.py
     untrained_analysis.py
 
+  experiment/
+    __init__.py
+    arrays.py
+    checkpoints.py
+    config.py
+    metrics.py
+    run.py
+    serialization.py
+
   inference/
     __init__.py
     generation.py
@@ -246,6 +255,118 @@ The current model implementation includes:
 - `scripts/check_data_pipeline.py`
 - `scripts/run_inference.py`
 - `scripts/analyze_untrained_model.py`
+
+---
+
+## `llm_behavior_lab.experiment`
+
+The `experiment` package implements Phase 6 local persistence. It is intentionally independent of training loops so initialization analysis, future pre-training, and future fine-tuning can share one run format.
+
+Current files:
+
+```text
+src/llm_behavior_lab/experiment/
+  __init__.py
+  arrays.py
+  checkpoints.py
+  config.py
+  metrics.py
+  run.py
+  serialization.py
+```
+
+### Main responsibilities
+
+- validate experiment/logging/checkpoint YAML settings
+- create collision-safe experiment runs
+- write immutable metadata and config snapshots
+- append scalar JSONL records
+- save compressed array artifacts
+- save/load/discover local PyTorch checkpoints
+- capture and optionally restore RNG state
+- expose predictable paths to analyses and logs
+
+### Important objects and functions
+
+```text
+ExperimentSettings
+LoggingSettings
+CheckpointSettings
+experiment_settings_from_config
+ExperimentRun
+RunPaths
+MetricLogger
+ArrayMetricStore
+ArrayArtifact
+CheckpointManager
+CheckpointInfo
+generate_run_id
+collect_environment_info
+```
+
+### File-level responsibilities
+
+| File | Responsibility |
+|---|---|
+| `experiment/config.py` | Validated settings and future logging/checkpoint cadence. |
+| `experiment/run.py` | Run creation, metadata, config snapshots, analysis JSON. |
+| `experiment/metrics.py` | Append-only scalar JSONL records. |
+| `experiment/arrays.py` | Compressed `.npz` array artifacts and reload. |
+| `experiment/checkpoints.py` | Atomic checkpoint save, latest discovery, load/restore. |
+| `experiment/serialization.py` | Atomic JSON/YAML/text writes and value normalization. |
+| `experiment/__init__.py` | Public Phase 6 API. |
+
+### Runtime directory contract
+
+```text
+outputs/<experiment-name>/<run-id>/
+  metadata.json
+  config/
+  metrics/
+    training_metrics.jsonl
+    evaluation_metrics.jsonl
+    array_metrics/
+  checkpoints/
+    checkpoint_step_000000.pt
+    latest.json
+  analyses/
+  logs/
+```
+
+`ExperimentRun.create` uses exclusive directory creation. Existing runs are not silently resumed or overwritten.
+
+### Metric contract
+
+`MetricLogger.log(...)` requires:
+
+- non-negative `step`
+- non-empty `stage`
+- a non-empty mapping of scalar metrics
+
+Array/list/dictionary values are rejected from the scalar metric dictionary. Save them through `ArrayMetricStore` and place the returned relative path in `artifacts`.
+
+### Checkpoint contract
+
+A checkpoint contains:
+
+```text
+format_version
+created_at
+global_step
+model_state_dict
+model_config
+optimizer_state_dict
+scheduler_state_dict
+rng_state
+additional_state
+```
+
+Only `format_version`, `global_step`, and `model_state_dict` are required for validation. Optimizer/scheduler fields are optional so Phase 6 can save an initialized model while Phase 7 can save resumable training state.
+
+### Scripts using this package
+
+- `scripts/check_experiment_tracking.py`
+- `scripts/analyze_untrained_model.py` when `--persist-run` is enabled
 
 ---
 
@@ -540,6 +661,34 @@ optional evaluation.compute_per_layer_gradient_norms
 
 ---
 
+### Structured Phase 5 persistence
+
+```text
+analyze_untrained_model.py --persist-run
+  -> load experiment YAML
+  -> experiment_settings_from_config(...)
+  -> ExperimentRun.create(...)
+  -> snapshot model/data/experiment configs
+  -> compute existing Phase 5 metrics
+  -> ArrayMetricStore.save(...)
+  -> MetricLogger.log(...)
+  -> CheckpointManager.save(step=0)
+  -> save analysis JSON
+```
+
+### Phase 6 smoke-test round trip
+
+```text
+check_experiment_tracking.py
+  -> create run
+  -> append training/evaluation JSONL
+  -> save/load .npz array artifact
+  -> save initialized checkpoint
+  -> discover latest checkpoint
+  -> restore into compatible CPU model
+  -> compare every state-dict tensor
+```
+
 ## Relationship with other folders
 
 ### `scripts/`
@@ -675,15 +824,15 @@ gradient_norms.py      gradient-stability metrics
 
 Create a new file if the metric category becomes large enough.
 
-### Add structured logging
+### Extend experiment logging
 
-Likely future location:
+Current location:
 
 ```text
-src/llm_behavior_lab/logging/
+src/llm_behavior_lab/experiment/
 ```
 
-This should include reusable experiment directory creation, metric writers, metadata saving, and config snapshots. The scripts should call into this package rather than implementing logging directly.
+Add new scalar channels through `MetricLogger`, new vectors through `ArrayMetricStore`, and new structured summaries under `ExperimentRun.paths.analyses_dir`. Keep training loops outside this package; Phase 7 should call these interfaces rather than replace them.
 
 ### Add training loops
 
@@ -711,16 +860,15 @@ src/llm_behavior_lab/training/
 
 The exact split can be decided when supervised fine-tuning is implemented.
 
-### Add checkpoint loading/evaluation
+### Extend checkpoint loading/evaluation
 
-Likely future locations:
+Checkpoint I/O now lives in:
 
 ```text
-src/llm_behavior_lab/checkpointing/
-src/llm_behavior_lab/evaluation/
+src/llm_behavior_lab/experiment/checkpoints.py
 ```
 
-Checkpoint I/O should be separate from metric computation so evaluation functions remain reusable.
+Evaluation code should continue to receive already-built models and tensors. Scripts or future training code should use `CheckpointManager` to restore state before calling evaluation functions.
 
 ---
 
@@ -855,6 +1003,14 @@ src/llm_behavior_lab/utils/
 Current helpers cover device selection, parameter counting, and seeding.
 
 ---
+
+### Where do I change experiment directories, metrics, or checkpoints?
+
+- run layout and metadata: `experiment/run.py`
+- scalar JSONL records: `experiment/metrics.py`
+- array artifacts: `experiment/arrays.py`
+- checkpoint format and restore behavior: `experiment/checkpoints.py`
+- YAML settings: `experiment/config.py`
 
 ## Testing source changes
 

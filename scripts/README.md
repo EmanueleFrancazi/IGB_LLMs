@@ -20,6 +20,8 @@ At the current project stage, scripts are used to:
 - run prompt-based inference on the untrained model
 - inspect output behavior at random initialization
 - optionally compute per-layer gradient-norm diagnostics
+- optionally persist Phase 5 analyses as structured experiment runs
+- validate Phase 6 metric, array, and checkpoint round trips
 
 The scripts do not define the core model, data, inference, or evaluation logic. Instead, they call reusable modules from:
 
@@ -28,6 +30,7 @@ src/llm_behavior_lab/models/
 src/llm_behavior_lab/data/
 src/llm_behavior_lab/inference/
 src/llm_behavior_lab/evaluation/
+src/llm_behavior_lab/experiment/
 src/llm_behavior_lab/utils/
 ```
 
@@ -45,6 +48,7 @@ scripts/
   check_data_pipeline.py
   run_inference.py
   analyze_untrained_model.py
+  check_experiment_tracking.py
 ```
 
 | Script | Type | Phase / feature | Purpose |
@@ -52,7 +56,8 @@ scripts/
 | `smoke_test_llama.py` | Smoke test | Phase 2 model integration | Builds the tiny LLaMA-style model and runs a dummy forward pass. |
 | `check_data_pipeline.py` | Sanity check | Phase 3 data pipeline | Loads the tiny local corpus, tokenizes it, creates train/validation batches, and checks model compatibility. |
 | `run_inference.py` | Inference check | Phase 4 inference utilities | Encodes a prompt, extracts logits, prints top-k next-token predictions, and generates a short continuation. |
-| `analyze_untrained_model.py` | Analysis script | Phase 5 untrained-model analysis | Computes initialization-time output statistics and optionally per-layer gradient norms. |
+| `analyze_untrained_model.py` | Analysis script | Phase 5 + Phase 6 integration | Computes initialization metrics and optionally persists a structured run. |
+| `check_experiment_tracking.py` | Smoke test | Phase 6 persistence | Creates a run, logs metrics/arrays, saves a checkpoint, restores it, and verifies parameter equality. |
 
 ---
 
@@ -94,7 +99,16 @@ When first checking the repository, run the scripts in this order:
      --compute-grad-norms
    ```
 
-This order follows the project development sequence: model first, data second, inference third, and analysis after the basic pieces are confirmed to work.
+
+6. **Phase 6 experiment-persistence smoke test**
+   ```bash
+   python3 scripts/check_experiment_tracking.py \
+     --model-config configs/model/tiny_llama.yaml \
+     --data-config configs/data/tiny_text.yaml \
+     --experiment-config configs/experiment/phase6_smoke.yaml
+   ```
+
+This order follows the project development sequence: model first, data second, inference third, analysis fourth, and persistence after the reusable metrics are available.
 
 ---
 
@@ -174,6 +188,28 @@ python3 scripts/smoke_test_llama.py \
   --config configs/model/tiny_llama.yaml \
   --batch-size 2 \
   --sequence-length 16
+```
+
+
+Persist the analysis as a structured run:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml \
+  --experiment-config configs/experiment/untrained_baseline.yaml \
+  --persist-run
+```
+
+Persist output and gradient diagnostics together:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml \
+  --experiment-config configs/experiment/untrained_baseline.yaml \
+  --persist-run \
+  --compute-grad-norms
 ```
 
 ### Expected successful output
@@ -488,7 +524,12 @@ Optional arguments:
 | `--compute-grad-norms` | Enables per-layer squared L2 gradient-norm diagnostic. |
 | `--grad-norm-num-batches` | Number of batches for gradient-norm computation. Default: `1`. |
 | `--grad-norm-eps` | Stabilizer for `log(g_l + eps)`. Default: `1e-12`. |
-| `--grad-norm-output-dir` | Directory for gradient-norm JSON/CSV outputs. |
+| `--grad-norm-output-dir` | Legacy standalone gradient JSON/CSV directory when `--persist-run` is not used. |
+| `--persist-run` | Creates a structured Phase 6 experiment run. |
+| `--experiment-config` | Experiment config; defaults to `configs/experiment/untrained_baseline.yaml`. |
+| `--run-id` | Optional explicit run ID; collisions fail instead of overwriting. |
+| `--output-dir` | Optional output-root override. |
+| `--notes` | Optional run notes override. |
 
 ### Command
 
@@ -588,7 +629,7 @@ outputs/phase5_gradient_norms/
   gradient_norms.csv
 ```
 
-These files are lightweight analysis artifacts. They are not full experiment logs. Structured logging belongs to a later phase.
+Without `--persist-run`, these files remain lightweight standalone artifacts. With `--persist-run`, Phase 6 stores scalar summaries, arrays, analysis JSON, configs, metadata, and an initialized checkpoint inside one run directory.
 
 ### Common failure modes
 
@@ -599,6 +640,85 @@ These files are lightweight analysis artifacts. They are not full experiment log
 | Block size mismatch | Data block size exceeds model max sequence length | Adjust `configs/data/tiny_text.yaml` or `configs/model/tiny_llama.yaml`. |
 | Gradient diagnostic is slower | Backward pass is enabled | This is expected with `--compute-grad-norms`. |
 | CUDA warning during gradient norms | PyTorch detects CUDA but driver is unavailable or too old | Treat as useful environment information; run on CPU or fix GPU environment. |
+
+---
+
+## `check_experiment_tracking.py`
+
+### Purpose
+
+`check_experiment_tracking.py` validates the Phase 6 persistence lifecycle without performing training.
+
+It demonstrates:
+
+1. experiment settings loading
+2. collision-safe run-directory creation
+3. metadata and config snapshots
+4. training/evaluation JSONL appends
+5. compressed `.npz` array saving and loading
+6. initialized model checkpoint saving
+7. `latest.json` discovery
+8. CPU checkpoint restoration into a new model
+9. exact parameter equality after restoration
+
+### Project phase
+
+Phase 6: experiment logging and checkpoint infrastructure.
+
+### Main modules used
+
+```text
+llm_behavior_lab.experiment.ExperimentRun
+llm_behavior_lab.experiment.MetricLogger
+llm_behavior_lab.experiment.ArrayMetricStore
+llm_behavior_lab.experiment.CheckpointManager
+llm_behavior_lab.models.build_model_from_config
+```
+
+### Command
+
+```bash
+python3 scripts/check_experiment_tracking.py \
+  --model-config configs/model/tiny_llama.yaml \
+  --data-config configs/data/tiny_text.yaml \
+  --experiment-config configs/experiment/phase6_smoke.yaml
+```
+
+Use a disposable output root during local testing:
+
+```bash
+python3 scripts/check_experiment_tracking.py \
+  --output-dir /tmp/igb_phase6_outputs \
+  --run-id smoke_run
+```
+
+### Expected successful output
+
+```text
+Phase 6 experiment tracking check completed successfully.
+Run directory: ...
+Metadata path: .../metadata.json
+Training metrics: .../training_metrics.jsonl
+Evaluation metrics: .../evaluation_metrics.jsonl
+Array artifact: .../.npz
+Checkpoint: .../checkpoint_step_000000.pt
+Latest checkpoint: .../checkpoint_step_000000.pt
+Restored global step: 0
+Checkpoint parameter round-trip: verified
+```
+
+### Side effects
+
+The script writes a complete run under `outputs/<experiment-name>/<run-id>/`. `outputs/` is ignored by Git. Reusing an explicit `--run-id` raises `FileExistsError`; delete the test directory or choose a new ID.
+
+### Common failure modes
+
+| Symptom | Cause | Resolution |
+|---|---|---|
+| Run already exists | Explicit run ID collision | Choose a new `--run-id` or remove the disposable run. |
+| Checkpoint missing | Save failed or directory changed | Inspect `checkpoints/` and `latest.json`. |
+| State-dict mismatch | Model config differs from checkpoint | Restore into a model built from the snapshotted model config. |
+| Permission error | Output root is not writable | Use `--output-dir` with a writable path. |
 
 ---
 
@@ -688,6 +808,7 @@ The reusable implementation lives in:
 | `src/llm_behavior_lab/data/` | Local text loading, tokenization, splitting, and causal LM batching. |
 | `src/llm_behavior_lab/inference/` | Prompt preparation, logits extraction, probabilities, decoding, and generation. |
 | `src/llm_behavior_lab/evaluation/` | Output statistics, token-frequency comparison, untrained analysis, and gradient norms. |
+| `src/llm_behavior_lab/experiment/` | Run creation, metadata, JSONL metrics, array artifacts, and checkpoints. |
 | `src/llm_behavior_lab/utils/` | Seeding, device selection, and parameter formatting. |
 
 This structure allows later phases to add training and checkpointed evaluation without duplicating script logic.
@@ -703,7 +824,8 @@ Most scripts only print diagnostics to the terminal.
 | `smoke_test_llama.py` | Yes | No | Synthetic model smoke test. |
 | `check_data_pipeline.py` | Yes | No | Reads local text file. |
 | `run_inference.py` | Yes | No | Generated text is printed only. |
-| `analyze_untrained_model.py` | Yes | Only with `--compute-grad-norms` | Saves gradient JSON/CSV when gradient norms are enabled. |
+| `analyze_untrained_model.py` | Yes | Optional | Standalone gradient files or a full structured run with `--persist-run`. |
+| `check_experiment_tracking.py` | Yes | Yes | Creates a Phase 6 smoke-test run and checkpoint. |
 
 Generated outputs currently go under:
 
@@ -733,6 +855,9 @@ The tests cover:
 - inference utilities
 - output-analysis utilities
 - gradient-norm diagnostics
+- experiment-run creation and collision safety
+- JSONL metrics and array artifact round trips
+- checkpoint save/load, latest discovery, and CPU portability
 
 The scripts themselves are intended as human-readable execution checks. If a script fails, first check:
 
@@ -750,7 +875,6 @@ Likely future scripts include:
 
 - `train_pretrain.py` for small-scale pre-training
 - `evaluate_checkpoint.py` for checkpoint-based evaluation
-- `run_experiment.py` for logging-enabled experiment execution
 - `analyze_training_dynamics.py` for comparing metrics over checkpoints
 - `finetune.py` for supervised fine-tuning
 - `compare_models.py` for model-family comparisons

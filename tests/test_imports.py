@@ -1,4 +1,4 @@
-"""Basic import tests for the Phase 5 package skeleton."""
+"""Basic import tests for the Phase 6 package skeleton."""
 
 from llm_behavior_lab import __version__
 from llm_behavior_lab.data import CharTokenizer, CausalLMBatcher
@@ -7,6 +7,7 @@ from llm_behavior_lab.evaluation import (
     compute_per_layer_gradient_norms,
     logits_to_probabilities,
 )
+from llm_behavior_lab.experiment import CheckpointManager, ExperimentRun, MetricLogger
 from llm_behavior_lab.inference import generate_text, prepare_prompt_tensor
 from llm_behavior_lab.models import list_models
 from llm_behavior_lab.utils import get_device, seed_everything
@@ -25,4 +26,7 @@ def test_package_imports() -> None:
     assert callable(generate_text)
     assert callable(logits_to_probabilities)
     assert callable(analyze_untrained_outputs)
+    assert ExperimentRun is not None
+    assert MetricLogger is not None
+    assert CheckpointManager is not None
     assert callable(compute_per_layer_gradient_norms)

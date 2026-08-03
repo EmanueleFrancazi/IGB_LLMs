@@ -12,6 +12,7 @@ At the current stage, the test suite covers:
 - inference utilities
 - Phase 5 output-analysis utilities
 - Phase 5 gradient-norm diagnostics
+- Phase 6 run creation, JSONL metrics, array artifacts, and checkpoint round trips
 
 The tests are intentionally lightweight. They use small synthetic tensors and tiny text snippets rather than large datasets or expensive training runs.
 
@@ -54,6 +55,7 @@ Current files:
 tests/
   test_data_pipeline.py
   test_evaluation.py
+  test_experiment_tracking.py
   test_gradient_norms.py
   test_imports.py
   test_inference.py
@@ -67,6 +69,7 @@ tests/
 | `test_data_pipeline.py` | Character tokenizer, train/validation split, causal LM batcher | Unit tests | `data/` |
 | `test_inference.py` | Prompt preparation, logits/probabilities, top-k predictions, decoding, generation | Unit/integration tests | `inference/` |
 | `test_evaluation.py` | Output statistics, empirical frequencies, probability gaps, untrained analysis | Unit tests | `evaluation/` |
+| `test_experiment_tracking.py` | Run creation, JSONL metrics, arrays, checkpoints, latest discovery | Filesystem/unit/integration tests | `experiment/` |
 | `test_gradient_norms.py` | Per-layer gradient trend fit, gradient-norm computation, JSON/CSV saving | Unit/integration tests | `evaluation/gradient_norms.py` |
 
 ---
@@ -265,6 +268,43 @@ This test intentionally exercises `loss.backward()`. On machines with a CUDA-ena
 
 ---
 
+## Experiment-persistence tests
+
+File:
+
+```text
+tests/test_experiment_tracking.py
+```
+
+Purpose:
+
+- creates run directories under pytest temporary directories
+- verifies explicit run-ID collisions fail instead of overwriting
+- reads immutable metadata and YAML snapshots
+- appends and reloads scalar JSONL records
+- rejects arrays embedded directly in scalar logs
+- saves and reloads `.npz` diagnostics
+- saves model, optimizer, scheduler, RNG, and additional state
+- discovers the latest checkpoint
+- restores checkpoints onto CPU through `map_location`
+- verifies restored parameters match exactly
+- checks malformed and missing checkpoints produce informative errors
+
+Related source modules:
+
+```text
+src/llm_behavior_lab/experiment/config.py
+src/llm_behavior_lab/experiment/run.py
+src/llm_behavior_lab/experiment/metrics.py
+src/llm_behavior_lab/experiment/arrays.py
+src/llm_behavior_lab/experiment/checkpoints.py
+src/llm_behavior_lab/experiment/serialization.py
+```
+
+All filesystem writes use pytest `tmp_path`. No persistent artifacts are written into the repository, no internet access is used, and no GPU is required.
+
+---
+
 ## How to run tests
 
 Run the full test suite from the repository root:
@@ -297,6 +337,12 @@ This means pytest automatically:
 ---
 
 ## Run individual test files
+
+Run only Phase 6 tests:
+
+```bash
+python3 -m pytest tests/test_experiment_tracking.py
+```
 
 Run import tests:
 
@@ -353,8 +399,8 @@ python3 -m pytest -v
 A successful full run should look like:
 
 ```text
-....................                                                     [100%]
-20 passed in ...
+.............................                                            [100%]
+29 passed in ...
 ```
 
 The exact number of dots and runtime may change as tests are added.
