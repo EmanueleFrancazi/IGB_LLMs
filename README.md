@@ -17,7 +17,9 @@ The project avoids treating models as black-box imports. Model components are im
 
 ## Current phase
 
-The repository is currently in **Phase 5: Baseline Untrained-Model Analysis**, refined with an optional **per-layer gradient-stability diagnostic**.
+The repository is currently in **Phase 6: Experiment Persistence and Checkpointing**.
+
+Phase 6 builds directly on the Phase 5 initialization analysis, which remains available unchanged. The analysis can now optionally record a complete, reproducible experiment run instead of printing only.
 
 Previous phases added:
 
@@ -34,7 +36,7 @@ Previous phases added:
 - a data-to-model compatibility script
 - inference utilities for prompt encoding, logits inspection, top-k predictions, greedy decoding, sampling, and short generation
 
-Phase 5 adds:
+Phase 5 added:
 
 - output-distribution statistics for the untrained model
 - entropy and probability-concentration summaries
@@ -51,6 +53,22 @@ Phase 5 adds:
 
 The model is still untrained. Phase 5 does **not** measure language quality. It establishes reproducible baseline signals for how the randomly initialized model behaves before any optimization.
 
+Phase 6 adds:
+
+- structured experiment runs created under an output root
+- collision-safe run identifiers, so an existing run is never silently overwritten
+- immutable run metadata recording phase, seed, tags, device, model, dataset, Git commit, and environment
+- YAML snapshots of the model, data, and experiment configs actually used
+- append-only scalar metric logging in JSON Lines format
+- array-valued diagnostics stored as compressed NumPy archives and referenced from the metric records
+- model checkpoint saving and loading, including an initialized step-zero checkpoint
+- latest-checkpoint discovery through a lightweight pointer file
+- checkpoint restoration that defaults to CPU device mapping
+- optional structured persistence for the initialization analysis through `--persist-run`
+- an experiment-tracking smoke-test script
+
+Phase 6 stores results; it does not train. Optimizer, scheduler, and training-loop work begins in Phase 7.
+
 ## Repository structure
 
 ```text
@@ -60,6 +78,9 @@ IGB_LLMs/
       tiny_text.yaml
     model/
       tiny_llama.yaml
+    experiment/
+      phase6_smoke.yaml
+      untrained_baseline.yaml
 
   data/
     raw/
@@ -70,6 +91,7 @@ IGB_LLMs/
     check_data_pipeline.py
     run_inference.py
     analyze_untrained_model.py
+    check_experiment_tracking.py
 
   src/
     llm_behavior_lab/
@@ -87,6 +109,15 @@ IGB_LLMs/
         output_stats.py
         token_frequency.py
         untrained_analysis.py
+
+      experiment/
+        __init__.py
+        arrays.py
+        checkpoints.py
+        config.py
+        metrics.py
+        run.py
+        serialization.py
 
       inference/
         __init__.py
@@ -110,10 +141,12 @@ IGB_LLMs/
   tests/
     test_data_pipeline.py
     test_evaluation.py
+    test_experiment_tracking.py
     test_gradient_norms.py
     test_imports.py
     test_inference.py
     test_llama_shapes.py
+    test_persisted_analysis_run.py
 
   pyproject.toml
   README.md
@@ -123,32 +156,38 @@ IGB_LLMs/
 
 | Path | Purpose |
 |---|---|
-| `configs/` | YAML files controlling model size, data source, batching, seed, and device. |
+| `configs/` | YAML files controlling model size, data source, batching, seed, device, and experiment persistence. |
 | `data/` | Local raw/downloaded datasets for smoke tests, inference checks, and initialization analysis.. See [`data/README.md`](data/README.md) for dataset-source details, config usage, and data-pipeline commands. |
-| `scripts/` | Runnable entry points for sanity checks, inference, and Phase 5 analysis. |
+| `scripts/` | Runnable entry points for sanity checks, inference, initialization analysis, and experiment-tracking checks. See [`scripts/README.md`](scripts/README.md) for the script-by-script guide, options, and expected outputs. |
 | `src/` | Reusable Python package code. See [`src/README.md`](src/README.md) for source-module navigation and extension guidance. |
-| `tests/` | Lightweight tests covering imports, model shapes, data pipeline, inference, evaluation, and gradient norms. See [`tests/README.md`](tests/README.md) for detailed test-suite guidance. |
+| `tests/` | Lightweight tests covering imports, model shapes, data pipeline, inference, evaluation, gradient norms, experiment persistence, and the persisted-analysis workflow. See [`tests/README.md`](tests/README.md) for detailed test-suite guidance. |
 
 
 ## Git hygiene for datasets and experiments
 
-The repository includes a `.gitignore` file that ignores the full `data/` directory:
+The repository ignores dataset contents under `data/` while keeping Markdown documentation tracked:
 
 ```text
-data/
+data/**
+!data/
+!data/**/
+!data/**/*.md
 ```
 
-This is intentional now that the project can use larger local or downloaded language-modeling datasets. Dataset **configs** remain tracked under `configs/data/`, while raw corpora, downloaded files, and generated dataset artifacts should live under `data/` and stay out of Git.
+The `!data/` and `!data/**/` lines re-include directories so Git can still see allowed files inside them, and `!data/**/*.md` is why [`data/README.md`](data/README.md) remains tracked.
 
-Important Git detail: `.gitignore` only prevents new untracked files from being added. If `data/raw/tiny_corpus.txt` or any other file under `data/` is already tracked in your repository history, Git will keep tracking it until you remove it from the index with:
+Two files under `data/` are tracked on purpose:
 
-```bash
-git rm -r --cached data
-git add .gitignore configs/data README.md
-git commit -m "Ignore local dataset directory"
-```
+| Path | Why it is tracked |
+|---|---|
+| `data/README.md` | The data-subsystem guide, kept by the Markdown re-include rule. |
+| `data/raw/tiny_corpus.txt` | The small offline fixture used by the default configs, the script examples, and the test suite. It is deliberately committed so the repository stays runnable and testable without any download. |
 
-After that, keep or recreate local datasets on disk as needed, but do not commit them.
+Anything else you place under `data/` is ignored by default, so larger local or downloaded corpora stay out of Git without further configuration. Dataset **configs** remain tracked under `configs/data/`.
+
+Do not bulk-untrack the directory with `git rm -r --cached data`: that would remove both the tiny corpus and this documentation from the repository, and the ignore rules would then prevent the corpus from being added back.
+
+Generated experiment output is handled separately. The `.gitignore` file also ignores `outputs/`, `experiments/`, `runs/`, and `wandb/`, so experiment runs created by the commands below never enter Git.
 
 ## File/function map
 
@@ -237,6 +276,28 @@ targets   = tokens[t + 1 : t + block_size + 1]
   - Saves gradient results to JSON and CSV.
   - Uses forward hooks on decoder block outputs, so the model implementation does not need to be modified.
 
+### Experiment persistence files
+
+The `experiment` package implements Phase 6 local persistence. See [`src/README.md`](src/README.md) for the runtime directory, metric, and checkpoint contracts, the full list of public symbols, and extension guidance.
+
+- `src/llm_behavior_lab/experiment/config.py`
+  - Validates the experiment, logging, and checkpoint settings loaded from a YAML config.
+
+- `src/llm_behavior_lab/experiment/run.py`
+  - Creates a run directory, writes immutable metadata, saves config snapshots, and stores structured analysis JSON.
+
+- `src/llm_behavior_lab/experiment/metrics.py`
+  - Appends and reads step-indexed scalar metric records in JSON Lines format.
+
+- `src/llm_behavior_lab/experiment/arrays.py`
+  - Saves and reloads array-valued diagnostics as compressed `.npz` artifacts.
+
+- `src/llm_behavior_lab/experiment/checkpoints.py`
+  - Saves, discovers, validates, and restores model checkpoints, including the latest-checkpoint pointer.
+
+- `src/llm_behavior_lab/experiment/serialization.py`
+  - Shared atomic JSON, YAML, and text writers plus value normalization.
+
 ### Utility files
 
 - `src/llm_behavior_lab/utils/seed.py`
@@ -255,7 +316,8 @@ targets   = tokens[t + 1 : t + block_size + 1]
 | `scripts/smoke_test_llama.py` | Check that the LLaMA-style model builds and runs on dummy token IDs. | `models.registry`, `models.llama`, `utils.device`, `utils.seed`, `utils.params` |
 | `scripts/check_data_pipeline.py` | Check that local text becomes causal LM batches compatible with the model. | `data.text_dataset`, `data.tokenizer`, `data.dataloader`, `models.registry` |
 | `scripts/run_inference.py` | Check prompt encoding, logits extraction, top-k next-token inspection, and short generation. | `data.tokenizer`, `data.text_dataset`, `inference.generation`, `models.registry` |
-| `scripts/analyze_untrained_model.py` | Analyze initialization-time output behavior and optionally gradient stability. | `data.*`, `models.registry`, `evaluation.output_stats`, `evaluation.token_frequency`, `evaluation.untrained_analysis`, `evaluation.gradient_norms` |
+| `scripts/analyze_untrained_model.py` | Analyze initialization-time output behavior, optionally gradient stability, and optionally persist a structured run. | `data.*`, `models.registry`, `evaluation.output_stats`, `evaluation.token_frequency`, `evaluation.untrained_analysis`, `evaluation.gradient_norms`, `experiment.run`, `experiment.config` |
+| `scripts/check_experiment_tracking.py` | Create a run, log metrics and arrays, save a checkpoint, rediscover it, and restore it into a second model. | `experiment.run`, `experiment.config`, `experiment.metrics`, `experiment.arrays`, `experiment.checkpoints`, `models.registry` |
 
 ## Current analysis capabilities
 
@@ -525,7 +587,7 @@ The CSV file contains one row per layer:
 layer_index,squared_l2_norm,log_squared_l2_norm
 ```
 
-This is intentionally lightweight. Full experiment-directory management and structured logging are deferred to Phase 6.
+This standalone path is intentionally lightweight and remains the default. When `--persist-run` is also supplied, the standalone files are not written; the same gradient results are stored inside a structured experiment run instead, as described in [Experiment run outputs](#experiment-run-outputs).
 
 ## Common debugging paths
 
@@ -698,6 +760,117 @@ python3 scripts/analyze_untrained_model.py \
   --grad-norm-output-dir outputs/phase5_gradient_norms
 ```
 
+## Run the Phase 6 persisted initialization analysis
+
+The Phase 5 analysis can record a complete experiment run instead of printing only. Add `--persist-run` and select an experiment config:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml \
+  --experiment-config configs/experiment/untrained_baseline.yaml \
+  --persist-run
+```
+
+Gradient diagnostics can be persisted in the same run:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml \
+  --experiment-config configs/experiment/untrained_baseline.yaml \
+  --persist-run \
+  --compute-grad-norms
+```
+
+The script prints the full Phase 5 report first, then the run directory, the metadata path, the evaluation-metrics path, and the path of the initialized checkpoint.
+
+Additional persistence options:
+
+| Option | Meaning |
+|---|---|
+| `--experiment-config` | Experiment persistence config. Default: `configs/experiment/untrained_baseline.yaml`. |
+| `--run-id` | Explicit run identifier. An existing run is never overwritten; a collision raises an error. |
+| `--output-dir` | Output root override. Default comes from `experiment.output_dir` in the experiment config. |
+| `--notes` | Free-text note stored in the run metadata. |
+
+To keep a disposable run out of the default `outputs/` tree, pass an explicit output root:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/tiny_text.yaml \
+  --model-config configs/model/tiny_llama.yaml \
+  --experiment-config configs/experiment/untrained_baseline.yaml \
+  --persist-run \
+  --output-dir /tmp/llm_behavior_lab_runs
+```
+
+See [`scripts/README.md`](scripts/README.md) for the complete option reference and common failure modes.
+
+## Run the Phase 6 experiment-tracking smoke test
+
+This script exercises the persistence layer end to end without any analysis: it creates a run, snapshots configs, logs a scalar record and an array artifact, saves a checkpoint, rediscovers it, restores it into a second freshly built model, and verifies that every restored parameter matches.
+
+```bash
+python3 scripts/check_experiment_tracking.py \
+  --model-config configs/model/tiny_llama.yaml \
+  --data-config configs/data/tiny_text.yaml \
+  --experiment-config configs/experiment/phase6_smoke.yaml
+```
+
+The script prints the run directory, the config snapshot paths, the metric-file paths, the array artifact, the saved and rediscovered checkpoint paths, the restored global step, and a confirmation that the checkpoint parameter round trip succeeded. It raises an error instead of printing that confirmation if any check fails.
+
+Use `--output-dir` and `--run-id` to place a disposable run outside the default output root:
+
+```bash
+python3 scripts/check_experiment_tracking.py \
+  --output-dir /tmp/llm_behavior_lab_runs \
+  --run-id smoke_run
+```
+
+## Experiment run outputs
+
+A persisted run is a self-contained directory under `<output_dir>/<experiment-name>/<run-id>/`:
+
+```text
+outputs/
+  untrained_baseline/
+    <timestamp>_<suffix>/
+      metadata.json
+      config/
+        model_config.yaml
+        data_config.yaml
+        experiment_config.yaml
+      metrics/
+        training_metrics.jsonl
+        evaluation_metrics.jsonl
+        array_metrics/
+          *.npz
+      checkpoints/
+        checkpoint_step_000000.pt
+        latest.json
+      analyses/
+        untrained_analysis.json
+        gradient_norm_analysis.json
+      logs/
+```
+
+What each part holds:
+
+| Path | Contents |
+|---|---|
+| `metadata.json` | Immutable run record: experiment name, run ID, creation time, phase, seed, tags, Git commit when available, and environment information. |
+| `config/` | YAML snapshots of the model, data, and experiment configs actually used by the run. |
+| `metrics/*.jsonl` | Append-only scalar metric records, one JSON object per line, each carrying step, stage, split, checkpoint reference, and artifact references. |
+| `metrics/array_metrics/` | Compressed NumPy archives for vector-valued diagnostics such as token distributions and per-layer gradient norms. |
+| `checkpoints/` | Model checkpoints plus `latest.json`, a small pointer used for latest-checkpoint discovery. |
+| `analyses/` | Structured JSON summaries of the analysis results. |
+| `logs/` | Reserved for run logs. |
+
+Run identifiers are generated from a UTC timestamp plus a random suffix, so they sort chronologically and do not collide. Run directories are created exclusively: an existing run is never silently resumed or overwritten. Checkpoints are loaded with CPU device mapping by default, so a run saved on one machine can be inspected on another.
+
+Output roots such as `outputs/` are ignored by Git. For the metric schema, checkpoint payload fields, and the complete persistence API, see [`src/README.md`](src/README.md).
+
 ## Run tests
 
 ```bash
@@ -706,53 +879,56 @@ python3 -m pytest
 
 Successful output should show all tests passing.
 
+The Phase 6 persistence layer is covered by two test files:
+
+| File | Scope |
+|---|---|
+| `tests/test_experiment_tracking.py` | Component-level tests for run creation, collision safety, JSONL metrics, array round trips, and checkpoint save, discovery, and restoration. |
+| `tests/test_persisted_analysis_run.py` | An end-to-end test that drives `scripts/analyze_untrained_model.py --persist-run` and checks the resulting run directory, metadata, config snapshots, metric records, array artifacts, and checkpoint restoration. |
+
+See [`tests/README.md`](tests/README.md) for the full test-suite guide, categories, and guidance on adding tests.
+
 ## Current limitations
 
 The repository still does not include:
 
 - full training loops
 - optimizer or scheduler setup
-- checkpointing
-- persistent experiment logging
+- learning-rate scheduling
 - gradient tracking over training checkpoints
 - full validation-set evaluation
 - fine-tuning
 - multi-model comparison
 - advanced bias or group-based evaluation metrics
 
-The gradient diagnostic is currently an initialization-time check only. Phase 6 will add structured logging/checkpoint infrastructure, and later phases will reuse this diagnostic across training checkpoints.
+Persistence is in place but not yet exercised by training. Checkpoints currently capture an initialized model at step zero; the optimizer and scheduler fields in the checkpoint format exist but stay empty until a training loop fills them.
+
+The gradient diagnostic is still an initialization-time check only. Phase 7 will add the training loop that reuses this persistence layer, and later phases will repeat the diagnostic across training checkpoints.
 
 ## Next phases
 
 Planned next steps:
 
-1. **Phase 6 — Logging and checkpoint infrastructure**
-   - experiment folders
-   - JSON/CSV logs
-   - metadata storage
-   - config snapshots
-   - reproducible run records
-   - lightweight artifact persistence for Phase 5 outputs
-
-2. **Phase 7 — Pre-training loop**
+1. **Phase 7 — Pre-training loop**
    - optimizer
    - learning-rate schedule
    - loss logging
    - validation checks
-   - checkpoint evaluation
+   - periodic checkpoint saving and training resumption
+   - reuse of the Phase 6 persistence interfaces
 
-3. **Phase 8 — Training-dynamics analysis**
+2. **Phase 8 — Training-dynamics analysis**
    - loss/perplexity curves
    - output-distribution changes
    - gradient diagnostics over checkpoints
    - bias metrics over time
 
-4. **Phase 9 — Fine-tuning pipeline**
+3. **Phase 9 — Fine-tuning pipeline**
    - supervised fine-tuning
    - checkpoint-based evaluation
    - comparison between pre-training and fine-tuning behavior
 
-5. **Phase 10 — Model extension phase**
+4. **Phase 10 — Model extension phase**
    - additional architectures
    - Gemma-oriented variants
    - cross-model behavior comparison

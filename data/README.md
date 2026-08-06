@@ -52,35 +52,35 @@ This keeps raw data separate from reusable data-loading logic.
 
 ## Git tracking policy
 
-The repository is configured so the full `data/` directory can be ignored by Git:
+Dataset contents under `data/` are ignored by Git, while Markdown documentation inside the folder stays tracked:
 
 ```gitignore
-data/
+data/**
+!data/
+!data/**/
+!data/**/*.md
 ```
 
-This is important because future datasets may be large.
+The `!data/` and `!data/**/` lines re-include directories so Git can still see allowed files inside them. The `!data/**/*.md` line is why this guide remains tracked.
 
-Dataset configuration files should remain tracked under:
+This matters because local or downloaded corpora may be large. Anything you place under `data/` is ignored by default, with no further configuration needed.
+
+Dataset configuration files remain tracked under:
 
 ```text
 configs/data/
 ```
 
-Raw corpora, downloaded datasets, generated dataset artifacts, and cached local data should live under:
+Two files under `data/` are tracked on purpose:
 
-```text
-data/
-```
+| Path | Why it is tracked |
+|---|---|
+| `data/README.md` | This guide, kept by the Markdown re-include rule. |
+| `data/raw/tiny_corpus.txt` | The small offline fixture used by the default configs, the documented script commands, and the test suite. It is committed deliberately so the repository stays runnable and testable without any download. |
 
-and should not be committed.
+Everything else — downloaded datasets, generated dataset artifacts, and cached local data — should live under `data/` and stay out of Git.
 
-If files under `data/` were already tracked before `.gitignore` was added, remove them from the Git index while keeping them on disk:
-
-```bash
-git rm -r --cached data
-git add .gitignore configs/data README.md
-git commit -m "Ignore local dataset directory"
-```
+Do not bulk-untrack the folder with `git rm -r --cached data`. That would remove both the tiny corpus and this guide from the repository, and the ignore rules would then prevent the corpus from being added back. If a specific large file was committed by mistake, untrack that one path deliberately instead.
 
 ---
 

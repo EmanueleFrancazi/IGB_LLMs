@@ -60,6 +60,7 @@ tests/
   test_imports.py
   test_inference.py
   test_llama_shapes.py
+  test_persisted_analysis_run.py
 ```
 
 | File | Main focus | Type | Related project area |
@@ -71,6 +72,7 @@ tests/
 | `test_evaluation.py` | Output statistics, empirical frequencies, probability gaps, untrained analysis | Unit tests | `evaluation/` |
 | `test_experiment_tracking.py` | Run creation, JSONL metrics, arrays, checkpoints, latest discovery | Filesystem/unit/integration tests | `experiment/` |
 | `test_gradient_norms.py` | Per-layer gradient trend fit, gradient-norm computation, JSON/CSV saving | Unit/integration tests | `evaluation/gradient_norms.py` |
+| `test_persisted_analysis_run.py` | Persisted initialization-analysis workflow: run layout, snapshots, metrics, arrays, checkpoint restore | End-to-end integration tests | `scripts/analyze_untrained_model.py --persist-run` |
 
 ---
 
@@ -305,6 +307,52 @@ All filesystem writes use pytest `tmp_path`. No persistent artifacts are written
 
 ---
 
+## Persisted analysis-run tests
+
+File:
+
+```text
+tests/test_persisted_analysis_run.py
+```
+
+Purpose:
+
+- drives `scripts/analyze_untrained_model.py --persist-run` through its entry point
+- verifies the run-directory layout, including config, metrics, checkpoints, analyses, and logs
+- checks that metadata records the experiment, device, model, dataset, and analysis settings
+- confirms configuration snapshots reproduce the exact inputs of the run
+- validates that both evaluation records are scalar-only and reference existing artifacts
+- checks `.npz` distribution keys, shapes, normalization, and gap consistency
+- checks per-layer gradient arrays against the model's decoder-block count
+- verifies the structured analysis JSON files, including nested top-k predictions
+- restores the step-zero checkpoint into a freshly built compatible model and verifies parameter-key compatibility and exact parameter equality
+- confirms that reusing an explicit run ID fails instead of overwriting saved results
+- confirms that no experiment output directory is created in the repository
+
+Related source modules:
+
+```text
+scripts/analyze_untrained_model.py
+src/llm_behavior_lab/experiment/run.py
+src/llm_behavior_lab/experiment/metrics.py
+src/llm_behavior_lab/experiment/arrays.py
+src/llm_behavior_lab/experiment/checkpoints.py
+src/llm_behavior_lab/experiment/config.py
+src/llm_behavior_lab/evaluation/untrained_analysis.py
+src/llm_behavior_lab/evaluation/gradient_norms.py
+```
+
+This test complements `tests/test_experiment_tracking.py`. The unit tests there
+cover each persistence interface in isolation; this file covers the workflow that
+combines them.
+
+The tracked data config is copied into the temporary directory with
+`runtime.device` pinned to `cpu`, so the run never selects an accelerator. All
+output goes to a pytest temporary directory, no dataset is downloaded, no
+network access is used, and no optional dependency is required.
+
+---
+
 ## How to run tests
 
 Run the full test suite from the repository root:
@@ -342,6 +390,12 @@ Run only Phase 6 tests:
 
 ```bash
 python3 -m pytest tests/test_experiment_tracking.py
+```
+
+Run only the persisted analysis-run integration test:
+
+```bash
+python3 -m pytest tests/test_persisted_analysis_run.py -v
 ```
 
 Run import tests:
@@ -444,11 +498,13 @@ Examples:
 | `src/llm_behavior_lab/data/` | `tests/test_data_pipeline.py` |
 | `src/llm_behavior_lab/inference/` | `tests/test_inference.py` |
 | `src/llm_behavior_lab/evaluation/` | `tests/test_evaluation.py`, `tests/test_gradient_norms.py` |
+| `src/llm_behavior_lab/experiment/` | `tests/test_experiment_tracking.py` |
+| `scripts/analyze_untrained_model.py` with `--persist-run` | `tests/test_persisted_analysis_run.py` |
 | package exports | `tests/test_imports.py` |
 
 ## `scripts/`
 
-Scripts are runnable entry points. Most tests do not run scripts as subprocesses yet. Instead, they test the reusable functions/classes that scripts call.
+Scripts are runnable entry points. Most tests exercise the reusable functions and classes that scripts call rather than the scripts themselves. The exception is `tests/test_persisted_analysis_run.py`, which imports `scripts/analyze_untrained_model.py` and calls its entry point directly. No test runs a script as a subprocess yet.
 
 Manual script checks are still useful after source changes:
 
@@ -472,7 +528,7 @@ Future phases may add explicit script-level subprocess tests.
 
 ## `configs/`
 
-Current tests mostly use direct small dictionaries or synthetic data rather than reading YAML configs. This keeps tests lightweight and independent of filesystem state.
+Most tests use small dictionaries or synthetic data rather than reading YAML configs, which keeps them lightweight and independent of filesystem state. The persisted-run integration test is the exception: it loads the tracked model and experiment configs directly, and a copy of the tracked data config with the runtime device pinned to CPU.
 
 Scripts use configs under:
 
