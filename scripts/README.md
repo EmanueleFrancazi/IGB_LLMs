@@ -839,7 +839,7 @@ The `.gitignore` should keep generated outputs and large local datasets out of G
 
 ## Testing scripts
 
-The test suite covers the reusable library code that the scripts call.
+The test suite covers the reusable library code that the scripts call, plus one script workflow end to end.
 
 Run:
 
@@ -858,8 +858,9 @@ The tests cover:
 - experiment-run creation and collision safety
 - JSONL metrics and array artifact round trips
 - checkpoint save/load, latest discovery, and CPU portability
+- the persisted-run workflow of `analyze_untrained_model.py`, driven through its entry point in `tests/test_persisted_analysis_run.py`
 
-The scripts themselves are intended as human-readable execution checks. If a script fails, first check:
+Apart from that persisted-run coverage, the scripts are intended as human-readable execution checks. If a script fails, first check:
 
 1. that you are running from the repository root
 2. that configs exist at the paths passed on the command line

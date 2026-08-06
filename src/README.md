@@ -363,6 +363,8 @@ additional_state
 
 Only `format_version`, `global_step`, and `model_state_dict` are required for validation. Optimizer/scheduler fields are optional so Phase 6 can save an initialized model while Phase 7 can save resumable training state.
 
+`CheckpointManager.load_payload(...)` and `CheckpointManager.restore(...)` accept an explicit `map_location` and default to `"cpu"`, so a checkpoint saved on an accelerator can be reloaded on a CPU-only machine without changing the call site. `tests/test_experiment_tracking.py::test_checkpoint_load_uses_map_location_cpu` verifies that a payload loaded this way places every tensor on CPU.
+
 ### Scripts using this package
 
 - `scripts/check_experiment_tracking.py`

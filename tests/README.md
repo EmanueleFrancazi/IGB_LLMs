@@ -498,11 +498,13 @@ Examples:
 | `src/llm_behavior_lab/data/` | `tests/test_data_pipeline.py` |
 | `src/llm_behavior_lab/inference/` | `tests/test_inference.py` |
 | `src/llm_behavior_lab/evaluation/` | `tests/test_evaluation.py`, `tests/test_gradient_norms.py` |
+| `src/llm_behavior_lab/experiment/` | `tests/test_experiment_tracking.py` |
+| `scripts/analyze_untrained_model.py` with `--persist-run` | `tests/test_persisted_analysis_run.py` |
 | package exports | `tests/test_imports.py` |
 
 ## `scripts/`
 
-Scripts are runnable entry points. Most tests do not run scripts as subprocesses yet. Instead, they test the reusable functions/classes that scripts call.
+Scripts are runnable entry points. Most tests exercise the reusable functions and classes that scripts call rather than the scripts themselves. The exception is `tests/test_persisted_analysis_run.py`, which imports `scripts/analyze_untrained_model.py` and calls its entry point directly. No test runs a script as a subprocess yet.
 
 Manual script checks are still useful after source changes:
 
@@ -526,7 +528,7 @@ Future phases may add explicit script-level subprocess tests.
 
 ## `configs/`
 
-Current tests mostly use direct small dictionaries or synthetic data rather than reading YAML configs. This keeps tests lightweight and independent of filesystem state.
+Most tests use small dictionaries or synthetic data rather than reading YAML configs, which keeps them lightweight and independent of filesystem state. The persisted-run integration test is the exception: it loads the tracked model and experiment configs directly, and a copy of the tracked data config with the runtime device pinned to CPU.
 
 Scripts use configs under:
 
