@@ -19,15 +19,19 @@ from llm_behavior_lab.data.config import (
     LOCAL_TEXT_SOURCE,
     DatasetConfig,
     ResolutionPolicy,
+    resolve_data_root,
 )
 from llm_behavior_lab.data.errors import (
     DatasetNotAvailableError,
     DatasetPathNotFoundError,
 )
+from llm_behavior_lab.data.prepared import load_prepared, prepared_directory
 from llm_behavior_lab.data.text_dataset import load_text_file
 
 ROUTE_EXPLICIT_PATH = "explicit_path"
 ROUTE_REPO_FIXTURE = "repo_fixture"
+ROUTE_REPO_PREPARED = "repo_prepared"
+ROUTE_DATA_ROOT_PREPARED = "data_root_prepared"
 
 
 @dataclass(frozen=True)
@@ -101,11 +105,11 @@ def resolve_dataset(
     Candidate locations are tried in order:
 
     1. the configured ``dataset.path``
+    2. a prepared copy inside the repository, under ``data/prepared/<name>/``
+    3. a prepared copy under the external data root
 
-    Later steps -- repository-local prepared copies, the external data root, a
-    source-specific cache, and acquisition -- are added as the subsystem grows.
-    A ``local_text`` dataset always resolves at step 1 and never consults the
-    data root or the network.
+    Acquisition is added as the subsystem grows. A ``local_text`` dataset always
+    resolves at step 1 and never consults the data root or the network.
 
     Args:
         dataset: Validated dataset identity.
@@ -117,6 +121,8 @@ def resolve_dataset(
 
     Raises:
         DatasetPathNotFoundError: If a local dataset names a missing file.
+        DatasetIntegrityError: If a prepared copy exists but was built for a
+            different dataset identity.
         DatasetNotAvailableError: If no candidate location holds the dataset.
     """
 
@@ -141,7 +147,63 @@ def resolve_dataset(
     else:
         checked.append("configured path: not set")
 
+    for route, directory in prepared_candidates(dataset, policy, repo_root=repo_root):
+        found = load_prepared(directory, dataset, verify=dataset.verify)
+        if found is not None:
+            text_path, manifest = found
+            return ResolvedDataset(
+                name=dataset.name,
+                source=dataset.source,
+                path=text_path,
+                route=route,
+                details={"prepared_dir": str(directory), "manifest": manifest},
+            )
+        checked.append(f"{route}: {directory} ({_absence_reason(directory)})")
+
     raise DatasetNotAvailableError(unavailable_message(dataset, policy, checked))
+
+
+def prepared_candidates(
+    dataset: DatasetConfig,
+    policy: ResolutionPolicy,
+    *,
+    repo_root: str | Path | None = None,
+) -> list[tuple[str, Path]]:
+    """List the prepared-dataset directories consulted for ``dataset``, in order.
+
+    The repository-local directory is read when it exists but is never the
+    default destination for new data; that is always the external data root.
+    """
+
+    candidates: list[tuple[str, Path]] = []
+    if repo_root is not None:
+        candidates.append(
+            (ROUTE_REPO_PREPARED, prepared_directory(Path(repo_root) / "data", dataset.name))
+        )
+    candidates.append(
+        (
+            ROUTE_DATA_ROOT_PREPARED,
+            prepared_directory(resolve_data_root(policy.data_root), dataset.name),
+        )
+    )
+    return candidates
+
+
+def acquisition_destination(
+    dataset: DatasetConfig,
+    policy: ResolutionPolicy,
+) -> Path:
+    """Return where newly acquired data is written: always the external root."""
+
+    return prepared_directory(resolve_data_root(policy.data_root), dataset.name)
+
+
+def _absence_reason(directory: Path) -> str:
+    """Explain why a prepared directory did not supply data."""
+
+    if not directory.exists():
+        return "not prepared"
+    return "incomplete preparation"
 
 
 def _path_route(path: Path, repo_root: str | Path | None) -> str:
