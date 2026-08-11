@@ -153,8 +153,12 @@ The first run downloads the dataset, announces what it is doing, and writes a
 prepared copy under the data root. Later runs read that copy without any network
 access. The contents are never committed.
 
-The character tokenizer builds its vocabulary from the loaded text, so a larger
-corpus needs a larger model vocabulary. If a run reports that the tokenizer
+The character tokenizer derives its vocabulary from the prepared text, so model
+compatibility depends on the corpus, its limits, and its upstream revision. Both
+shipped external configs were live-tested end to end against
+`configs/model/tiny_llama.yaml` at their current limits — WikiText-2 gave a
+tokenizer vocabulary of 147 and TinyStories 70, both under `vocab_size: 256`.
+Those are observations, not guarantees. If a run reports that the tokenizer
 vocab size exceeds the model vocab size, raise `model.params.vocab_size`.
 
 ---
@@ -261,9 +265,14 @@ imports the library gets the conservative default instead: a
 
 #### Measuring what an acquisition actually costs
 
-The prepared corpus is bounded by `max_examples` and `max_characters`, and
-streaming means the whole split need not be materialized before those apply.
-What that costs over the network has **not** been measured.
+The prepared corpus is bounded by `max_examples` and `max_characters` —
+`max_characters` bounds the final file, separators included, so
+`num_characters <= max_characters` always holds in the manifest. Streaming means
+the whole split need not be materialized before those limits apply.
+
+In live validation this worked as intended: preparing TinyStories produced a
+168 KB corpus and left a 13 MB shared cache, against source metadata describing
+a roughly 1 GB download. What it cost over the network was **not** measured.
 
 `/usr/bin/time -v` reports process resource use — wall time, peak memory, and
 block-device I/O — and `du -sh` on the data root reports local disk footprint,
@@ -300,11 +309,27 @@ The manifest is written last, inside a directory that is moved into place
 atomically. Its presence therefore means the preparation finished; a directory
 without one is an interrupted attempt and is rebuilt rather than trusted.
 
-The manifest also records what the source actually returned — fingerprint,
+The manifest also records what the source reported about itself — fingerprint,
 version, config name, split, and sizes — separately from what was requested, so
 a later reader can tell which corpus a run actually used. Those resolved values
 are excluded from staleness comparison, because two preparations of the same
 request may legitimately differ there.
+
+#### `download_size` and `dataset_size` are source metadata
+
+These two fields come from the dataset's own published metadata and describe the
+**whole published dataset or config**. They are not measurements of this
+acquisition: not bytes transferred, not local cache growth, and not the size of
+the prepared corpus.
+
+The live TinyStories run makes the gap concrete. Its manifest reports roughly a
+1 GB `download_size` and a 2 GB `dataset_size`, while the entire data root after
+preparing both external datasets was about 14 MB — a 168 KB prepared corpus, a
+208 KB WikiText corpus, and a 13 MB shared Hugging Face cache. Read these fields
+as "how large the upstream dataset is", never as "what this run cost".
+
+That 14 MB is a disk measurement. It does not establish how many bytes crossed
+the network.
 
 #### Four identifiers, easily confused
 

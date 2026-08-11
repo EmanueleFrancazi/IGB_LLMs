@@ -16,10 +16,11 @@
 # Hugging Face cache: a streamed dataset does not populate the arrow cache, so
 # the source-cache route will not serve this config.
 
-# The character vocabulary of this corpus may also exceed the tiny model's
-# vocab_size: 256. TinyStories is largely ASCII English so it may fit, but this
-# has not been verified against the real dataset. Check the reported tokenizer
-# vocab size before assuming compatibility.
+# Live-tested end to end against configs/model/tiny_llama.yaml at these limits:
+# the prepared corpus yielded a tokenizer vocabulary of 70, well under the
+# model's vocab_size: 256. That is an observation, not a guarantee -- raising
+# the limits or pinning a different revision may change it. The runtime
+# compatibility check remains the authority.
 
 dataset:
   name: tinystories_train200

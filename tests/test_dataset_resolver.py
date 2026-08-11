@@ -245,3 +245,46 @@ def test_repository_route_does_not_imply_the_file_is_tracked(tmp_path) -> None:
     resolved = resolve_dataset(dataset, ResolutionPolicy(), repo_root=tmp_path)
 
     assert resolved.route == ROUTE_REPOSITORY_PATH
+
+
+def _external() -> DatasetConfig:
+    return DatasetConfig(
+        name="wikitext2", source=HUGGINGFACE_SOURCE, repo_id="Salesforce/wikitext"
+    )
+
+
+def test_unavailable_advice_contains_no_placeholder_command(tmp_path) -> None:
+    """Never print a command a user has to complete by guessing."""
+
+    with pytest.raises(DatasetNotAvailableError) as excinfo:
+        resolve_dataset(_external(), ResolutionPolicy(data_root=tmp_path), reporter=None)
+
+    message = str(excinfo.value)
+    assert "--data-config" not in message
+    assert "<" not in message and ">" not in message
+    assert 'pip install -e ".[hf]"' in message
+
+
+def test_unavailable_advice_names_the_flag_to_drop(tmp_path) -> None:
+    """The advice must match the policy that actually blocked acquisition."""
+
+    with pytest.raises(DatasetNotAvailableError) as offline:
+        resolve_dataset(
+            _external(), ResolutionPolicy(data_root=tmp_path, offline=True), reporter=None
+        )
+    assert "rerun the same command without --offline" in str(offline.value)
+
+    with pytest.raises(DatasetNotAvailableError) as no_download:
+        resolve_dataset(_external(), ResolutionPolicy(data_root=tmp_path), reporter=None)
+    assert "rerun the same command without --no-download" in str(no_download.value)
+
+
+def test_local_datasets_get_no_huggingface_advice(tmp_path) -> None:
+    """A local dataset must not be told to install an optional dependency."""
+
+    dataset = DatasetConfig(name="tiny_local_text", path="data/raw/absent.txt")
+
+    with pytest.raises(DatasetPathNotFoundError) as excinfo:
+        resolve_dataset(dataset, ResolutionPolicy(), repo_root=tmp_path)
+
+    assert "hf" not in str(excinfo.value)

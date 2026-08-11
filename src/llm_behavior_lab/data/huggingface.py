@@ -77,6 +77,11 @@ def concatenate_text_examples(
     Empty rows are skipped. Both limits are applied while iterating so a bounded
     corpus never requires materializing an unbounded one.
 
+    ``max_characters`` bounds the **final corpus**, separators included, so
+    ``len(result) <= max_characters`` always holds. A separator is charged only
+    when a document actually follows another, and no trailing separator is
+    added, so the budget is never spent on text that is not in the result.
+
     Args:
         rows: Iterable of dataset rows.
         text_field: Field holding text in each row.
@@ -95,6 +100,7 @@ def concatenate_text_examples(
     chunks: list[str] = []
     characters = 0
     used = 0
+    separator_length = len(document_separator)
 
     for index, row in enumerate(rows):
         if max_examples is not None and index >= max_examples:
@@ -112,10 +118,14 @@ def concatenate_text_examples(
             continue
 
         if max_characters is not None:
-            remaining = max_characters - characters
+            # A separator is only spent when this document follows another, so
+            # the running total always equals the length of the joined corpus.
+            overhead = separator_length if chunks else 0
+            remaining = max_characters - characters - overhead
             if remaining <= 0:
                 break
             text = text[:remaining]
+            characters += overhead
 
         chunks.append(text)
         characters += len(text)

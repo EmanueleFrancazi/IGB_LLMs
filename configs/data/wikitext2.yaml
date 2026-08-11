@@ -7,11 +7,13 @@
 # downloaded into the external data root and prepared there; later runs reuse
 # that copy without any network access.
 #
-# This config is NOT runnable end to end against configs/model/tiny_llama.yaml
-# as shipped. The character tokenizer builds its vocabulary from the loaded
-# text, and WikiText contains far more distinct characters than the tiny model's
-# vocab_size: 256. Raise model.params.vocab_size before running an experiment on
-# this dataset. Preparing the dataset itself works regardless.
+# Live-tested end to end against configs/model/tiny_llama.yaml at these limits:
+# the prepared corpus yielded a tokenizer vocabulary of 147, under the model's
+# vocab_size: 256. That is an observation, not a guarantee -- the character
+# tokenizer derives its vocabulary from the actual prepared text, so raising
+# max_characters or pinning a different revision may change it. If a run reports
+# that the tokenizer vocab size exceeds the model vocab size, raise
+# model.params.vocab_size.
 
 dataset:
   name: wikitext2_raw_train1k

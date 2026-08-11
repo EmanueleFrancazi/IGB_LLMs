@@ -189,7 +189,7 @@ def resolve_dataset(
             return resolved
 
     raise DatasetNotAvailableError(
-        unavailable_message(dataset, policy, checked, remedy=_remedy(dataset))
+        unavailable_message(dataset, policy, checked, remedy=_remedy(dataset, policy))
     )
 
 
@@ -302,19 +302,38 @@ def _integrity_remedy(policy: ResolutionPolicy) -> str:
     )
 
 
-def _remedy(dataset: DatasetConfig) -> str | None:
-    """Suggest the command that would make an external dataset available."""
+def _remedy(dataset: DatasetConfig, policy: ResolutionPolicy) -> str | None:
+    """Explain how to make an external dataset available.
+
+    The resolver is given a parsed :class:`DatasetConfig`, never the path of the
+    file it came from, so it cannot print a complete ``--data-config`` command.
+    Rather than emit a placeholder the user has to substitute, the advice refers
+    to the command they already ran and to the flag currently preventing
+    acquisition.
+    """
 
     if dataset.source != HUGGINGFACE_SOURCE:
         return None
-    return (
-        "To make it available (requires network access and the optional "
-        "dependency):\n"
-        '  python3 -m pip install -e ".[hf]"\n'
-        "  python3 scripts/prepare_dataset.py --data-config <your data config>\n"
-        "Acquisition is enabled by default; drop --offline and --no-download to "
-        "allow it."
+    lines = [
+        "This dataset is obtained from Hugging Face, which needs network access "
+        "and the optional dependency:",
+        '  python3 -m pip install -e ".[hf]"',
+    ]
+    if policy.offline or not policy.allow_download:
+        blocker = "--offline" if policy.offline else "--no-download"
+        lines.append(
+            f"Then rerun the same command without {blocker} to let it be obtained."
+        )
+    else:
+        lines.append(
+            "Acquisition was already permitted, so check the dataset identity in "
+            "the config and the reported errors above."
+        )
+    lines.append(
+        "scripts/prepare_dataset.py can obtain it ahead of time using the same "
+        "data config."
     )
+    return "\n".join(lines)
 
 
 def prepared_candidates(

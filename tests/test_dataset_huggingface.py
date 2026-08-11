@@ -725,3 +725,104 @@ def test_loader_calls_are_serialized(monkeypatch, tmp_path) -> None:
 
     assert observed["locked"] is True
     assert not _LOADER_LOCK.locked(), "the lock must be released afterwards"
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 5, 99, 100, 101, 102, 200, 201, 205, 1000, 5000])
+def test_prepared_text_never_exceeds_the_character_budget(limit: int) -> None:
+    """max_characters bounds the corpus that is written, separators included."""
+
+    rows = [{"text": "a" * 100} for _ in range(10)]
+
+    text, _ = concatenate_text_examples(
+        rows, text_field="text", max_characters=limit, document_separator="\n\n"
+    )
+
+    assert len(text) <= limit
+
+
+def test_wikitext_style_budget_is_met_exactly() -> None:
+    """The live WikiText case: many documents whose content reaches the budget."""
+
+    rows = [{"text": "x" * 500} for _ in range(1000)]
+
+    text, documents = concatenate_text_examples(
+        rows, text_field="text", max_characters=200000, document_separator="\n\n"
+    )
+
+    assert len(text) == 200000
+    # Separators are inside the budget, so content is now slightly below it.
+    assert len(text.replace("\n\n", "")) == 200000 - 2 * (documents - 1)
+
+
+def test_budget_is_consumed_exactly_at_a_separator_boundary() -> None:
+    """Two 100-character documents plus one separator is exactly 202."""
+
+    rows = [{"text": "a" * 100}, {"text": "b" * 100}, {"text": "c" * 100}]
+
+    text, documents = concatenate_text_examples(
+        rows, text_field="text", max_characters=202, document_separator="\n\n"
+    )
+
+    assert len(text) == 202
+    assert documents == 2
+    assert text == "a" * 100 + "\n\n" + "b" * 100
+
+
+def test_a_budget_too_small_for_a_separator_stops_cleanly() -> None:
+    """No trailing separator, and no partial separator, when the budget runs out."""
+
+    rows = [{"text": "a" * 100}, {"text": "b" * 100}]
+
+    text, documents = concatenate_text_examples(
+        rows, text_field="text", max_characters=101, document_separator="\n\n"
+    )
+
+    assert text == "a" * 100
+    assert documents == 1
+    assert not text.endswith("\n\n")
+
+
+def test_single_document_behaviour_is_unchanged() -> None:
+    """A lone document is still truncated to the raw budget, with no overhead."""
+
+    text, documents = concatenate_text_examples(
+        [{"text": "abcdef"}], text_field="text", max_characters=3, document_separator="\n\n"
+    )
+
+    assert (text, documents) == ("abc", 1)
+
+
+def test_max_examples_still_bounds_documents(monkeypatch) -> None:
+    """Charging separators must not disturb the example limit."""
+
+    rows = [{"text": "a" * 10} for _ in range(50)]
+
+    text, documents = concatenate_text_examples(
+        rows, text_field="text", max_examples=3, document_separator="|"
+    )
+
+    assert documents == 3
+    assert text == "|".join(["a" * 10] * 3)
+
+
+def test_manifest_num_characters_respects_the_configured_limit(monkeypatch, tmp_path) -> None:
+    """The recorded corpus size must be comparable to the configured budget."""
+
+    rows = [{"text": "a" * 100} for _ in range(20)]
+    monkeypatch.setattr(
+        huggingface, "_import_load_dataset", lambda: lambda *a, **k: list(rows)
+    )
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+
+    manifest = materialize(
+        _dataset(max_characters=500),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert manifest["num_characters"] <= manifest["max_characters"]
+    assert (
+        len((prepared_directory(tmp_path, "wikitext2") / TEXT_FILENAME).read_text("utf-8"))
+        == manifest["num_characters"]
+    )

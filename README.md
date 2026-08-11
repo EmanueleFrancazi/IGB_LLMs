@@ -724,11 +724,15 @@ python3 scripts/analyze_untrained_model.py \
   --model-config configs/model/tiny_llama.yaml
 ```
 
-External datasets are larger than the tracked fixture, so their character
-vocabulary can exceed the `vocab_size: 256` in `configs/model/tiny_llama.yaml`.
-The dataset layer provides the text; sizing the model remains a model-config
-decision. If a run reports that the tokenizer vocab size exceeds the model vocab
-size, raise `model.params.vocab_size`.
+The character tokenizer derives its vocabulary from the prepared text, so model
+compatibility depends on the corpus, its limits, and its upstream revision —
+not on the dataset name. Both shipped external configs have been live-tested
+end to end against `configs/model/tiny_llama.yaml` at their current limits
+(WikiText-2 gave a tokenizer vocabulary of 147, TinyStories 70, both under
+`vocab_size: 256`). Those are observations, not guarantees: raising a limit or
+changing the revision may change them. The runtime check remains the authority —
+if a run reports that the tokenizer vocab size exceeds the model vocab size,
+raise `model.params.vocab_size`.
 
 See [`data/README.md`](data/README.md) for the resolution order, prepared-data
 manifests, staleness detection, and the limitations that come with them.
