@@ -26,7 +26,10 @@ if str(SRC_ROOT) not in sys.path:
 from llm_behavior_lab.data import (  # noqa: E402
     CausalLMBatcher,
     CharTokenizer,
-    load_text_file,
+    DatasetConfig,
+    add_dataset_arguments,
+    resolution_policy_from_args,
+    resolve_dataset,
     split_token_ids,
 )
 from llm_behavior_lab.models import build_model_from_config, list_models  # noqa: E402
@@ -48,15 +51,6 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def resolve_repo_path(path_value: str | Path) -> Path:
-    """Resolve paths relative to the repository root."""
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return REPO_ROOT / path
-
-
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
 
@@ -73,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         default=REPO_ROOT / "configs" / "model" / "tiny_llama.yaml",
         help="Path to the model YAML config.",
     )
+    parser.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        help="Only check dataset loading, tokenization, and batching.",
+    )
+    add_dataset_arguments(parser)
     return parser.parse_args()
 
 
@@ -92,12 +92,17 @@ def main() -> None:
 
     dataset_config = data_config["dataset"]
     batching_config = data_config["batching"]
-    text_path = resolve_repo_path(dataset_config["path"])
     val_fraction = float(dataset_config.get("val_fraction", 0.1))
     batch_size = int(batching_config["batch_size"])
     block_size = int(batching_config["block_size"])
 
-    text = load_text_file(text_path)
+    resolved = resolve_dataset(
+        DatasetConfig.from_config(data_config),
+        resolution_policy_from_args(args),
+        repo_root=REPO_ROOT,
+    )
+    text_path = resolved.path
+    text = resolved.read_text()
     tokenizer = CharTokenizer.from_text(text)
     token_ids = tokenizer.encode(text)
     splits = split_token_ids(
@@ -132,24 +137,30 @@ def main() -> None:
     train_batch = batcher.get_batch("train")
     val_batch = batcher.get_batch("val")
 
-    model = build_model_from_config(model_config).to(device)
-    model.eval()
+    output = None
+    parameter_count = None
+    if not args.skip_model_check:
+        model = build_model_from_config(model_config).to(device)
+        model.eval()
 
-    with torch.no_grad():
-        output = model(input_ids=train_batch.input_ids, targets=train_batch.targets)
+        with torch.no_grad():
+            output = model(input_ids=train_batch.input_ids, targets=train_batch.targets)
 
-    expected_logits_shape = (batch_size, block_size, model_vocab_size)
-    if tuple(output.logits.shape) != expected_logits_shape:
-        raise AssertionError(
-            f"Expected logits shape {expected_logits_shape}, got {tuple(output.logits.shape)}."
-        )
-    if output.loss is None or output.loss.ndim != 0:
-        raise AssertionError("Expected scalar loss when targets are provided.")
+        expected_logits_shape = (batch_size, block_size, model_vocab_size)
+        if tuple(output.logits.shape) != expected_logits_shape:
+            raise AssertionError(
+                f"Expected logits shape {expected_logits_shape}, got {tuple(output.logits.shape)}."
+            )
+        if output.loss is None or output.loss.ndim != 0:
+            raise AssertionError("Expected scalar loss when targets are provided.")
 
-    parameter_count = model.count_parameters()
+        parameter_count = model.count_parameters()
 
     print("Phase 3 data pipeline check completed successfully.")
     print(f"Available registered models: {list_models()}")
+    print(f"Dataset name: {resolved.name}")
+    print(f"Dataset source: {resolved.source}")
+    print(f"Dataset resolved via: {resolved.route}")
     print(f"Dataset path: {text_path}")
     print(f"Raw text characters: {len(text)}")
     print(f"Tokenizer type: char")
@@ -158,16 +169,22 @@ def main() -> None:
     print(f"Train token count: {len(splits.train_ids)}")
     print(f"Validation token count: {len(splits.val_ids)}")
     print(f"Device: {device}")
-    print(f"Model name: {model_config['model']['name']}")
-    print(f"Model vocab size: {model_vocab_size}")
-    print(f"Parameter count: {parameter_count} ({format_parameter_count(parameter_count)})")
     print(f"Train input shape: {tuple(train_batch.input_ids.shape)}")
     print(f"Train target shape: {tuple(train_batch.targets.shape)}")
     print(f"Validation input shape: {tuple(val_batch.input_ids.shape)}")
     print(f"Validation target shape: {tuple(val_batch.targets.shape)}")
-    print(f"Logits shape: {tuple(output.logits.shape)}")
-    print(f"Loss shape: {tuple(output.loss.shape)}")
-    print(f"Loss value: {output.loss.item():.6f}")
+    if output is None:
+        print("Model check: skipped")
+    else:
+        print(f"Model name: {model_config['model']['name']}")
+        print(f"Model vocab size: {model_vocab_size}")
+        print(
+            f"Parameter count: {parameter_count} "
+            f"({format_parameter_count(parameter_count)})"
+        )
+        print(f"Logits shape: {tuple(output.logits.shape)}")
+        print(f"Loss shape: {tuple(output.loss.shape)}")
+        print(f"Loss value: {output.loss.item():.6f}")
     print(f"Decoded first training input preview: {tokenizer.decode(train_batch.input_ids[0].tolist())!r}")
     print(f"Decoded first training target preview: {tokenizer.decode(train_batch.targets[0].tolist())!r}")
 

@@ -1,0 +1,56 @@
+# TinyStories for small-model language experiments.
+#
+# Requires the optional dependency:
+#   python3 -m pip install -e ".[hf]"
+#
+# The upstream train split is far larger than the corpus prepared here, so
+# acquisition iterates it lazily (streaming) instead of materializing the whole
+# split first. The preparation loop consumes only max_examples/max_characters.
+#
+# What this bounds: the examples consumed and the prepared text.txt. Exact
+# network bytes and shard/cache behaviour depend on the source format and on
+# the datasets library, and have not been measured; do not read "streaming" as
+# a strict network-byte guarantee.
+#
+# The reusable artifact is the prepared text.txt under the data root, not the
+# Hugging Face cache: a streamed dataset does not populate the arrow cache, so
+# the source-cache route will not serve this config.
+
+# Live-tested end to end against configs/model/tiny_llama.yaml at these limits:
+# the prepared corpus yielded a tokenizer vocabulary of 70, well under the
+# model's vocab_size: 256. That is an observation, not a guarantee -- raising
+# the limits or pinning a different revision may change it. The runtime
+# compatibility check remains the authority.
+
+dataset:
+  name: tinystories_train200
+  source: huggingface
+  repo_id: roneneldan/TinyStories
+  subset: null
+  split: train
+  # Unpinned. For strict upstream reproducibility, obtain a real Hub reference
+  # -- a branch, tag, or commit SHA from the dataset's page on huggingface.co
+  # or via huggingface_hub -- and put that value here. The prepared manifest
+  # does NOT supply one: its resolved.fingerprint is the Datasets library's
+  # local cache identity, not a Hub revision, and is unavailable for streamed
+  # datasets. The manifest's sha256 identifies the corpus that was actually
+  # materialized, which is what tells you whether two runs used the same text.
+  revision: null
+  text_field: text
+  streaming: true
+  max_examples: 200
+  max_characters: 200000
+  document_separator: "\n\n"
+  val_fraction: 0.1
+  verify: false
+
+tokenizer:
+  type: char
+
+batching:
+  batch_size: 4
+  block_size: 16
+
+runtime:
+  seed: 1234
+  device: auto

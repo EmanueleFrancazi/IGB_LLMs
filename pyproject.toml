@@ -22,6 +22,12 @@ dependencies = [
 dev = [
   "pytest>=7.4",
 ]
+# Optional: required only to acquire externally hosted datasets. The core
+# package, the default test suite, and the local text workflow never need it.
+# Only what the project actually imports is declared here.
+hf = [
+  "datasets>=2.19",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

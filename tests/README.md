@@ -61,6 +61,14 @@ tests/
   test_inference.py
   test_llama_shapes.py
   test_persisted_analysis_run.py
+  conftest.py
+  test_dataset_config.py
+  test_dataset_resolver.py
+  test_dataset_prepared.py
+  test_dataset_huggingface.py
+  test_dataset_cli.py
+  test_dataset_tracking.py
+  test_migrated_workflows.py
 ```
 
 | File | Main focus | Type | Related project area |
@@ -73,6 +81,13 @@ tests/
 | `test_experiment_tracking.py` | Run creation, JSONL metrics, arrays, checkpoints, latest discovery | Filesystem/unit/integration tests | `experiment/` |
 | `test_gradient_norms.py` | Per-layer gradient trend fit, gradient-norm computation, JSON/CSV saving | Unit/integration tests | `evaluation/gradient_norms.py` |
 | `test_persisted_analysis_run.py` | Persisted initialization-analysis workflow: run layout, snapshots, metrics, arrays, checkpoint restore | End-to-end integration tests | `scripts/analyze_untrained_model.py --persist-run` |
+| `test_dataset_config.py` | Dataset identity, resolution policy, data-root selection | Unit tests | `data/config.py`, `data/errors.py` |
+| `test_dataset_resolver.py` | Local-first resolution, routes, unavailable-data messages | Unit/integration tests | `data/resolver.py` |
+| `test_dataset_prepared.py` | Prepared directories, manifests, staleness, atomicity | Filesystem tests | `data/prepared.py` |
+| `test_dataset_huggingface.py` | Acquisition, cache reuse, offline enforcement, refresh, resolved provenance, announcements | Mocked integration tests | `data/huggingface.py` |
+| `test_dataset_cli.py` | Shared dataset options and policy construction | Unit tests | `data/cli.py` |
+| `test_dataset_tracking.py` | Dataset contents cannot enter Git | Repository tests | `.gitignore` |
+| `test_migrated_workflows.py` | Migrated scripts still behave as before | End-to-end integration tests | `scripts/*.py` |
 
 ---
 
@@ -602,7 +617,6 @@ Examples:
 tests/test_logging.py
 tests/test_training_loop.py
 tests/test_checkpointing.py
-tests/test_dataset_sources.py
 ```
 
 ### Structure
@@ -670,7 +684,6 @@ Likely future tests include:
 - fine-tuning data-pipeline tests
 - model-comparison compatibility tests
 - dataset-source tests for external loaders with mocks
-- streaming/sharded dataset tests
 - output-metric regression tests
 - CLI subprocess smoke tests for scripts
 
@@ -719,3 +732,32 @@ python3 scripts/analyze_untrained_model.py \
 ```
 
 This keeps automated tests and user-facing scripts aligned.
+
+---
+
+## Dataset tests and the offline guarantee
+
+The dataset layer can reach the network, so the default suite is kept offline
+structurally rather than by convention.
+
+`tests/conftest.py` applies an autouse fixture to every test that:
+
+- points `LLM_BEHAVIOR_LAB_DATA_ROOT` at a pytest temporary directory, so no
+  test can read or write the developer's real cache
+- replaces `llm_behavior_lab.data.huggingface._import_load_dataset` with a
+  function that raises, so no test can obtain the real loader
+
+A test that needs to exercise acquisition supplies its own fake by patching that
+same function. Because the block is on the import seam rather than on
+`sys.modules`, the guarantee holds whether or not the optional `datasets`
+package happens to be installed.
+
+Nothing changes about how the suite is run:
+
+```bash
+python3 -m pytest
+```
+
+There is no network marker and no special invocation. Live acquisition against
+the real Hugging Face Hub is a manual step, documented in
+[`data/README.md`](../data/README.md), not part of the automated suite.

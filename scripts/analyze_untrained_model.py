@@ -31,7 +31,11 @@ if str(SRC_ROOT) not in sys.path:
 from llm_behavior_lab.data import (  # noqa: E402
     CausalLMBatcher,
     CharTokenizer,
-    load_text_file,
+    DatasetConfig,
+    add_dataset_arguments,
+    resolution_policy_from_args,
+    resolve_dataset,
+    resolve_repo_path,
     split_token_ids,
 )
 from llm_behavior_lab.evaluation import (  # noqa: E402
@@ -66,15 +70,6 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
         raise TypeError(f"Expected config dictionary, got {type(config)!r}")
 
     return config
-
-
-def resolve_repo_path(path_value: str | Path) -> Path:
-    """Resolve relative paths against the repository root."""
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return REPO_ROOT / path
 
 
 def parse_args() -> argparse.Namespace:
@@ -172,6 +167,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional run notes overriding experiment-config notes.",
     )
+    add_dataset_arguments(parser)
     return parser.parse_args()
 
 
@@ -206,6 +202,7 @@ def _persist_analysis_run(
     parameter_count: int,
     analysis_result: Any,
     gradient_result: Any | None,
+    dataset_provenance: dict[str, Any] | None = None,
 ) -> ExperimentRun:
     """Persist one initialization-analysis run through Phase 6 interfaces."""
 
@@ -228,6 +225,7 @@ def _persist_analysis_run(
             "model_name": model_config["model"]["name"],
             "model_parameter_count": parameter_count,
             "dataset_path": str(text_path),
+            "dataset": dataset_provenance or {},
             "tokenizer": {
                 "type": "char",
                 "vocab_size": tokenizer.vocab_size,
@@ -376,12 +374,17 @@ def main() -> None:
 
     dataset_config = data_config["dataset"]
     batching_config = data_config["batching"]
-    text_path = resolve_repo_path(dataset_config["path"])
     val_fraction = float(dataset_config.get("val_fraction", 0.1))
     batch_size = int(batching_config["batch_size"])
     block_size = int(batching_config["block_size"])
 
-    text = load_text_file(text_path)
+    resolved = resolve_dataset(
+        DatasetConfig.from_config(data_config),
+        resolution_policy_from_args(args),
+        repo_root=REPO_ROOT,
+    )
+    text_path = resolved.path
+    text = resolved.read_text()
     tokenizer = CharTokenizer.from_text(text)
     token_ids = tokenizer.encode(text)
     splits = split_token_ids(
@@ -437,6 +440,9 @@ def main() -> None:
     print("Phase 5 untrained-model analysis completed successfully.")
     print("Note: the model is randomly initialized. These numbers describe baseline behavior, not quality.")
     print(f"Available registered models: {list_models()}")
+    print(f"Dataset name: {resolved.name}")
+    print(f"Dataset source: {resolved.source}")
+    print(f"Dataset resolved via: {resolved.route}")
     print(f"Dataset path: {text_path}")
     print(f"Raw text characters: {len(text)}")
     print("Tokenizer type: char")
@@ -541,6 +547,8 @@ def main() -> None:
                 "data_config": str(args.data_config),
                 "model_config": str(args.model_config),
                 "dataset_path": str(text_path),
+                "dataset_name": resolved.name,
+                "dataset_route": resolved.route,
                 "model_name": model_config["model"]["name"],
                 "analysis_split": args.split,
                 "seed": seed,
@@ -576,6 +584,7 @@ def main() -> None:
             parameter_count=parameter_count,
             analysis_result=result,
             gradient_result=gradient_result,
+            dataset_provenance=resolved.provenance(),
         )
         print("\nStructured experiment persistence completed successfully.")
         print(f"Run directory: {run.paths.run_dir}")

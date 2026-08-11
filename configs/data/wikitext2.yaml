@@ -1,0 +1,48 @@
+# WikiText-2 (raw) for standard language-modeling checks.
+#
+# Requires the optional dependency:
+#   python3 -m pip install -e ".[hf]"
+#
+# The dataset contents are never committed. On first use the corpus is
+# downloaded into the external data root and prepared there; later runs reuse
+# that copy without any network access.
+#
+# Live-tested end to end against configs/model/tiny_llama.yaml at these limits:
+# the prepared corpus yielded a tokenizer vocabulary of 147, under the model's
+# vocab_size: 256. That is an observation, not a guarantee -- the character
+# tokenizer derives its vocabulary from the actual prepared text, so raising
+# max_characters or pinning a different revision may change it. If a run reports
+# that the tokenizer vocab size exceeds the model vocab size, raise
+# model.params.vocab_size.
+
+dataset:
+  name: wikitext2_raw_train1k
+  source: huggingface
+  repo_id: Salesforce/wikitext
+  subset: wikitext-2-raw-v1
+  split: train[:1000]
+  # Unpinned. For strict upstream reproducibility, obtain a real Hub reference
+  # -- a branch, tag, or commit SHA from the dataset's page on huggingface.co
+  # or via huggingface_hub -- and put that value here. The prepared manifest
+  # does NOT supply one: its resolved.fingerprint is the Datasets library's
+  # local cache identity, not a Hub revision, and is unavailable for streamed
+  # datasets. The manifest's sha256 identifies the corpus that was actually
+  # materialized, which is what tells you whether two runs used the same text.
+  revision: null
+  text_field: text
+  max_examples: 1000
+  max_characters: 200000
+  document_separator: "\n\n"
+  val_fraction: 0.1
+  verify: false
+
+tokenizer:
+  type: char
+
+batching:
+  batch_size: 4
+  block_size: 16
+
+runtime:
+  seed: 1234
+  device: auto

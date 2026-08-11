@@ -132,29 +132,48 @@ The package is imported by:
 
 ## `llm_behavior_lab.data`
 
-The `data` package contains utilities for early text-only language-modeling experiments.
+The `data` package selects, locates, loads, and batches text datasets.
 
 Current files:
 
 ```text
 src/llm_behavior_lab/data/
   __init__.py
-  dataloader.py
-  text_dataset.py
-  tokenizer.py
+  config.py        dataset identity and runtime resolution policy
+  errors.py        dataset error hierarchy
+  resolver.py      the single entry point that locates a dataset
+  prepared.py      prepared directories and their manifests
+  huggingface.py   acquisition; the only module that can reach the network
+  cli.py           the dataset options shared by scripts
+  text_dataset.py  local text loading and train/validation splitting
+  tokenizer.py     deterministic character-level tokenizer
+  dataloader.py    causal language-modeling batches
 ```
 
 ### Main responsibilities
 
-- load local UTF-8 text files
-- split token IDs into train and validation portions
+- describe which dataset an experiment uses, separately from what one
+  invocation is allowed to do to obtain it
+- resolve a dataset local-first, acquiring only when explicitly permitted
+- keep dataset contents outside the repository
+- detect stale or incomplete prepared data
+- load local UTF-8 text files and split token IDs
 - build a deterministic character-level tokenizer
-- encode and decode text
 - create causal language-modeling batches
 
 ### Important objects and functions
 
 ```text
+DatasetConfig
+ResolutionPolicy
+ResolvedDataset
+resolve_dataset
+resolve_data_root
+resolve_repo_path
+add_dataset_arguments
+resolution_policy_from_args
+write_prepared
+load_prepared
 CharTokenizer
 TokenSplits
 load_text_file
@@ -163,18 +182,84 @@ CausalLMBatch
 CausalLMBatcher
 ```
 
+### Dataset resolution contract
+
+`resolve_dataset(dataset_config, policy, repo_root=...)` is the only way the
+project obtains a dataset. It tries, in order: the configured path, a prepared
+copy in the repository, a prepared copy under the data root, a copy already in
+the source cache, and finally acquisition when the policy permits it. A
+`local_text` dataset resolves at the first step and never consults the data root
+or the network.
+
+Identity and policy stay separate. `DatasetConfig` comes from tracked YAML and
+is part of reproducibility; `ResolutionPolicy` comes from flags and the
+environment and is machine-specific, which is why the data root is not a config
+field.
+
+`ResolutionPolicy()` built without arguments cannot reach the network:
+`allow_download` defaults to false, and `offline` forbids the network outright
+regardless of it. Scripts opt in explicitly.
+
+### Prepared-data contract
+
+A prepared dataset directory holds `text.txt` and `manifest.json`. The manifest
+is written last inside a staging directory moved into place atomically, so its
+presence means the preparation completed. It records the requested identity, a
+digest, counts, and a `resolved` block describing what the source returned. It
+contains no filesystem paths.
+
+The guarantee is that an incomplete preparation is never mistaken for a complete
+one. Replacement is not transactional: an existing copy is removed before the
+new one is renamed in, so a crash in that window leaves neither. Concurrent
+preparation of one dataset is unsupported and fails with a filesystem error
+rather than corrupting anything.
+
+### Offline contract
+
+Cache reads run inside a context manager that sets the offline environment
+variables and the matching library constants, because `huggingface_hub` and
+`datasets` read those variables once at import and the loader is imported
+before the call.
+
+Only the flags the installed release actually defines are touched, so the same
+guarantee holds across the supported `datasets` range: older releases use
+`HF_DATASETS_OFFLINE`, newer ones also carry the Hub-style name, and nothing is
+created on a version that lacks it. Every original value is restored on exit
+and on exceptions.
+
+Those flags are process-global, so loader calls are serialized with a
+module-level lock: a cache-only call cannot force a concurrent acquisition
+offline, and overlapping calls cannot leave the process permanently offline.
+Preparation across separate processes remains unsupported.
+
+Enforcement is still delegated to those libraries; this package adds no
+independent network barrier.
+
 ### Where to look
 
 | Task | File |
 |---|---|
-| Change local text loading behavior | `data/text_dataset.py` |
-| Change train/validation split behavior | `data/text_dataset.py` |
+| Add or change a dataset configuration field | `data/config.py` |
+| Change where prepared and cached data live | `data/config.py` |
+| Change the order locations are tried in | `data/resolver.py` |
+| Change prepared-data layout or staleness rules | `data/prepared.py` |
+| Change acquisition or add a new external source | `data/huggingface.py` |
+| Change the shared command-line options | `data/cli.py` |
+| Change local text loading or splitting | `data/text_dataset.py` |
 | Modify the character tokenizer | `data/tokenizer.py` |
 | Change batch sampling or input/target shifting | `data/dataloader.py` |
 | Export new data utilities | `data/__init__.py` |
 
+### Adding a dataset source
+
+Sources are dispatched explicitly rather than through a registry, because there
+are two of them. Add a module beside `huggingface.py`, add a branch in
+`resolver.py`, and add the source name to `SUPPORTED_SOURCES`. Introduce a
+registry only if a third source shows that the branch has become the problem.
+
 ### Scripts using this package
 
+- `scripts/prepare_dataset.py`
 - `scripts/check_data_pipeline.py`
 - `scripts/run_inference.py`
 - `scripts/analyze_untrained_model.py`
