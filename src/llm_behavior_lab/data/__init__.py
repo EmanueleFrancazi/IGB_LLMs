@@ -19,6 +19,10 @@ from llm_behavior_lab.data.errors import (
     DatasetPathNotFoundError,
     UnsupportedDatasetSourceError,
 )
+from llm_behavior_lab.data.huggingface import (
+    hf_cache_directory,
+    materialize,
+)
 from llm_behavior_lab.data.prepared import (
     MANIFEST_FILENAME,
     TEXT_FILENAME,
@@ -28,10 +32,12 @@ from llm_behavior_lab.data.prepared import (
     write_prepared,
 )
 from llm_behavior_lab.data.resolver import (
+    ROUTE_ACQUIRED,
     ROUTE_DATA_ROOT_PREPARED,
     ROUTE_EXPLICIT_PATH,
     ROUTE_REPO_FIXTURE,
     ROUTE_REPO_PREPARED,
+    ROUTE_SOURCE_CACHE,
     ResolvedDataset,
     acquisition_destination,
     resolve_dataset,
@@ -55,10 +61,12 @@ __all__ = [
     "HUGGINGFACE_SOURCE",
     "LOCAL_TEXT_SOURCE",
     "MANIFEST_FILENAME",
+    "ROUTE_ACQUIRED",
     "ROUTE_DATA_ROOT_PREPARED",
     "ROUTE_EXPLICIT_PATH",
     "ROUTE_REPO_FIXTURE",
     "ROUTE_REPO_PREPARED",
+    "ROUTE_SOURCE_CACHE",
     "ResolutionPolicy",
     "ResolvedDataset",
     "SUPPORTED_SOURCES",
@@ -67,8 +75,10 @@ __all__ = [
     "UnsupportedDatasetSourceError",
     "acquisition_destination",
     "clean_partial_directories",
+    "hf_cache_directory",
     "load_prepared",
     "load_text_file",
+    "materialize",
     "prepared_directory",
     "resolve_data_root",
     "resolve_dataset",

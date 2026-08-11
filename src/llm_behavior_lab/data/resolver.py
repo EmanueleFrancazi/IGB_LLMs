@@ -13,25 +13,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from llm_behavior_lab.data.config import (
+    HUGGINGFACE_SOURCE,
     LOCAL_TEXT_SOURCE,
     DatasetConfig,
     ResolutionPolicy,
     resolve_data_root,
 )
 from llm_behavior_lab.data.errors import (
+    DatasetAcquisitionError,
+    DatasetError,
     DatasetNotAvailableError,
     DatasetPathNotFoundError,
 )
-from llm_behavior_lab.data.prepared import load_prepared, prepared_directory
+from llm_behavior_lab.data.prepared import TEXT_FILENAME, load_prepared, prepared_directory
 from llm_behavior_lab.data.text_dataset import load_text_file
 
 ROUTE_EXPLICIT_PATH = "explicit_path"
 ROUTE_REPO_FIXTURE = "repo_fixture"
 ROUTE_REPO_PREPARED = "repo_prepared"
 ROUTE_DATA_ROOT_PREPARED = "data_root_prepared"
+ROUTE_SOURCE_CACHE = "source_cache"
+ROUTE_ACQUIRED = "acquired"
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,7 @@ def resolve_dataset(
     policy: ResolutionPolicy,
     *,
     repo_root: str | Path | None = None,
+    reporter: Callable[[str], None] | None = print,
 ) -> ResolvedDataset:
     """Locate the text file for a configured dataset.
 
@@ -107,14 +113,18 @@ def resolve_dataset(
     1. the configured ``dataset.path``
     2. a prepared copy inside the repository, under ``data/prepared/<name>/``
     3. a prepared copy under the external data root
+    4. a copy already in the source-specific cache, used without any network
+    5. acquisition, when the policy permits it and after announcing it
 
-    Acquisition is added as the subsystem grows. A ``local_text`` dataset always
-    resolves at step 1 and never consults the data root or the network.
+    A ``local_text`` dataset always resolves at step 1 and never consults the
+    data root, the cache, or the network.
 
     Args:
         dataset: Validated dataset identity.
         policy: Runtime policy for this invocation.
         repo_root: Repository root used to resolve relative configured paths.
+        reporter: Receives user-facing messages, notably the announcement made
+            before any network activity. Pass ``None`` to stay silent.
 
     Returns:
         A :class:`ResolvedDataset` pointing at readable data.
@@ -123,6 +133,7 @@ def resolve_dataset(
         DatasetPathNotFoundError: If a local dataset names a missing file.
         DatasetIntegrityError: If a prepared copy exists but was built for a
             different dataset identity.
+        DatasetAcquisitionError: If permitted acquisition fails.
         DatasetNotAvailableError: If no candidate location holds the dataset.
     """
 
@@ -148,6 +159,9 @@ def resolve_dataset(
         checked.append("configured path: not set")
 
     for route, directory in prepared_candidates(dataset, policy, repo_root=repo_root):
+        if policy.force_refresh:
+            checked.append(f"{route}: {directory} (skipped, refresh requested)")
+            continue
         found = load_prepared(directory, dataset, verify=dataset.verify)
         if found is not None:
             text_path, manifest = found
@@ -160,7 +174,108 @@ def resolve_dataset(
             )
         checked.append(f"{route}: {directory} ({_absence_reason(directory)})")
 
-    raise DatasetNotAvailableError(unavailable_message(dataset, policy, checked))
+    if dataset.source == HUGGINGFACE_SOURCE:
+        resolved = _resolve_huggingface(
+            dataset, policy, checked=checked, reporter=reporter
+        )
+        if resolved is not None:
+            return resolved
+
+    raise DatasetNotAvailableError(
+        unavailable_message(dataset, policy, checked, remedy=_remedy(dataset))
+    )
+
+
+def _resolve_huggingface(
+    dataset: DatasetConfig,
+    policy: ResolutionPolicy,
+    *,
+    checked: list[str],
+    reporter: Callable[[str], None] | None,
+) -> ResolvedDataset | None:
+    """Try the Hugging Face cache, then acquisition when policy permits.
+
+    Returns ``None`` when neither produced data, having recorded why in
+    ``checked``.
+    """
+
+    from llm_behavior_lab.data import huggingface
+
+    data_root = resolve_data_root(policy.data_root)
+    cache_dir = huggingface.hf_cache_directory(data_root)
+    destination = acquisition_destination(dataset, policy)
+
+    if not huggingface.datasets_available():
+        checked.append(
+            f"{ROUTE_SOURCE_CACHE}: unavailable (the optional 'datasets' package "
+            "is not installed)"
+        )
+        return None
+
+    # Reusing a cached copy needs no network, so it is attempted even when
+    # downloads are forbidden or offline mode is on. Overwriting the
+    # destination is safe: control only reaches here when no usable prepared
+    # copy exists, so anything present is an incomplete or refreshed attempt.
+    try:
+        manifest = huggingface.materialize(
+            dataset,
+            destination,
+            cache_dir=cache_dir,
+            allow_network=False,
+            reporter=reporter,
+            overwrite=True,
+        )
+        return _prepared_result(dataset, destination, manifest, ROUTE_SOURCE_CACHE)
+    except DatasetError as exc:
+        checked.append(f"{ROUTE_SOURCE_CACHE}: {cache_dir} (no cached copy)")
+        cache_failure = exc
+
+    if not policy.may_acquire:
+        return None
+
+    try:
+        manifest = huggingface.materialize(
+            dataset,
+            destination,
+            cache_dir=cache_dir,
+            allow_network=True,
+            reporter=reporter,
+            overwrite=True,
+        )
+    except DatasetError as exc:
+        raise DatasetAcquisitionError(
+            f"Could not obtain dataset {dataset.name!r}.\n{exc}"
+        ) from cache_failure
+    return _prepared_result(dataset, destination, manifest, ROUTE_ACQUIRED)
+
+
+def _prepared_result(
+    dataset: DatasetConfig,
+    directory: Path,
+    manifest: dict[str, Any],
+    route: str,
+) -> ResolvedDataset:
+    """Build the result for a dataset that was just written to ``directory``."""
+
+    return ResolvedDataset(
+        name=dataset.name,
+        source=dataset.source,
+        path=directory / TEXT_FILENAME,
+        route=route,
+        details={"prepared_dir": str(directory), "manifest": manifest},
+    )
+
+
+def _remedy(dataset: DatasetConfig) -> str | None:
+    """Suggest the command that would make an external dataset available."""
+
+    if dataset.source != HUGGINGFACE_SOURCE:
+        return None
+    return (
+        "To prepare it (requires network access and the optional dependency):\n"
+        '  python3 -m pip install -e ".[hf]"\n'
+        "  python3 scripts/prepare_dataset.py --data-config <config> --download"
+    )
 
 
 def prepared_candidates(
