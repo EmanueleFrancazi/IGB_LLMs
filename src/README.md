@@ -216,11 +216,24 @@ rather than corrupting anything.
 
 ### Offline contract
 
-Cache reads run inside a context manager that sets `HF_HUB_OFFLINE` and the
-matching library constants, because `huggingface_hub` and `datasets` read that
-variable once at import and the loader is imported before the call. Enforcement
-is delegated to those libraries; this package adds no independent network
-barrier.
+Cache reads run inside a context manager that sets the offline environment
+variables and the matching library constants, because `huggingface_hub` and
+`datasets` read those variables once at import and the loader is imported
+before the call.
+
+Only the flags the installed release actually defines are touched, so the same
+guarantee holds across the supported `datasets` range: older releases use
+`HF_DATASETS_OFFLINE`, newer ones also carry the Hub-style name, and nothing is
+created on a version that lacks it. Every original value is restored on exit
+and on exceptions.
+
+Those flags are process-global, so loader calls are serialized with a
+module-level lock: a cache-only call cannot force a concurrent acquisition
+offline, and overlapping calls cannot leave the process permanently offline.
+Preparation across separate processes remains unsupported.
+
+Enforcement is still delegated to those libraries; this package adds no
+independent network barrier.
 
 ### Where to look
 
