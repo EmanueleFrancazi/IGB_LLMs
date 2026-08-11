@@ -192,3 +192,23 @@ def test_external_dataset_configs_are_valid() -> None:
         assert dataset.source == HUGGINGFACE_SOURCE
         assert dataset.repo_id
         assert dataset.max_characters is not None, "external configs must stay bounded"
+
+
+def test_shipped_external_configs_bound_their_acquisition() -> None:
+    """An external config must not look small while iterating a whole split.
+
+    Either the split itself is sliced, or acquisition streams so the whole split
+    need not be materialized before the limits apply.
+    """
+
+    import yaml
+
+    from llm_behavior_lab.data import DatasetConfig
+
+    for name in ("wikitext2", "tinystories"):
+        path = REPO_ROOT / "configs" / "data" / f"{name}.yaml"
+        dataset = DatasetConfig.from_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        sliced = "[" in dataset.split
+        assert sliced or dataset.streaming, f"{name} bounds neither split nor iteration"
+        assert dataset.max_examples is not None
+        assert dataset.max_characters is not None

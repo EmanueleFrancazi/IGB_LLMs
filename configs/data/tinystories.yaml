@@ -3,9 +3,18 @@
 # Requires the optional dependency:
 #   python3 -m pip install -e ".[hf]"
 #
-# A bounded slice is prepared to disk rather than streamed, so the corpus is
-# reused across runs and remains available offline. Raise max_examples and
-# max_characters for larger experiments.
+# The upstream train split is far larger than the corpus prepared here, so
+# acquisition iterates it lazily (streaming) instead of materializing the whole
+# split first. The preparation loop consumes only max_examples/max_characters.
+#
+# What this bounds: the examples consumed and the prepared text.txt. Exact
+# network bytes and shard/cache behaviour depend on the source format and on
+# the datasets library, and have not been measured; do not read "streaming" as
+# a strict network-byte guarantee.
+#
+# The reusable artifact is the prepared text.txt under the data root, not the
+# Hugging Face cache: a streamed dataset does not populate the arrow cache, so
+# the source-cache route will not serve this config.
 
 dataset:
   name: tinystories_train200
@@ -15,6 +24,7 @@ dataset:
   split: train
   revision: null
   text_field: text
+  streaming: true
   max_examples: 200
   max_characters: 200000
   document_separator: "\n\n"

@@ -420,3 +420,102 @@ def test_source_description_is_readable() -> None:
     assert "subset=wikitext-2-raw-v1" in described
     assert "split=train[:10]" in described
     assert "revision=abc" in described
+
+
+def test_streaming_is_forwarded_to_the_loader(monkeypatch, tmp_path) -> None:
+    """Lazy iteration must be requested when the config asks for it."""
+
+    calls = install_fake_loader(monkeypatch)
+
+    materialize(
+        _dataset(streaming=True),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert calls[0]["kwargs"]["streaming"] is True
+
+
+def test_streaming_is_absent_unless_requested(fake_datasets, tmp_path) -> None:
+    """The default must remain ordinary non-streaming loading."""
+
+    materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert "streaming" not in fake_datasets[0]["kwargs"]
+
+
+def test_streaming_changes_prepared_identity(tmp_path) -> None:
+    """A corpus prepared by streaming is not interchangeable with one that was not."""
+
+    from llm_behavior_lab.data.prepared import describe_mismatch
+
+    manifest = {"name": "wikitext2", **{f: getattr(_dataset(), f) for f in ("source",
+        "repo_id", "subset", "split", "revision", "text_field", "max_examples",
+        "max_characters", "document_separator", "streaming")}}
+
+    assert describe_mismatch(manifest, _dataset()) is None
+    assert "streaming" in describe_mismatch(manifest, _dataset(streaming=True))
+
+
+def test_force_refresh_bypasses_an_available_cache(tmp_path, monkeypatch) -> None:
+    """A refresh must reach the source even when a cached copy would satisfy it."""
+
+    calls = install_fake_loader(monkeypatch)  # offline probe would succeed
+    dataset = _dataset()
+    write_prepared(prepared_directory(tmp_path, dataset.name), "stale", dataset)
+
+    policy = ResolutionPolicy(data_root=tmp_path, allow_download=True, force_refresh=True)
+    resolved = resolve_dataset(dataset, policy, reporter=None)
+
+    assert resolved.route == ROUTE_ACQUIRED
+    # Only the networked call ran; the cache-only probe was skipped entirely.
+    assert [call["offline"] for call in calls] == [False]
+
+
+def test_force_refresh_requests_a_fresh_download(tmp_path, monkeypatch) -> None:
+    """The loader must be told not to reuse its own cache."""
+
+    calls = install_fake_loader(monkeypatch)
+
+    policy = ResolutionPolicy(data_root=tmp_path, allow_download=True, force_refresh=True)
+    resolve_dataset(_dataset(), policy, reporter=None)
+
+    assert calls[0]["kwargs"]["download_mode"] == "force_redownload"
+
+
+def test_ordinary_acquisition_does_not_force_a_download(tmp_path, monkeypatch) -> None:
+    """Normal runs must keep reusing the loader's cache."""
+
+    calls = install_fake_loader(monkeypatch, fail_offline=True)
+
+    resolve_dataset(
+        _dataset(), ResolutionPolicy(data_root=tmp_path, allow_download=True), reporter=None
+    )
+
+    assert "download_mode" not in calls[-1]["kwargs"]
+
+
+def test_failed_refresh_leaves_the_previous_prepared_copy(tmp_path, monkeypatch) -> None:
+    """A refresh that cannot reach the source must not destroy usable data."""
+
+    dataset = _dataset()
+    destination = prepared_directory(tmp_path, dataset.name)
+    write_prepared(destination, "previous corpus", dataset)
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("source unreachable")
+
+    monkeypatch.setattr(huggingface, "_import_load_dataset", lambda: failing)
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+
+    policy = ResolutionPolicy(data_root=tmp_path, allow_download=True, force_refresh=True)
+    with pytest.raises(DatasetAcquisitionError):
+        resolve_dataset(dataset, policy, reporter=None)
+
+    assert (destination / TEXT_FILENAME).read_text(encoding="utf-8") == "previous corpus"

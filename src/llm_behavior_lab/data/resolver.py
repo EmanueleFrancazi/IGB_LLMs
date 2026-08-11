@@ -212,23 +212,31 @@ def _resolve_huggingface(
         )
         return None
 
-    # Reusing a cached copy needs no network, so it is attempted even when
-    # downloads are forbidden or offline mode is on. Overwriting the
-    # destination is safe: control only reaches here when no usable prepared
-    # copy exists, so anything present is an incomplete or refreshed attempt.
-    try:
-        manifest = huggingface.materialize(
-            dataset,
-            destination,
-            cache_dir=cache_dir,
-            allow_network=False,
-            reporter=reporter,
-            overwrite=True,
-        )
-        return _prepared_result(dataset, destination, manifest, ROUTE_SOURCE_CACHE)
-    except DatasetError as exc:
-        checked.append(f"{ROUTE_SOURCE_CACHE}: {cache_dir} (no cached copy)")
-        cache_failure = exc
+    cache_failure: DatasetError | None = None
+
+    # A refresh must reach the source, so local reuse is skipped entirely.
+    # Otherwise a populated cache would return the same bytes and the refresh
+    # would be silently meaningless.
+    if not policy.force_refresh:
+        # Reusing a cached copy needs no network, so it is attempted even when
+        # downloads are forbidden or offline mode is on. Overwriting the
+        # destination is safe: control only reaches here when no usable prepared
+        # copy exists, so anything present is an incomplete or refreshed attempt.
+        try:
+            manifest = huggingface.materialize(
+                dataset,
+                destination,
+                cache_dir=cache_dir,
+                allow_network=False,
+                reporter=reporter,
+                overwrite=True,
+            )
+            return _prepared_result(dataset, destination, manifest, ROUTE_SOURCE_CACHE)
+        except DatasetError as exc:
+            checked.append(f"{ROUTE_SOURCE_CACHE}: {cache_dir} (no cached copy)")
+            cache_failure = exc
+    else:
+        checked.append(f"{ROUTE_SOURCE_CACHE}: skipped, refresh requested")
 
     if not policy.may_acquire:
         return None
@@ -241,6 +249,7 @@ def _resolve_huggingface(
             allow_network=True,
             reporter=reporter,
             overwrite=True,
+            force_redownload=policy.force_refresh,
         )
     except DatasetError as exc:
         raise DatasetAcquisitionError(

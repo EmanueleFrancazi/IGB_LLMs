@@ -48,7 +48,11 @@ def add_dataset_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--force-refresh",
         action="store_true",
-        help="Re-acquire an external dataset, replacing any prepared copy.",
+        help=(
+            "Re-acquire an external dataset from its source, bypassing prepared "
+            "and cached copies and requesting a fresh download. Requires "
+            "acquisition to be permitted."
+        ),
     )
 
 

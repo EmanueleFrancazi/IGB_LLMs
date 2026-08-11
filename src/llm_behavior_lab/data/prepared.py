@@ -50,6 +50,7 @@ IDENTITY_FIELDS = (
     "max_examples",
     "max_characters",
     "document_separator",
+    "streaming",
 )
 
 

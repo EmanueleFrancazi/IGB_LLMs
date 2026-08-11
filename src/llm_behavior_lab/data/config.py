@@ -78,6 +78,8 @@ class DatasetConfig:
         max_examples: Optional cap on the number of rows consumed.
         max_characters: Optional cap on the number of characters kept.
         document_separator: String placed between concatenated documents.
+        streaming: Iterate the source lazily while preparing, so the whole split
+            need not be materialized first. Useful for large upstream splits.
         verify: Whether prepared-data checksums are re-verified on load.
     """
 
@@ -92,6 +94,7 @@ class DatasetConfig:
     max_examples: int | None = None
     max_characters: int | None = None
     document_separator: str = "\n\n"
+    streaming: bool = False
     verify: bool = False
 
     def __post_init__(self) -> None:
@@ -209,6 +212,7 @@ class DatasetConfig:
             max_examples=optional_int("max_examples"),
             max_characters=optional_int("max_characters"),
             document_separator=str(section.get("document_separator", "\n\n")),
+            streaming=bool(section.get("streaming", False)),
             verify=bool(section.get("verify", False)),
         )
 

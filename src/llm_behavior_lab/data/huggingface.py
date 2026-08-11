@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from llm_behavior_lab.data.config import DatasetConfig
 from llm_behavior_lab.data.errors import DatasetAcquisitionError
-from llm_behavior_lab.data.prepared import clean_partial_directories, write_prepared
+from llm_behavior_lab.data.prepared import write_prepared
 
 HF_CACHE_DIR_NAME = "hf"
 INSTALL_HINT = 'python3 -m pip install -e ".[hf]"'
@@ -191,10 +191,15 @@ def describe_source(dataset: DatasetConfig) -> str:
     return ", ".join(parts)
 
 
-def _load_rows(dataset: DatasetConfig, cache_dir: Path, *, allow_network: bool) -> Any:
+def _load_rows(
+    dataset: DatasetConfig,
+    cache_dir: Path,
+    *,
+    allow_network: bool,
+    force_redownload: bool = False,
+) -> Any:
     """Call ``load_dataset`` with caching and offline behavior made explicit."""
 
-    check_dependency_environment()
     load_dataset = _import_load_dataset()
 
     kwargs: dict[str, Any] = {
@@ -203,6 +208,10 @@ def _load_rows(dataset: DatasetConfig, cache_dir: Path, *, allow_network: bool) 
     }
     if dataset.revision:
         kwargs["revision"] = dataset.revision
+    if dataset.streaming:
+        kwargs["streaming"] = True
+    if force_redownload:
+        kwargs["download_mode"] = "force_redownload"
 
     previous = os.environ.get("HF_HUB_OFFLINE")
     if not allow_network:
@@ -228,6 +237,7 @@ def materialize(
     reporter: Callable[[str], None] | None = None,
     overwrite: bool = False,
     prepared_by: str | None = None,
+    force_redownload: bool = False,
 ) -> dict[str, Any]:
     """Produce a prepared dataset directory from a Hugging Face dataset.
 
@@ -240,6 +250,8 @@ def materialize(
         reporter: Receives user-facing progress messages.
         overwrite: Replace an existing prepared directory.
         prepared_by: Command recorded in the manifest.
+        force_redownload: Ask the loader to re-fetch rather than reuse its own
+            cache. Only meaningful together with ``allow_network``.
 
     Returns:
         The manifest of the prepared dataset.
@@ -258,6 +270,7 @@ def materialize(
             f"  source     : huggingface {describe_source(dataset)}\n"
             f"  limits     : max_examples={dataset.max_examples}, "
             f"max_characters={dataset.max_characters}\n"
+            f"  streaming  : {dataset.streaming}\n"
             f"  cache      : {cache_dir}\n"
             f"  destination: {destination}\n"
             "  This will download data. Use --offline or --no-download to prevent it."
@@ -265,7 +278,12 @@ def materialize(
         cache_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        rows = _load_rows(dataset, cache_dir, allow_network=allow_network)
+        rows = _load_rows(
+            dataset,
+            cache_dir,
+            allow_network=allow_network,
+            force_redownload=force_redownload,
+        )
     except DatasetAcquisitionError:
         raise
     except Exception as exc:
@@ -282,7 +300,6 @@ def materialize(
         document_separator=dataset.document_separator,
     )
 
-    clean_partial_directories(destination.parent)
     manifest = write_prepared(
         destination,
         text,
