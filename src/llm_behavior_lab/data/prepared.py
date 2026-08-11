@@ -10,6 +10,14 @@ moved into place atomically, so its presence is the completeness signal: a
 directory without a manifest is an interrupted preparation, never a usable
 dataset.
 
+Staging directories are cleaned up only by the invocation that created them.
+Nothing here removes another process's ``.partial`` directory, because it cannot
+tell an abandoned one from work in progress. Concurrent preparation of the same
+dataset is not supported: two processes may collide at replacement time and one
+will fail with a filesystem error, which is safe because no observer ever sees a
+half-written dataset. Sweeping abandoned staging directories is left to the
+user; they are inert and ignored by resolution.
+
 The manifest also records the dataset identity that produced the text. When a
 configuration later disagrees with it -- a different split, revision, or size
 limit -- the mismatch is reported instead of silently reusing the old corpus.
@@ -137,9 +145,7 @@ def load_prepared(
     if mismatch is not None:
         raise DatasetIntegrityError(
             f"Prepared data in {directory} does not match the requested dataset.\n"
-            f"  {mismatch}\n"
-            "Re-prepare it with --force-refresh, or point the config at a different "
-            "dataset name."
+            f"  {mismatch}"
         )
 
     if verify:
@@ -149,8 +155,7 @@ def load_prepared(
             raise DatasetIntegrityError(
                 f"Prepared data in {directory} has changed since it was prepared.\n"
                 f"  recorded sha256 {recorded}\n"
-                f"  actual   sha256 {actual}\n"
-                "Re-prepare it with --force-refresh."
+                f"  actual   sha256 {actual}"
             )
 
     return text_path, manifest
@@ -248,21 +253,3 @@ def write_prepared(
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return manifest
-
-
-def clean_partial_directories(parent: str | Path) -> list[Path]:
-    """Remove staging directories left behind by an interrupted preparation.
-
-    Returns:
-        The directories that were removed.
-    """
-
-    parent = Path(parent)
-    if not parent.is_dir():
-        return []
-    removed: list[Path] = []
-    for candidate in parent.iterdir():
-        if candidate.is_dir() and candidate.name.endswith(PARTIAL_SUFFIX):
-            shutil.rmtree(candidate, ignore_errors=True)
-            removed.append(candidate)
-    return removed

@@ -25,6 +25,7 @@ from llm_behavior_lab.data.config import (
 from llm_behavior_lab.data.errors import (
     DatasetAcquisitionError,
     DatasetError,
+    DatasetIntegrityError,
     DatasetNotAvailableError,
     DatasetPathNotFoundError,
 )
@@ -163,7 +164,12 @@ def resolve_dataset(
         if policy.force_refresh:
             checked.append(f"{route}: {directory} (skipped, refresh requested)")
             continue
-        found = load_prepared(directory, dataset, verify=dataset.verify)
+        try:
+            found = load_prepared(directory, dataset, verify=dataset.verify)
+        except DatasetIntegrityError as exc:
+            raise DatasetIntegrityError(
+                f"{exc}\n{_integrity_remedy(policy)}"
+            ) from exc
         if found is not None:
             text_path, manifest = found
             return ResolvedDataset(
@@ -273,6 +279,26 @@ def _prepared_result(
         path=directory / TEXT_FILENAME,
         route=route,
         details={"prepared_dir": str(directory), "manifest": manifest},
+    )
+
+
+def _integrity_remedy(policy: ResolutionPolicy) -> str:
+    """Suggest a fix that the policy in effect actually allows.
+
+    Recommending --force-refresh while offline would send the user to a command
+    that the policy rejects, so the advice changes with the policy.
+    """
+
+    if policy.may_acquire:
+        return (
+            "Re-prepare it with --force-refresh, or point the config at a "
+            "different dataset name."
+        )
+    blocker = "--offline" if policy.offline else "--no-download"
+    return (
+        f"Re-preparing needs acquisition, which {blocker} forbids. Either rerun "
+        "without that flag, remove the prepared directory by hand, or point the "
+        "config at a different dataset name."
     )
 
 

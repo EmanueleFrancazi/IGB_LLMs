@@ -27,7 +27,6 @@ from llm_behavior_lab.data.huggingface import (
 from llm_behavior_lab.data.prepared import (
     MANIFEST_FILENAME,
     TEXT_FILENAME,
-    clean_partial_directories,
     load_prepared,
     prepared_directory,
     write_prepared,
@@ -76,7 +75,6 @@ __all__ = [
     "UnsupportedDatasetSourceError",
     "acquisition_destination",
     "add_dataset_arguments",
-    "clean_partial_directories",
     "hf_cache_directory",
     "load_prepared",
     "load_text_file",

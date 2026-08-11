@@ -22,7 +22,6 @@ from llm_behavior_lab.data import (
     DatasetNotAvailableError,
     ResolutionPolicy,
     acquisition_destination,
-    clean_partial_directories,
     load_prepared,
     prepared_directory,
     resolve_dataset,
@@ -190,7 +189,9 @@ def test_stale_prepared_data_is_reported_not_reused(tmp_path, field: str, value)
     requested = _external_dataset(**{field: value})
 
     with pytest.raises(DatasetIntegrityError) as excinfo:
-        resolve_dataset(requested, ResolutionPolicy(data_root=tmp_path))
+        resolve_dataset(
+            requested, ResolutionPolicy(data_root=tmp_path, allow_download=True)
+        )
 
     message = str(excinfo.value)
     assert field in message
@@ -272,23 +273,46 @@ def test_failed_preparation_leaves_nothing_publishable(tmp_path, monkeypatch) ->
         resolve_dataset(dataset, ResolutionPolicy(data_root=tmp_path))
 
 
-def test_partial_directories_are_ignored_and_cleanable(tmp_path) -> None:
-    """Leftover staging directories never resolve and can be swept away."""
+def test_partial_directories_are_ignored_and_left_alone(tmp_path, monkeypatch) -> None:
+    """Another process's staging directory must never resolve, nor be destroyed."""
 
     dataset = _external_dataset()
     directory = prepared_directory(tmp_path, dataset.name)
     directory.parent.mkdir(parents=True)
-    stray = directory.parent / f".{dataset.name}.abc123{PARTIAL_SUFFIX}"
-    stray.mkdir()
-    (stray / TEXT_FILENAME).write_text("orphaned", encoding="utf-8")
+    other_process = directory.parent / f".{dataset.name}.abc123{PARTIAL_SUFFIX}"
+    other_process.mkdir()
+    (other_process / TEXT_FILENAME).write_text("in flight elsewhere", encoding="utf-8")
 
     with pytest.raises(DatasetNotAvailableError):
-        resolve_dataset(dataset, ResolutionPolicy(data_root=tmp_path))
+        resolve_dataset(dataset, ResolutionPolicy(data_root=tmp_path), reporter=None)
 
-    removed = clean_partial_directories(directory.parent)
+    # Preparing our own copy must not touch it.
+    write_prepared(directory, "our corpus", dataset)
 
-    assert removed == [stray]
-    assert not stray.exists()
+    assert other_process.exists()
+    assert (other_process / TEXT_FILENAME).read_text(encoding="utf-8") == "in flight elsewhere"
+
+
+def test_failed_preparation_removes_only_its_own_staging(tmp_path, monkeypatch) -> None:
+    """Cleanup on failure is scoped to the staging this call created."""
+
+    dataset = _external_dataset()
+    directory = prepared_directory(tmp_path, dataset.name)
+    directory.parent.mkdir(parents=True)
+    foreign = directory.parent / f".{dataset.name}.other{PARTIAL_SUFFIX}"
+    foreign.mkdir()
+
+    import llm_behavior_lab.data.prepared as prepared_module
+
+    monkeypatch.setattr(
+        prepared_module.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("boom"))
+    )
+    with pytest.raises(OSError):
+        write_prepared(directory, "corpus", dataset)
+
+    assert foreign.exists()
+    leftovers = [p for p in directory.parent.iterdir() if p.name.endswith(PARTIAL_SUFFIX)]
+    assert leftovers == [foreign]
 
 
 def test_unavailable_message_lists_every_prepared_location(tmp_path) -> None:
@@ -321,3 +345,28 @@ def test_local_text_never_consults_prepared_directories(tmp_path) -> None:
     )
 
     assert resolved.read_text() == "tiny"
+
+
+def test_integrity_remedy_matches_the_policy_in_effect(tmp_path) -> None:
+    """Advice must not name a command the current policy forbids."""
+
+    prepared_with = _external_dataset()
+    write_prepared(prepared_directory(tmp_path, prepared_with.name), "old", prepared_with)
+    requested = _external_dataset(split="train[:99]")
+
+    with pytest.raises(DatasetIntegrityError) as offline:
+        resolve_dataset(requested, ResolutionPolicy(data_root=tmp_path, offline=True))
+    message = str(offline.value)
+    assert "--offline" in message
+    assert "Re-prepare it with --force-refresh" not in message
+    assert "remove the prepared directory by hand" in message
+
+    with pytest.raises(DatasetIntegrityError) as no_download:
+        resolve_dataset(requested, ResolutionPolicy(data_root=tmp_path))
+    assert "--no-download" in str(no_download.value)
+
+    with pytest.raises(DatasetIntegrityError) as permitted:
+        resolve_dataset(
+            requested, ResolutionPolicy(data_root=tmp_path, allow_download=True)
+        )
+    assert "--force-refresh" in str(permitted.value)
