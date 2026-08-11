@@ -31,8 +31,8 @@ from llm_behavior_lab.data.errors import (
 from llm_behavior_lab.data.prepared import TEXT_FILENAME, load_prepared, prepared_directory
 from llm_behavior_lab.data.text_dataset import load_text_file
 
-ROUTE_EXPLICIT_PATH = "explicit_path"
-ROUTE_REPO_FIXTURE = "repo_fixture"
+ROUTE_LOCAL_PATH = "local_path"
+ROUTE_REPOSITORY_PATH = "repository_path"
 ROUTE_REPO_PREPARED = "repo_prepared"
 ROUTE_DATA_ROOT_PREPARED = "data_root_prepared"
 ROUTE_SOURCE_CACHE = "source_cache"
@@ -47,8 +47,9 @@ class ResolvedDataset:
         name: Dataset identifier from the configuration.
         source: Dataset source kind the configuration requested.
         path: Text file holding the dataset contents.
-        route: Which candidate location supplied the data. Useful in logs and
-            in experiment provenance.
+        route: Which candidate location supplied the data. Describes where the
+            bytes came from, not how they were requested, and does not by itself
+            imply that another clone would obtain the same bytes.
         details: Extra provenance recorded by the route that resolved the
             dataset. Empty for plain local files.
     """
@@ -334,16 +335,23 @@ def _absence_reason(directory: Path) -> str:
 
 
 def _path_route(path: Path, repo_root: str | Path | None) -> str:
-    """Classify a resolved path as a tracked fixture or an explicit override."""
+    """Classify a resolved path by location, not by how it was requested.
+
+    The distinction is only whether the file lies inside the repository. It
+    deliberately says nothing about whether the file is tracked: an ignored or
+    untracked file inside the checkout is still ``repository_path``. Claiming
+    otherwise would require a Git lookup on every dataset load and would imply a
+    reproducibility guarantee this route cannot make.
+    """
 
     if repo_root is None:
-        return ROUTE_EXPLICIT_PATH
+        return ROUTE_LOCAL_PATH
     root = Path(repo_root).expanduser()
     try:
         path.relative_to(root)
     except ValueError:
-        return ROUTE_EXPLICIT_PATH
-    return ROUTE_REPO_FIXTURE
+        return ROUTE_LOCAL_PATH
+    return ROUTE_REPOSITORY_PATH
 
 
 def unavailable_message(

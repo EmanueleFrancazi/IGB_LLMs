@@ -162,8 +162,15 @@ def build_manifest(
     *,
     num_documents: int | None = None,
     prepared_by: str | None = None,
+    resolved: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the manifest recorded alongside a prepared corpus."""
+    """Build the manifest recorded alongside a prepared corpus.
+
+    ``resolved`` holds what the source actually returned, kept separate from the
+    requested identity and excluded from :data:`IDENTITY_FIELDS`: two
+    preparations of the same request may legitimately differ there, and a
+    difference must not be mistaken for staleness.
+    """
 
     manifest: dict[str, Any] = {
         "manifest_version": MANIFEST_VERSION,
@@ -174,6 +181,8 @@ def build_manifest(
         "sha256": text_digest(text),
     }
     manifest.update(dataset_identity(dataset))
+    if resolved is not None:
+        manifest["resolved"] = resolved
     if prepared_by:
         manifest["prepared_by"] = prepared_by
     return manifest
@@ -187,6 +196,7 @@ def write_prepared(
     num_documents: int | None = None,
     prepared_by: str | None = None,
     overwrite: bool = False,
+    resolved: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a prepared dataset directory atomically.
 
@@ -215,7 +225,11 @@ def write_prepared(
 
     directory.parent.mkdir(parents=True, exist_ok=True)
     manifest = build_manifest(
-        dataset, text, num_documents=num_documents, prepared_by=prepared_by
+        dataset,
+        text,
+        num_documents=num_documents,
+        prepared_by=prepared_by,
+        resolved=resolved,
     )
     staging = Path(
         tempfile.mkdtemp(

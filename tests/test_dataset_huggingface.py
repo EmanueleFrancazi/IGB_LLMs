@@ -519,3 +519,86 @@ def test_failed_refresh_leaves_the_previous_prepared_copy(tmp_path, monkeypatch)
         resolve_dataset(dataset, policy, reporter=None)
 
     assert (destination / TEXT_FILENAME).read_text(encoding="utf-8") == "previous corpus"
+
+
+def test_manifest_records_what_the_loader_returned(monkeypatch, tmp_path) -> None:
+    """The manifest must say what came back, not only what was asked for."""
+
+    class FakeInfo:
+        version = "1.0.0"
+        download_size = 4321
+        dataset_size = 8765
+
+    class FakeRows(list):
+        info = FakeInfo()
+        _fingerprint = "abc123fingerprint"
+        config_name = "wikitext-2-raw-v1"
+        split = "train"
+
+    monkeypatch.setattr(
+        huggingface, "_import_load_dataset", lambda: lambda *a, **k: FakeRows(ROWS)
+    )
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+
+    manifest = materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    resolved = manifest["resolved"]
+    assert resolved["fingerprint"] == "abc123fingerprint"
+    assert resolved["version"] == "1.0.0"
+    assert resolved["config_name"] == "wikitext-2-raw-v1"
+    assert resolved["download_size"] == 4321
+    assert resolved["dataset_size"] == 8765
+
+
+def test_resolved_fields_are_none_when_the_loader_exposes_nothing(
+    fake_datasets, tmp_path
+) -> None:
+    """A minimal loader must not break preparation."""
+
+    manifest = materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert manifest["resolved"]["fingerprint"] is None
+    assert manifest["resolved"]["version"] is None
+
+
+def test_resolved_details_never_trigger_a_staleness_mismatch(
+    fake_datasets, tmp_path
+) -> None:
+    """Two preparations may differ upstream without the copy looking stale."""
+
+    from llm_behavior_lab.data.prepared import describe_mismatch
+
+    manifest = materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+    manifest["resolved"]["fingerprint"] = "something-completely-different"
+
+    assert describe_mismatch(manifest, _dataset()) is None
+
+
+def test_no_hub_lookup_is_performed_for_provenance(fake_datasets, tmp_path) -> None:
+    """Recording provenance must not add a network operation."""
+
+    import sys
+
+    assert "huggingface_hub" not in Path(huggingface.__file__).read_text(encoding="utf-8")
+    materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+    assert len(fake_datasets) == 1  # exactly one loader call, no extra lookup

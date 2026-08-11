@@ -22,6 +22,9 @@ dataset:
   repo_id: roneneldan/TinyStories
   subset: null
   split: train
+  # Unpinned. The prepared manifest records the fingerprint and version that
+  # were actually materialized; read them after the first real acquisition and
+  # pin this field to make the corpus reproducible from upstream.
   revision: null
   text_field: text
   streaming: true

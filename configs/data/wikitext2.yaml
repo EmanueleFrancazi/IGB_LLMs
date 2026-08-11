@@ -18,6 +18,9 @@ dataset:
   repo_id: Salesforce/wikitext
   subset: wikitext-2-raw-v1
   split: train[:1000]
+  # Unpinned. The prepared manifest records the fingerprint and version that
+  # were actually materialized; read them after the first real acquisition and
+  # pin this field to make the corpus reproducible from upstream.
   revision: null
   text_field: text
   max_examples: 1000

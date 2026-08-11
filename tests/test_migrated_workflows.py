@@ -59,7 +59,7 @@ def test_data_pipeline_check_still_runs_on_the_tiny_fixture(capsys) -> None:
     assert "Logits shape: (4, 16, 256)" in out
     assert "data/raw/tiny_corpus.txt" in out
     # New, additive: the route the dataset came from.
-    assert "Dataset resolved via: repo_fixture" in out
+    assert "Dataset resolved via: repository_path" in out
 
 
 def test_inference_check_still_runs_on_the_tiny_fixture(capsys) -> None:
@@ -71,7 +71,7 @@ def test_inference_check_still_runs_on_the_tiny_fixture(capsys) -> None:
     assert "Phase 4 inference check completed successfully." in out
     assert "Tokenizer vocab size:" in out
     assert "Decoded generated text:" in out
-    assert "Dataset resolved via: repo_fixture" in out
+    assert "Dataset resolved via: repository_path" in out
 
 
 def test_untrained_analysis_still_runs_on_the_tiny_fixture(capsys) -> None:
@@ -83,7 +83,7 @@ def test_untrained_analysis_still_runs_on_the_tiny_fixture(capsys) -> None:
     assert "Phase 5 untrained-model analysis completed successfully." in out
     assert "Mean output entropy:" in out
     assert "KL(predicted || empirical):" in out
-    assert "Dataset resolved via: repo_fixture" in out
+    assert "Dataset resolved via: repository_path" in out
 
 
 def test_offline_flag_does_not_disturb_the_local_workflow(capsys) -> None:
@@ -93,7 +93,7 @@ def test_offline_flag_does_not_disturb_the_local_workflow(capsys) -> None:
     out = capsys.readouterr().out
 
     assert "Phase 3 data pipeline check completed successfully." in out
-    assert "Dataset resolved via: repo_fixture" in out
+    assert "Dataset resolved via: repository_path" in out
 
 
 def test_persisted_run_keeps_dataset_path_and_adds_provenance(tmp_path) -> None:
@@ -125,7 +125,7 @@ def test_persisted_run_keeps_dataset_path_and_adds_provenance(tmp_path) -> None:
     # Additive provenance.
     assert metadata["dataset"]["name"] == "tiny_local_text"
     assert metadata["dataset"]["source"] == "local_text"
-    assert metadata["dataset"]["route"] == "repo_fixture"
+    assert metadata["dataset"]["route"] == "repository_path"
     assert metadata["dataset"]["path"] == metadata["dataset_path"]
 
 
@@ -146,7 +146,7 @@ def test_prepare_dataset_resolves_the_tiny_fixture(capsys) -> None:
     out = capsys.readouterr().out
 
     assert "Dataset preparation completed successfully." in out
-    assert "Resolved via: repo_fixture" in out
+    assert "Resolved via: repository_path" in out
 
 
 def test_prepare_dataset_reports_what_is_missing_when_offline(tmp_path, capsys) -> None:

@@ -191,6 +191,32 @@ def describe_source(dataset: DatasetConfig) -> str:
     return ", ".join(parts)
 
 
+def describe_resolved(rows: Any) -> dict[str, Any]:
+    """Summarize what the loader actually returned, for the manifest.
+
+    The requested identity says what was asked for; this says what came back.
+    Everything is read from the object already in hand -- no extra network call
+    is made, so nothing here works differently offline. Fields the loader does
+    not expose are recorded as ``None`` rather than omitted, so a reader can
+    tell "unavailable" from "not recorded".
+
+    The upstream commit SHA is deliberately not fetched: obtaining it needs a
+    Hub lookup, which would add a network operation to a path that may be
+    running offline. Pin ``dataset.revision`` when strict upstream
+    reproducibility matters.
+    """
+
+    info = getattr(rows, "info", None)
+    return {
+        "fingerprint": getattr(rows, "_fingerprint", None),
+        "version": str(getattr(info, "version", None)) if info is not None else None,
+        "config_name": getattr(rows, "config_name", None),
+        "split": str(getattr(rows, "split", None)) if getattr(rows, "split", None) else None,
+        "download_size": getattr(info, "download_size", None) if info is not None else None,
+        "dataset_size": getattr(info, "dataset_size", None) if info is not None else None,
+    }
+
+
 def _load_rows(
     dataset: DatasetConfig,
     cache_dir: Path,
@@ -292,6 +318,7 @@ def materialize(
             f"  {type(exc).__name__}: {exc}"
         ) from exc
 
+    resolved = describe_resolved(rows)
     text, num_documents = concatenate_text_examples(
         rows,
         text_field=dataset.text_field,
@@ -307,6 +334,7 @@ def materialize(
         num_documents=num_documents,
         prepared_by=prepared_by,
         overwrite=overwrite,
+        resolved=resolved,
     )
     announce(
         f"Prepared dataset {dataset.name!r}: {manifest['num_characters']} characters "
