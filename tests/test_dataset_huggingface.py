@@ -826,3 +826,172 @@ def test_manifest_num_characters_respects_the_configured_limit(monkeypatch, tmp_
         len((prepared_directory(tmp_path, "wikitext2") / TEXT_FILENAME).read_text("utf-8"))
         == manifest["num_characters"]
     )
+
+
+# --- Streaming resource release ------------------------------------------
+#
+# The upstream shutdown abort these tests exist for is a native failure that no
+# unit test can provoke. What is testable is the contract that prevents it:
+# streamed datasets are released explicitly once nothing needs them, and
+# ordinary loads are left alone. Each test patches the module's own collection
+# seam rather than touching interpreter-wide garbage collection.
+
+
+def record_releases(monkeypatch, *, on_release=None) -> list[str]:
+    """Replace the collection seam with a recorder."""
+
+    events: list[str] = []
+
+    def release() -> None:
+        events.append("released")
+        if on_release is not None:
+            on_release()
+
+    monkeypatch.setattr(huggingface, "_release_stream", release)
+    return events
+
+
+def test_streaming_materialization_releases_the_stream(monkeypatch, tmp_path) -> None:
+    """A streamed dataset must not be left for interpreter shutdown to free."""
+
+    install_fake_loader(monkeypatch)
+    releases = record_releases(monkeypatch)
+
+    manifest = materialize(
+        _dataset(streaming=True),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert releases == ["released"]
+    assert manifest["num_documents"] == 2
+
+
+def test_non_streaming_materialization_does_not_force_collection(
+    monkeypatch, tmp_path
+) -> None:
+    """Ordinary loads keep their existing behavior; collection is not free."""
+
+    install_fake_loader(monkeypatch)
+    releases = record_releases(monkeypatch)
+
+    materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert releases == []
+
+
+def test_the_stream_is_released_before_the_corpus_is_written(
+    monkeypatch, tmp_path
+) -> None:
+    """Release happens once the dataset is no longer needed, not at the end."""
+
+    destination = prepared_directory(tmp_path, "wikitext2")
+    install_fake_loader(monkeypatch)
+    published: list[bool] = []
+    record_releases(monkeypatch, on_release=lambda: published.append(destination.exists()))
+
+    materialize(
+        _dataset(streaming=True),
+        destination,
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert published == [False]
+    assert destination.exists()
+
+
+def test_the_stream_is_released_when_concatenation_fails(monkeypatch, tmp_path) -> None:
+    """A partially consumed stream must be released on the failure path too."""
+
+    install_fake_loader(monkeypatch, rows=[{"wrong_field": "no text here"}])
+    releases = record_releases(monkeypatch)
+
+    with pytest.raises(DatasetAcquisitionError, match="text_field"):
+        materialize(
+            _dataset(streaming=True),
+            prepared_directory(tmp_path, "wikitext2"),
+            cache_dir=tmp_path / "hf",
+            allow_network=True,
+        )
+
+    assert releases == ["released"]
+
+
+def test_the_stream_is_released_when_provenance_extraction_fails(
+    monkeypatch, tmp_path
+) -> None:
+    """Failure before consumption must still release the dataset."""
+
+    class HostileRows(list):
+        @property
+        def info(self):
+            raise RuntimeError("upstream metadata is unavailable")
+
+    monkeypatch.setattr(
+        huggingface, "_import_load_dataset", lambda: lambda *a, **k: HostileRows(ROWS)
+    )
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+    releases = record_releases(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="upstream metadata"):
+        materialize(
+            _dataset(streaming=True),
+            prepared_directory(tmp_path, "wikitext2"),
+            cache_dir=tmp_path / "hf",
+            allow_network=True,
+        )
+
+    assert releases == ["released"]
+
+
+def test_streaming_release_leaves_corpus_and_provenance_unchanged(
+    monkeypatch, tmp_path
+) -> None:
+    """Releasing the stream must not cost any recorded information."""
+
+    class FakeInfo:
+        version = "1.0.0"
+        download_size = 4321
+        dataset_size = 8765
+
+    class FakeRows(list):
+        info = FakeInfo()
+        _fingerprint = "abc123fingerprint"
+        config_name = "wikitext-2-raw-v1"
+        split = "train"
+
+    monkeypatch.setattr(
+        huggingface, "_import_load_dataset", lambda: lambda *a, **k: FakeRows(ROWS)
+    )
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+    destination = prepared_directory(tmp_path, "wikitext2")
+
+    manifest = materialize(
+        _dataset(streaming=True),
+        destination,
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert (destination / TEXT_FILENAME).read_text(encoding="utf-8") == (
+        "first document\n\nsecond document"
+    )
+    assert manifest["num_documents"] == 2
+    assert manifest["resolved"]["fingerprint"] == "abc123fingerprint"
+    assert manifest["resolved"]["download_size"] == 4321
+
+
+def test_release_uses_the_module_seam_rather_than_global_collection() -> None:
+    """The workaround must stay patchable and scoped to this module."""
+
+    source = Path(huggingface.__file__).read_text(encoding="utf-8")
+
+    assert source.count("gc.collect()") == 1
+    assert "_release_stream()" in source

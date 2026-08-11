@@ -19,6 +19,7 @@ runs resolve from disk without consulting Hugging Face at all.
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import threading
@@ -280,6 +281,25 @@ def _load_rows(
             return call()
 
 
+def _release_stream() -> None:
+    """Release what a partially consumed streamed dataset still holds.
+
+    A streaming dataset that is abandoned part-way -- which is exactly what the
+    configured limits make this module do -- can keep native resources alive
+    until interpreter shutdown. In some dependency combinations releasing them
+    that late aborts the process with ``SIGABRT`` *after* preparation has
+    already succeeded, turning a correct run into a failed-looking one.
+
+    Dropping the ordinary Python references is measurably not enough; collecting
+    while the interpreter is still healthy is. The mechanism lives in the
+    dependency stack rather than here, and which component owns it is not
+    established, so this is deliberately scoped to streaming loads and does
+    nothing else. ``data/README.md`` records what was observed.
+    """
+
+    gc.collect()
+
+
 def materialize(
     dataset: DatasetConfig,
     destination: str | Path,
@@ -347,14 +367,26 @@ def materialize(
             f"  {type(exc).__name__}: {exc}"
         ) from exc
 
-    resolved = describe_resolved(rows)
-    text, num_documents = concatenate_text_examples(
-        rows,
-        text_field=dataset.text_field,
-        max_examples=dataset.max_examples,
-        max_characters=dataset.max_characters,
-        document_separator=dataset.document_separator,
-    )
+    try:
+        # Both of these need the dataset object: provenance reads its
+        # attributes, concatenation iterates it. Nothing afterwards does.
+        resolved = describe_resolved(rows)
+        text, num_documents = concatenate_text_examples(
+            rows,
+            text_field=dataset.text_field,
+            max_examples=dataset.max_examples,
+            max_characters=dataset.max_characters,
+            document_separator=dataset.document_separator,
+        )
+    finally:
+        # ``rows`` is the only reference this module keeps: the loop's iterator
+        # lives inside concatenate_text_examples and is released when it
+        # returns. Dropping it here and collecting frees a partially consumed
+        # stream now rather than at interpreter shutdown -- see
+        # :func:`_release_stream` for why that matters.
+        del rows
+        if dataset.streaming:
+            _release_stream()
 
     manifest = write_prepared(
         destination,

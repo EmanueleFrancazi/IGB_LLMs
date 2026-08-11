@@ -248,6 +248,35 @@ stays valid even if the upstream dataset changes. Pin `revision` when that
 matters, using a real Hub reference obtained from the dataset repository (see
 *Four identifiers* below) — the manifest does not supply one.
 
+**Streamed datasets are released explicitly.** Preparing from a streaming
+dataset consumes only part of it, and a partially consumed stream can hold
+native resources that are otherwise freed at interpreter shutdown. In some
+dependency combinations that late release aborts the process with `SIGABRT`
+(exit status 134) *after* preparation has already finished and the corpus has
+been published — a correct run that looks like a failed one.
+
+What was established, and its limits:
+
+- The abort reproduces with a few lines of `datasets` alone, with no code from
+  this project involved, so it is not caused by the resolver or by preparation.
+- Dropping ordinary Python references to the dataset is **not** sufficient.
+- Running an explicit `gc.collect()` before shutdown **is** sufficient: the same
+  reproduction then exits 0.
+- Disabling the Xet transfer backend does **not** avoid it, so the responsible
+  component is not identified. No claim is made here about which compiled
+  dependency owns the resource.
+
+`materialize` therefore drops its reference to a streamed dataset and collects
+as soon as nothing needs it — after provenance is read and the corpus is built,
+before the prepared directory is written — including when preparation fails
+part-way. Ordinary non-streaming loads are untouched: they do not have the
+problem, and forcing collection is not free. This is a scoped mitigation for
+observed behavior, not a fix for the underlying defect, and it is expected to
+become unnecessary once that defect is resolved upstream. One residual case
+stays outside its reach: while an exception is still propagating, the traceback
+keeps the frames that referenced the dataset alive, so collection cannot free it
+until the exception is discarded.
+
 ### Controlling acquisition
 
 Every data-consuming script accepts the same options:
@@ -305,9 +334,12 @@ split, revision, text field, and limits — plus a SHA-256 digest and the
 character and document counts. It holds no filesystem paths, so a prepared
 directory can be moved between machines.
 
-The manifest is written last, inside a directory that is moved into place
-atomically. Its presence therefore means the preparation finished; a directory
-without one is an interrupted attempt and is rebuilt rather than trusted.
+The manifest is written last, inside a staging directory that is then moved into
+place. Its presence therefore means the preparation finished; a directory
+without one is an interrupted attempt and is rebuilt rather than trusted, so an
+incomplete new preparation is never mistaken for a complete one. Replacing an
+*existing* prepared copy is a separate matter and is not transactional — see
+*Limitations to know about* above.
 
 The manifest also records what the source reported about itself — fingerprint,
 version, config name, split, and sizes — separately from what was requested, so
