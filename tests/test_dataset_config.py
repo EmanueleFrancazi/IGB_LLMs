@@ -320,3 +320,45 @@ def test_every_dataset_error_shares_one_base() -> None:
 
     with pytest.raises(DatasetError):
         DatasetConfig.from_config(_local_config(source="s3"))
+
+
+@pytest.mark.parametrize("typo", ["repo_idd", "text_filed", "max_character", "revison"])
+def test_misspelled_dataset_keys_are_rejected(typo: str) -> None:
+    """A misspelling must fail loudly rather than change the prepared corpus."""
+
+    with pytest.raises(DatasetConfigError) as excinfo:
+        DatasetConfig.from_config(_local_config(**{typo: "value"}))
+
+    message = str(excinfo.value)
+    assert typo in message
+    assert "misspelling" in message
+
+
+def test_unknown_key_error_lists_the_accepted_keys() -> None:
+    """The error must tell the user what is actually accepted."""
+
+    with pytest.raises(DatasetConfigError) as excinfo:
+        DatasetConfig.from_config(_local_config(nonsense=1))
+
+    message = str(excinfo.value)
+    assert "max_characters" in message
+    assert "val_fraction" in message
+
+
+def test_keys_owned_by_other_stages_remain_legal() -> None:
+    """val_fraction belongs to the splitting step and must stay accepted."""
+
+    dataset = DatasetConfig.from_config(
+        {"dataset": {"name": "unit_test", "path": "p", "val_fraction": 0.2}}
+    )
+
+    assert dataset.name == "unit_test"
+
+
+def test_every_shipped_data_config_parses() -> None:
+    """Strict validation must not reject any configuration we ship."""
+
+    for name in ("tiny_text", "wikitext2", "tinystories"):
+        path = REPO_ROOT / "configs" / "data" / f"{name}.yaml"
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert DatasetConfig.from_config(config).name

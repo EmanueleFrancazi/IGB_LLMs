@@ -34,6 +34,31 @@ DATA_ROOT_DIR_NAME = "llm-behavior-lab"
 # restricted to characters that are safe on every supported platform.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
+#: Keys inside ``dataset:`` that this layer owns and parses.
+DATASET_KEYS = (
+    "name",
+    "source",
+    "path",
+    "repo_id",
+    "subset",
+    "split",
+    "revision",
+    "text_field",
+    "max_examples",
+    "max_characters",
+    "document_separator",
+    "streaming",
+    "verify",
+)
+
+#: Keys inside ``dataset:`` owned by other pipeline stages. They are read
+#: elsewhere -- ``val_fraction`` by the train/validation split -- so they are
+#: legal here even though this layer ignores them. Anything outside both tuples
+#: is treated as a mistake rather than silently dropped, because a misspelling
+#: such as ``max_character`` would otherwise change what corpus is prepared
+#: without any sign that it did.
+FOREIGN_DATASET_KEYS = ("val_fraction",)
+
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -129,8 +154,11 @@ class DatasetConfig:
               source: local_text          # optional; defaults to local_text
               path: data/raw/tiny_corpus.txt
 
-        Keys the dataset layer does not own, such as ``val_fraction``, are
-        ignored so existing configuration files keep working unchanged.
+        Keys owned by other pipeline stages, listed in
+        :data:`FOREIGN_DATASET_KEYS`, are accepted and ignored so existing
+        configuration files keep working unchanged. Any other unrecognised key
+        is rejected: silently dropping a misspelling such as ``max_character``
+        would change which corpus is prepared with no sign that it had.
 
         Args:
             config: Full data configuration containing a ``dataset`` section.
@@ -150,6 +178,16 @@ class DatasetConfig:
             )
         if "name" not in section:
             raise DatasetConfigError("dataset.name is required.")
+
+        unknown = sorted(set(section) - set(DATASET_KEYS) - set(FOREIGN_DATASET_KEYS))
+        if unknown:
+            raise DatasetConfigError(
+                "Unknown key(s) in the dataset config: " + ", ".join(unknown) + ".\n"
+                "Dataset settings: " + ", ".join(DATASET_KEYS) + ".\n"
+                "Keys owned by other stages: " + ", ".join(FOREIGN_DATASET_KEYS) + ".\n"
+                "Check for a misspelling; unknown keys are rejected because silently "
+                "ignoring one can change which corpus is prepared."
+            )
 
         def optional_str(key: str) -> str | None:
             value = section.get(key)
