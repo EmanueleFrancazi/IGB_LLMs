@@ -67,6 +67,11 @@ def parse_args() -> argparse.Namespace:
         default=REPO_ROOT / "configs" / "model" / "tiny_llama.yaml",
         help="Path to the model YAML config.",
     )
+    parser.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        help="Only check dataset loading, tokenization, and batching.",
+    )
     add_dataset_arguments(parser)
     return parser.parse_args()
 
@@ -132,21 +137,24 @@ def main() -> None:
     train_batch = batcher.get_batch("train")
     val_batch = batcher.get_batch("val")
 
-    model = build_model_from_config(model_config).to(device)
-    model.eval()
+    output = None
+    parameter_count = None
+    if not args.skip_model_check:
+        model = build_model_from_config(model_config).to(device)
+        model.eval()
 
-    with torch.no_grad():
-        output = model(input_ids=train_batch.input_ids, targets=train_batch.targets)
+        with torch.no_grad():
+            output = model(input_ids=train_batch.input_ids, targets=train_batch.targets)
 
-    expected_logits_shape = (batch_size, block_size, model_vocab_size)
-    if tuple(output.logits.shape) != expected_logits_shape:
-        raise AssertionError(
-            f"Expected logits shape {expected_logits_shape}, got {tuple(output.logits.shape)}."
-        )
-    if output.loss is None or output.loss.ndim != 0:
-        raise AssertionError("Expected scalar loss when targets are provided.")
+        expected_logits_shape = (batch_size, block_size, model_vocab_size)
+        if tuple(output.logits.shape) != expected_logits_shape:
+            raise AssertionError(
+                f"Expected logits shape {expected_logits_shape}, got {tuple(output.logits.shape)}."
+            )
+        if output.loss is None or output.loss.ndim != 0:
+            raise AssertionError("Expected scalar loss when targets are provided.")
 
-    parameter_count = model.count_parameters()
+        parameter_count = model.count_parameters()
 
     print("Phase 3 data pipeline check completed successfully.")
     print(f"Available registered models: {list_models()}")
@@ -161,16 +169,22 @@ def main() -> None:
     print(f"Train token count: {len(splits.train_ids)}")
     print(f"Validation token count: {len(splits.val_ids)}")
     print(f"Device: {device}")
-    print(f"Model name: {model_config['model']['name']}")
-    print(f"Model vocab size: {model_vocab_size}")
-    print(f"Parameter count: {parameter_count} ({format_parameter_count(parameter_count)})")
     print(f"Train input shape: {tuple(train_batch.input_ids.shape)}")
     print(f"Train target shape: {tuple(train_batch.targets.shape)}")
     print(f"Validation input shape: {tuple(val_batch.input_ids.shape)}")
     print(f"Validation target shape: {tuple(val_batch.targets.shape)}")
-    print(f"Logits shape: {tuple(output.logits.shape)}")
-    print(f"Loss shape: {tuple(output.loss.shape)}")
-    print(f"Loss value: {output.loss.item():.6f}")
+    if output is None:
+        print("Model check: skipped")
+    else:
+        print(f"Model name: {model_config['model']['name']}")
+        print(f"Model vocab size: {model_vocab_size}")
+        print(
+            f"Parameter count: {parameter_count} "
+            f"({format_parameter_count(parameter_count)})"
+        )
+        print(f"Logits shape: {tuple(output.logits.shape)}")
+        print(f"Loss shape: {tuple(output.loss.shape)}")
+        print(f"Loss value: {output.loss.item():.6f}")
     print(f"Decoded first training input preview: {tokenizer.decode(train_batch.input_ids[0].tolist())!r}")
     print(f"Decoded first training target preview: {tokenizer.decode(train_batch.targets[0].tolist())!r}")
 

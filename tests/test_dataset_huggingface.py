@@ -247,6 +247,7 @@ def test_no_download_refuses_to_acquire_when_cache_is_empty(tmp_path, monkeypatc
     message = str(excinfo.value)
     assert "downloads are not permitted" in message
     assert "prepare_dataset.py" in message
+    assert "--download" not in message
 
 
 def test_offline_never_permits_acquisition(tmp_path, monkeypatch) -> None:

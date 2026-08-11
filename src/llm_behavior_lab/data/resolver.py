@@ -272,9 +272,12 @@ def _remedy(dataset: DatasetConfig) -> str | None:
     if dataset.source != HUGGINGFACE_SOURCE:
         return None
     return (
-        "To prepare it (requires network access and the optional dependency):\n"
+        "To make it available (requires network access and the optional "
+        "dependency):\n"
         '  python3 -m pip install -e ".[hf]"\n'
-        "  python3 scripts/prepare_dataset.py --data-config <config> --download"
+        "  python3 scripts/prepare_dataset.py --data-config <your data config>\n"
+        "Acquisition is enabled by default; drop --offline and --no-download to "
+        "allow it."
     )
 
 

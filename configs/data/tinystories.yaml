@@ -1,0 +1,33 @@
+# TinyStories for small-model language experiments.
+#
+# Requires the optional dependency:
+#   python3 -m pip install -e ".[hf]"
+#
+# A bounded slice is prepared to disk rather than streamed, so the corpus is
+# reused across runs and remains available offline. Raise max_examples and
+# max_characters for larger experiments.
+
+dataset:
+  name: tinystories_train200
+  source: huggingface
+  repo_id: roneneldan/TinyStories
+  subset: null
+  split: train
+  revision: null
+  text_field: text
+  max_examples: 200
+  max_characters: 200000
+  document_separator: "\n\n"
+  val_fraction: 0.1
+  verify: false
+
+tokenizer:
+  type: char
+
+batching:
+  batch_size: 4
+  block_size: 16
+
+runtime:
+  seed: 1234
+  device: auto

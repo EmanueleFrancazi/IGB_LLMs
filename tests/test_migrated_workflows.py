@@ -137,3 +137,58 @@ def test_scripts_do_not_branch_on_dataset_source() -> None:
         assert "huggingface" not in source.lower()
         assert "source_type" not in source
         assert "load_dataset" not in source
+
+
+def test_prepare_dataset_resolves_the_tiny_fixture(capsys) -> None:
+    """The preparation command works on local data without any network."""
+
+    run_script("prepare_dataset", ["--data-config", str(TINY_DATA_CONFIG)])
+    out = capsys.readouterr().out
+
+    assert "Dataset preparation completed successfully." in out
+    assert "Resolved via: repo_fixture" in out
+
+
+def test_prepare_dataset_reports_what_is_missing_when_offline(tmp_path, capsys) -> None:
+    """Offline preparation must explain what it checked and how to proceed."""
+
+    config = REPO_ROOT / "configs" / "data" / "wikitext2.yaml"
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_script(
+            "prepare_dataset",
+            ["--data-config", str(config), "--offline", "--data-root", str(tmp_path)],
+        )
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "Acquisition: disabled" in captured.out
+    assert "is not available" in captured.err
+    assert "offline mode is enabled" in captured.err
+    assert "prepare_dataset.py" in captured.err
+
+
+def test_data_pipeline_check_can_skip_the_model(capsys) -> None:
+    """Dataset-only checking is useful when the model config is irrelevant."""
+
+    run_script("check_data_pipeline", [*BASE_ARGS, "--skip-model-check"])
+    out = capsys.readouterr().out
+
+    assert "Phase 3 data pipeline check completed successfully." in out
+    assert "Model check: skipped" in out
+    assert "Logits shape:" not in out
+
+
+def test_external_dataset_configs_are_valid() -> None:
+    """The shipped external configs must parse into a usable identity."""
+
+    import yaml
+
+    from llm_behavior_lab.data import HUGGINGFACE_SOURCE, DatasetConfig
+
+    for name in ("wikitext2", "tinystories"):
+        path = REPO_ROOT / "configs" / "data" / f"{name}.yaml"
+        dataset = DatasetConfig.from_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        assert dataset.source == HUGGINGFACE_SOURCE
+        assert dataset.repo_id
+        assert dataset.max_characters is not None, "external configs must stay bounded"

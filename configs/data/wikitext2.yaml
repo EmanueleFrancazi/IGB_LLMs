@@ -1,0 +1,38 @@
+# WikiText-2 (raw) for standard language-modeling checks.
+#
+# Requires the optional dependency:
+#   python3 -m pip install -e ".[hf]"
+#
+# The dataset contents are never committed. On first use the corpus is
+# downloaded into the external data root and prepared there; later runs reuse
+# that copy without any network access.
+#
+# The character tokenizer builds its vocabulary from the loaded text, so a
+# larger corpus needs a larger model vocabulary. If a run reports that the
+# tokenizer vocab size exceeds the model vocab size, raise
+# model.params.vocab_size in the model config.
+
+dataset:
+  name: wikitext2_raw_train1k
+  source: huggingface
+  repo_id: Salesforce/wikitext
+  subset: wikitext-2-raw-v1
+  split: train[:1000]
+  revision: null
+  text_field: text
+  max_examples: 1000
+  max_characters: 200000
+  document_separator: "\n\n"
+  val_fraction: 0.1
+  verify: false
+
+tokenizer:
+  type: char
+
+batching:
+  batch_size: 4
+  block_size: 16
+
+runtime:
+  seed: 1234
+  device: auto
