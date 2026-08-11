@@ -11,6 +11,12 @@ data/**
 # Keep Markdown documentation inside data/.
 !data/**/*.md
 
+# Keep the tiny offline fixture the default configs, script examples, and test
+# suite depend on. It is small and deliberately committed so a fresh clone is
+# runnable without downloading anything. Everything else under data/, including
+# prepared corpora and source caches, stays ignored.
+!data/raw/tiny_corpus.txt
+
 
 # Experiment outputs and lightweight analysis artifacts.
 outputs/
