@@ -1,5 +1,6 @@
 """Data utilities for text-only language-modeling experiments."""
 
+from llm_behavior_lab.data.cli import add_dataset_arguments, resolution_policy_from_args
 from llm_behavior_lab.data.config import (
     DATA_ROOT_ENV_VAR,
     HUGGINGFACE_SOURCE,
@@ -74,6 +75,7 @@ __all__ = [
     "TokenSplits",
     "UnsupportedDatasetSourceError",
     "acquisition_destination",
+    "add_dataset_arguments",
     "clean_partial_directories",
     "hf_cache_directory",
     "load_prepared",
@@ -81,6 +83,7 @@ __all__ = [
     "materialize",
     "prepared_directory",
     "resolve_data_root",
+    "resolution_policy_from_args",
     "resolve_dataset",
     "resolve_repo_path",
     "split_token_ids",

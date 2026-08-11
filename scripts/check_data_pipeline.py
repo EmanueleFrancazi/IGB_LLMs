@@ -26,7 +26,10 @@ if str(SRC_ROOT) not in sys.path:
 from llm_behavior_lab.data import (  # noqa: E402
     CausalLMBatcher,
     CharTokenizer,
-    load_text_file,
+    DatasetConfig,
+    add_dataset_arguments,
+    resolution_policy_from_args,
+    resolve_dataset,
     split_token_ids,
 )
 from llm_behavior_lab.models import build_model_from_config, list_models  # noqa: E402
@@ -48,15 +51,6 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def resolve_repo_path(path_value: str | Path) -> Path:
-    """Resolve paths relative to the repository root."""
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return REPO_ROOT / path
-
-
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
 
@@ -73,6 +67,7 @@ def parse_args() -> argparse.Namespace:
         default=REPO_ROOT / "configs" / "model" / "tiny_llama.yaml",
         help="Path to the model YAML config.",
     )
+    add_dataset_arguments(parser)
     return parser.parse_args()
 
 
@@ -92,12 +87,17 @@ def main() -> None:
 
     dataset_config = data_config["dataset"]
     batching_config = data_config["batching"]
-    text_path = resolve_repo_path(dataset_config["path"])
     val_fraction = float(dataset_config.get("val_fraction", 0.1))
     batch_size = int(batching_config["batch_size"])
     block_size = int(batching_config["block_size"])
 
-    text = load_text_file(text_path)
+    resolved = resolve_dataset(
+        DatasetConfig.from_config(data_config),
+        resolution_policy_from_args(args),
+        repo_root=REPO_ROOT,
+    )
+    text_path = resolved.path
+    text = resolved.read_text()
     tokenizer = CharTokenizer.from_text(text)
     token_ids = tokenizer.encode(text)
     splits = split_token_ids(
@@ -150,6 +150,9 @@ def main() -> None:
 
     print("Phase 3 data pipeline check completed successfully.")
     print(f"Available registered models: {list_models()}")
+    print(f"Dataset name: {resolved.name}")
+    print(f"Dataset source: {resolved.source}")
+    print(f"Dataset resolved via: {resolved.route}")
     print(f"Dataset path: {text_path}")
     print(f"Raw text characters: {len(text)}")
     print(f"Tokenizer type: char")

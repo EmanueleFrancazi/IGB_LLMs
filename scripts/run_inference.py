@@ -20,7 +20,13 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from llm_behavior_lab.data import CharTokenizer, load_text_file  # noqa: E402
+from llm_behavior_lab.data import (  # noqa: E402
+    CharTokenizer,
+    DatasetConfig,
+    add_dataset_arguments,
+    resolution_policy_from_args,
+    resolve_dataset,
+)
 from llm_behavior_lab.inference import (  # noqa: E402
     extract_logits,
     extract_next_token_logits,
@@ -46,15 +52,6 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
         raise TypeError(f"Expected config dictionary, got {type(config)!r}")
 
     return config
-
-
-def resolve_repo_path(path_value: str | Path) -> Path:
-    """Resolve paths relative to the repository root."""
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return REPO_ROOT / path
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,6 +106,7 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Number of next-token predictions to print.",
     )
+    add_dataset_arguments(parser)
     return parser.parse_args()
 
 
@@ -126,8 +124,12 @@ def main() -> None:
     seed_everything(seed)
     device = get_device(device_name)
 
-    text_path = resolve_repo_path(data_config["dataset"]["path"])
-    text = load_text_file(text_path)
+    resolved = resolve_dataset(
+        DatasetConfig.from_config(data_config),
+        resolution_policy_from_args(args),
+        repo_root=REPO_ROOT,
+    )
+    text = resolved.read_text()
     tokenizer = CharTokenizer.from_text(text)
 
     model_params = model_config["model"]["params"]
@@ -178,7 +180,10 @@ def main() -> None:
 
     print("Phase 4 inference check completed successfully.")
     print(f"Available registered models: {list_models()}")
-    print(f"Dataset path: {text_path}")
+    print(f"Dataset name: {resolved.name}")
+    print(f"Dataset source: {resolved.source}")
+    print(f"Dataset resolved via: {resolved.route}")
+    print(f"Dataset path: {resolved.path}")
     print(f"Tokenizer type: char")
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     print(f"Model name: {model_config['model']['name']}")
