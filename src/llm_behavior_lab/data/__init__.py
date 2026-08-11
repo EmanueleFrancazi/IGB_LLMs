@@ -19,6 +19,13 @@ from llm_behavior_lab.data.errors import (
     DatasetPathNotFoundError,
     UnsupportedDatasetSourceError,
 )
+from llm_behavior_lab.data.resolver import (
+    ROUTE_EXPLICIT_PATH,
+    ROUTE_REPO_FIXTURE,
+    ResolvedDataset,
+    resolve_dataset,
+    resolve_repo_path,
+)
 from llm_behavior_lab.data.text_dataset import TokenSplits, load_text_file, split_token_ids
 from llm_behavior_lab.data.tokenizer import CharTokenizer
 
@@ -36,11 +43,16 @@ __all__ = [
     "DatasetPathNotFoundError",
     "HUGGINGFACE_SOURCE",
     "LOCAL_TEXT_SOURCE",
+    "ROUTE_EXPLICIT_PATH",
+    "ROUTE_REPO_FIXTURE",
     "ResolutionPolicy",
+    "ResolvedDataset",
     "SUPPORTED_SOURCES",
     "TokenSplits",
     "UnsupportedDatasetSourceError",
     "load_text_file",
     "resolve_data_root",
+    "resolve_dataset",
+    "resolve_repo_path",
     "split_token_ids",
 ]
