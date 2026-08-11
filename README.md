@@ -76,6 +76,8 @@ IGB_LLMs/
   configs/
     data/
       tiny_text.yaml
+      wikitext2.yaml
+      tinystories.yaml
     model/
       tiny_llama.yaml
     experiment/
@@ -92,6 +94,7 @@ IGB_LLMs/
     run_inference.py
     analyze_untrained_model.py
     check_experiment_tracking.py
+    prepare_dataset.py
 
   src/
     llm_behavior_lab/
@@ -99,7 +102,13 @@ IGB_LLMs/
 
       data/
         __init__.py
+        cli.py
+        config.py
         dataloader.py
+        errors.py
+        huggingface.py
+        prepared.py
+        resolver.py
         text_dataset.py
         tokenizer.py
 
@@ -140,12 +149,19 @@ IGB_LLMs/
 
   tests/
     test_data_pipeline.py
+    test_dataset_cli.py
+    test_dataset_config.py
+    test_dataset_huggingface.py
+    test_dataset_prepared.py
+    test_dataset_resolver.py
+    test_dataset_tracking.py
     test_evaluation.py
     test_experiment_tracking.py
     test_gradient_norms.py
     test_imports.py
     test_inference.py
     test_llama_shapes.py
+    test_migrated_workflows.py
     test_persisted_analysis_run.py
 
   pyproject.toml
@@ -214,7 +230,27 @@ Generated experiment output is handled separately. The `.gitignore` file also ig
 ### Data files
 
 - `data/raw/tiny_corpus.txt`
-  - Tiny local corpus used to test the data pipeline and produce deterministic tokenizer/data behavior.
+  - Tiny local corpus used to test the data pipeline and produce deterministic tokenizer/data behavior. Tracked deliberately so a fresh clone runs with no downloads.
+
+- `src/llm_behavior_lab/data/config.py`
+  - Defines `DatasetConfig`, the dataset identity read from a data config.
+  - Defines `ResolutionPolicy`, what one invocation may do to obtain it.
+  - Provides `resolve_data_root` for selecting the external data location.
+
+- `src/llm_behavior_lab/data/resolver.py`
+  - Defines `resolve_dataset`, the single entry point through which the project obtains a dataset, and `ResolvedDataset`.
+
+- `src/llm_behavior_lab/data/prepared.py`
+  - Prepared dataset directories and their manifests, including staleness and completeness checks.
+
+- `src/llm_behavior_lab/data/huggingface.py`
+  - Optional Hugging Face acquisition. The only module that can reach the network.
+
+- `src/llm_behavior_lab/data/errors.py`
+  - The dataset error hierarchy under `DatasetError`.
+
+- `src/llm_behavior_lab/data/cli.py`
+  - The dataset options shared by every data-consuming script.
 
 - `src/llm_behavior_lab/data/tokenizer.py`
   - Defines `CharTokenizer`.
@@ -318,6 +354,7 @@ The `experiment` package implements Phase 6 local persistence. See [`src/README.
 | `scripts/run_inference.py` | Check prompt encoding, logits extraction, top-k next-token inspection, and short generation. | `data.tokenizer`, `data.text_dataset`, `inference.generation`, `models.registry` |
 | `scripts/analyze_untrained_model.py` | Analyze initialization-time output behavior, optionally gradient stability, and optionally persist a structured run. | `data.*`, `models.registry`, `evaluation.output_stats`, `evaluation.token_frequency`, `evaluation.untrained_analysis`, `evaluation.gradient_norms`, `experiment.run`, `experiment.config` |
 | `scripts/check_experiment_tracking.py` | Create a run, log metrics and arrays, save a checkpoint, rediscover it, and restore it into a second model. | `experiment.run`, `experiment.config`, `experiment.metrics`, `experiment.arrays`, `experiment.checkpoints`, `models.registry` |
+| `scripts/prepare_dataset.py` | Stage a dataset ahead of time, or report what is missing without obtaining it. | `data.config`, `data.resolver`, `data.cli` |
 
 ## Current analysis capabilities
 
@@ -613,6 +650,83 @@ From the repository root:
 python3 -m pip install -e ".[dev]"
 ```
 
+Externally hosted datasets need one more optional group. Everything else,
+including the whole test suite, works without it:
+
+```bash
+python3 -m pip install -e ".[hf]"
+```
+
+## Datasets
+
+Datasets are selected through configuration rather than code. `dataset.source`
+picks how a dataset is obtained; tokenization, splitting, and batching are
+identical either way.
+
+| Source | Meaning |
+|---|---|
+| `local_text` | A text file already on disk. The default, needing no optional dependency. |
+| `huggingface` | Obtained from the Hugging Face Hub and prepared to disk. Needs `pip install -e ".[hf]"`. |
+
+Shipped configs: `configs/data/tiny_text.yaml` (the tracked fixture),
+`configs/data/wikitext2.yaml`, and `configs/data/tinystories.yaml`.
+
+### Where dataset contents live
+
+Dataset code, configuration, and the tiny fixture are tracked. Downloaded and
+prepared corpora are not. They live under an external data root chosen in this
+order:
+
+1. `--data-root` on the command line
+2. the `LLM_BEHAVIOR_LAB_DATA_ROOT` environment variable
+3. `$XDG_CACHE_HOME/llm-behavior-lab`
+4. `~/.cache/llm-behavior-lab`
+
+The default is always outside the repository, so a large download cannot land in
+a tracked path. On a cluster, point it at scratch:
+
+```bash
+export LLM_BEHAVIOR_LAB_DATA_ROOT=/scratch/$USER/llm-behavior-lab
+```
+
+### How a dataset is found
+
+Every workflow obtains its corpus through one resolver, which tries the
+configured path, a prepared copy in the repository, a prepared copy under the
+data root, an existing source cache, and finally acquisition. If none succeeds,
+the error names every location tried and the command that would fix it.
+
+Scripts acquire a missing dataset by default and announce it before any network
+activity. These options control that:
+
+| Option | Effect |
+|---|---|
+| `--data-root PATH` | Where prepared and cached data live. |
+| `--no-download` | Reuse what is available; never obtain anything missing. |
+| `--offline` | Forbid all network access. Implies `--no-download`. |
+| `--force-refresh` | Re-acquire, replacing an existing prepared copy. |
+
+A fresh clone runs immediately on the tracked fixture with no setup. The tiny
+corpus never consults the data root or the network.
+
+Prepare a dataset ahead of time, which is useful before a batch job:
+
+```bash
+python3 scripts/prepare_dataset.py --data-config configs/data/wikitext2.yaml
+```
+
+Or run a workflow directly on an external dataset; it is prepared on first use
+and reused afterwards:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/wikitext2.yaml \
+  --model-config configs/model/tiny_llama.yaml
+```
+
+See [`data/README.md`](data/README.md) for the resolution order, prepared-data
+manifests, and staleness detection.
+
 ## Run the Phase 2 model sanity check
 
 ```bash
@@ -900,6 +1014,8 @@ The repository still does not include:
 - fine-tuning
 - multi-model comparison
 - advanced bias or group-based evaluation metrics
+- persistent tokenized dataset caches
+- streaming or sharded loading for large-scale training
 
 Persistence is in place but not yet exercised by training. Checkpoints currently capture an initialized model at step zero; the optimizer and scheduler fields in the checkpoint format exist but stay empty until a training loop fills them.
 

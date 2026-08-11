@@ -49,6 +49,7 @@ scripts/
   run_inference.py
   analyze_untrained_model.py
   check_experiment_tracking.py
+  prepare_dataset.py
 ```
 
 | Script | Type | Phase / feature | Purpose |
@@ -58,6 +59,7 @@ scripts/
 | `run_inference.py` | Inference check | Phase 4 inference utilities | Encodes a prompt, extracts logits, prints top-k next-token predictions, and generates a short continuation. |
 | `analyze_untrained_model.py` | Analysis script | Phase 5 + Phase 6 integration | Computes initialization metrics and optionally persists a structured run. |
 | `check_experiment_tracking.py` | Smoke test | Phase 6 persistence | Creates a run, logs metrics/arrays, saves a checkpoint, restores it, and verifies parameter equality. |
+| `prepare_dataset.py` | Utility | Dataset resolution | Stages a dataset ahead of time, or reports what is missing without obtaining it. |
 
 ---
 
@@ -722,6 +724,30 @@ The script writes a complete run under `outputs/<experiment-name>/<run-id>/`. `o
 
 ---
 
+## Dataset options shared by data-consuming scripts
+
+`check_data_pipeline.py`, `run_inference.py`, `analyze_untrained_model.py`, and
+`prepare_dataset.py` all accept the same dataset-resolution options:
+
+| Option | Meaning |
+|---|---|
+| `--data-root` | Root for prepared and cached datasets. Defaults to `$LLM_BEHAVIOR_LAB_DATA_ROOT`, then a platform cache directory outside the repository. |
+| `--no-download` | Reuse datasets already available locally; never obtain a missing one. |
+| `--offline` | Forbid all network access. Implies `--no-download`. |
+| `--force-refresh` | Re-acquire an external dataset, replacing any prepared copy. |
+
+Scripts acquire a missing dataset by default and announce it before any network
+activity. The tracked tiny corpus never needs any of this: it resolves from the
+repository and never consults the data root or the network.
+
+`check_data_pipeline.py` additionally accepts `--skip-model-check` to verify
+dataset loading, tokenization, and batching without a model forward pass.
+
+See [`data/README.md`](../data/README.md) for the resolution order, the data
+root, and prepared-data manifests.
+
+---
+
 ## Interaction with configs
 
 Scripts use configs from:
@@ -859,6 +885,9 @@ The tests cover:
 - JSONL metrics and array artifact round trips
 - checkpoint save/load, latest discovery, and CPU portability
 - the persisted-run workflow of `analyze_untrained_model.py`, driven through its entry point in `tests/test_persisted_analysis_run.py`
+- dataset configuration, resolution policy, prepared data, and manifests
+- Hugging Face acquisition, exercised through a fake loader so the suite stays offline
+- the migrated script entry points, driven through their real command lines
 
 Apart from that persisted-run coverage, the scripts are intended as human-readable execution checks. If a script fails, first check:
 
@@ -880,6 +909,5 @@ Likely future scripts include:
 - `finetune.py` for supervised fine-tuning
 - `compare_models.py` for model-family comparisons
 - `compute_dataset_stats.py` for dataset/tokenizer statistics
-- `prepare_dataset.py` for tokenized dataset caching
 
 These should remain thin command-line entry points that call reusable code under `src/llm_behavior_lab/`.

@@ -86,503 +86,246 @@ Do not bulk-untrack the folder with `git rm -r --cached data`. That would remove
 
 ## Current datasets and source types
 
+A dataset is chosen entirely through configuration. The `dataset.source` field
+selects how it is obtained; everything downstream — tokenization, splitting,
+batching — is identical either way.
+
+| Source | Meaning |
+|---|---|
+| `local_text` | A text file already on disk. The default, and the only one that needs no optional dependency. |
+| `huggingface` | A dataset obtained from the Hugging Face Hub and prepared to disk. |
+
 ### 1. Local tiny text corpus
 
-The default lightweight dataset is a small local text corpus.
-
-Expected local path:
+The default lightweight dataset is the small corpus tracked in this repository:
 
 ```text
 data/raw/tiny_corpus.txt
 ```
 
-Default config:
+Config: `configs/data/tiny_text.yaml`. It is used for fast smoke tests,
+tokenizer checks, data/model compatibility checks, inference checks, the
+initialization analysis, and gradient-norm diagnostics.
 
-```text
-configs/data/tiny_text.yaml
-```
-
-This dataset is used for:
-
-- fast smoke tests
-- tokenizer checks
-- data/model compatibility checks
-- inference checks
-- Phase 5 untrained-model analysis
-- gradient-norm diagnostic tests on small batches
-
-It is not intended for meaningful language-model training. Its purpose is to keep early development fast and reproducible.
-
-Example config pattern:
+It is not meant for meaningful training. Its purpose is to keep a fresh clone
+runnable and testable with no setup and no downloads.
 
 ```yaml
 dataset:
-  source_type: local_text
   name: tiny_local_text
+  source: local_text        # optional; this is the default
   path: data/raw/tiny_corpus.txt
   val_fraction: 0.2
-
-tokenizer:
-  type: char
-
-batching:
-  batch_size: 4
-  block_size: 16
-
-runtime:
-  seed: 1234
-  device: auto
 ```
 
-The key field is:
+A local dataset resolves from its configured path and never consults the data
+root, a cache, or the network.
 
-```yaml
-source_type: local_text
-```
+### 2. Hugging Face datasets
 
-This tells the data loader to read text from a local file path.
-
----
-
-### 2. Hugging Face dataset source
-
-The codebase also supports external datasets through Hugging Face `datasets`.
-
-This is optional. It requires the optional dependency group:
+External datasets need the optional dependency:
 
 ```bash
-python3 -m pip install -e ".[dev,hf]"
+python3 -m pip install -e ".[hf]"
 ```
 
-Example config:
-
-```text
-configs/data/wikitext2.yaml
-```
-
-Example config pattern:
+Shipped configs: `configs/data/wikitext2.yaml` and
+`configs/data/tinystories.yaml`. Both cap the number of examples and characters
+so the prepared corpus stays small.
 
 ```yaml
 dataset:
-  source_type: huggingface
-  name: Salesforce/wikitext
+  name: wikitext2_raw_train1k
+  source: huggingface
+  repo_id: Salesforce/wikitext
   subset: wikitext-2-raw-v1
   split: train[:1000]
+  revision: null            # pin for reproducibility
   text_field: text
-  val_fraction: 0.1
   max_examples: 1000
   max_characters: 200000
   document_separator: "\n\n"
-  streaming: false
-
-tokenizer:
-  type: char
-
-batching:
-  batch_size: 4
-  block_size: 16
-
-runtime:
-  seed: 1234
-  device: auto
+  val_fraction: 0.1
+  verify: false
 ```
 
-The key field is:
+The first run downloads the dataset, announces what it is doing, and writes a
+prepared copy under the data root. Later runs read that copy without any network
+access. The contents are never committed.
 
-```yaml
-source_type: huggingface
-```
-
-This tells the data loader to call Hugging Face `load_dataset`.
-
-Current external dataset configs may include:
-
-```text
-configs/data/wikitext2.yaml
-configs/data/tinystories_streaming.yaml
-```
-
-These configs are intended for controlled experiments, not automatic test-suite downloads.
+The character tokenizer builds its vocabulary from the loaded text, so a larger
+corpus needs a larger model vocabulary. If a run reports that the tokenizer
+vocab size exceeds the model vocab size, raise `model.params.vocab_size`.
 
 ---
 
-## Data configuration files
+## Where datasets are stored
 
-Data configs live in:
+Dataset **code and configuration** are tracked. Dataset **contents** are not.
+
+Downloaded and prepared data live under an external data root, chosen in this
+order:
+
+1. `--data-root` on the command line
+2. the `LLM_BEHAVIOR_LAB_DATA_ROOT` environment variable
+3. `$XDG_CACHE_HOME/llm-behavior-lab`
+4. `~/.cache/llm-behavior-lab`
+
+The default is always outside the repository, so a large download cannot land in
+a tracked path. On a cluster, set the environment variable to a scratch
+location:
+
+```bash
+export LLM_BEHAVIOR_LAB_DATA_ROOT=/scratch/$USER/llm-behavior-lab
+```
+
+The root is laid out as:
 
 ```text
-configs/data/
+<data_root>/
+  prepared/<dataset-name>/
+    text.txt          the corpus, ready to tokenize
+    manifest.json     what it is and how it was produced
+  hf/                 Hugging Face cache
 ```
 
-Current examples:
+A prepared copy inside the repository at `data/prepared/<name>/` is read when it
+exists, which is convenient on a single machine. It is never the destination for
+new data.
 
-```text
-configs/data/tiny_text.yaml
-configs/data/wikitext2.yaml
-configs/data/tinystories_streaming.yaml
-```
+---
 
-### Common config sections
+## How a dataset is found
 
-Most data configs have four sections:
+Every part of the project obtains a dataset through one function,
+`resolve_dataset`, which tries these locations in order:
 
-```yaml
-dataset:
-  ...
+1. the configured `dataset.path`
+2. a prepared copy in the repository, `data/prepared/<name>/`
+3. a prepared copy under the data root
+4. a copy already in the Hugging Face cache, used without any network
+5. acquisition, when permitted and after announcing it
 
-tokenizer:
-  ...
+If none succeeds, the error names every location tried, says why acquisition did
+not happen, and gives the command that would fix it.
 
-batching:
-  ...
+### Controlling acquisition
 
-runtime:
-  ...
-```
+Every data-consuming script accepts the same options:
 
-### `dataset`
-
-Controls where the raw text comes from.
-
-For a local file:
-
-```yaml
-dataset:
-  source_type: local_text
-  path: data/raw/tiny_corpus.txt
-  val_fraction: 0.2
-```
-
-For a Hugging Face dataset:
-
-```yaml
-dataset:
-  source_type: huggingface
-  name: Salesforce/wikitext
-  subset: wikitext-2-raw-v1
-  split: train[:1000]
-  text_field: text
-  val_fraction: 0.1
-  max_examples: 1000
-  max_characters: 200000
-  document_separator: "\n\n"
-  streaming: false
-```
-
-Important fields:
-
-| Field | Meaning |
+| Option | Effect |
 |---|---|
-| `source_type` | Dataset source kind. Currently `local_text` or `huggingface`. |
-| `path` | Local text path for `local_text` sources. |
-| `name` | Hugging Face dataset name. |
-| `subset` | Hugging Face dataset subset/config, if needed. |
-| `split` | Hugging Face split or split slice. |
-| `text_field` | Field containing text in dataset rows. |
-| `val_fraction` | Fraction of token IDs assigned to validation. |
-| `max_examples` | Maximum external dataset rows to use. |
-| `max_characters` | Maximum concatenated characters to use. |
-| `streaming` | Whether to request streaming from Hugging Face. |
+| `--data-root PATH` | Where prepared and cached data live. |
+| `--no-download` | Reuse what is already available; never obtain anything missing. |
+| `--offline` | Forbid all network access. Implies `--no-download`. |
+| `--force-refresh` | Re-acquire, replacing an existing prepared copy. |
 
-### `tokenizer`
+Scripts acquire missing data by default, and always announce it first. Code that
+imports the library gets the conservative default instead: a
+`ResolutionPolicy()` built without arguments can never reach the network.
 
-Currently the project uses a deterministic character-level tokenizer:
+### Detecting stale or incomplete data
 
-```yaml
-tokenizer:
-  type: char
-```
+`manifest.json` records the identity that produced the corpus — source, subset,
+split, revision, text field, and limits — plus a SHA-256 digest and the
+character and document counts. It holds no filesystem paths, so a prepared
+directory can be moved between machines.
 
-The tokenizer is implemented in:
+The manifest is written last, inside a directory that is moved into place
+atomically. Its presence therefore means the preparation finished; a directory
+without one is an interrupted attempt and is rebuilt rather than trusted.
 
-```text
-src/llm_behavior_lab/data/tokenizer.py
-```
-
-The current tokenizer builds its vocabulary from the loaded text. Later phases may add BPE, SentencePiece, Hugging Face tokenizers, or saved tokenizer artifacts.
-
-### `batching`
-
-Controls batch creation:
-
-```yaml
-batching:
-  batch_size: 4
-  block_size: 16
-```
-
-Important fields:
-
-| Field | Meaning |
-|---|---|
-| `batch_size` | Number of sampled windows per batch. |
-| `block_size` | Number of input tokens per sequence. |
-
-Each causal LM example uses a token window of length:
-
-```text
-block_size + 1
-```
-
-The batcher creates:
-
-```text
-input_ids = tokens[t : t + block_size]
-targets   = tokens[t + 1 : t + block_size + 1]
-```
-
-### `runtime`
-
-Controls reproducibility and device selection:
-
-```yaml
-runtime:
-  seed: 1234
-  device: auto
-```
-
-The runtime device is interpreted by:
-
-```text
-src/llm_behavior_lab/utils/device.py
-```
+If the configuration later disagrees with the manifest — a different split or a
+larger `max_characters` — resolution reports the differing field instead of
+silently reusing the old corpus. Setting `verify: true` additionally re-checks
+the digest on every load.
 
 ---
 
 ## Data-loading code
 
-The main data utilities live in:
-
 ```text
 src/llm_behavior_lab/data/
+  config.py        DatasetConfig, ResolutionPolicy, resolve_data_root
+  errors.py        the dataset error hierarchy
+  resolver.py      resolve_dataset, ResolvedDataset
+  prepared.py      prepared directories and manifests
+  huggingface.py   acquisition (the only module that can reach the network)
+  cli.py           the shared command-line options
+  text_dataset.py  load_text_file, split_token_ids
+  tokenizer.py     CharTokenizer
+  dataloader.py    CausalLMBatch, CausalLMBatcher
 ```
 
-Current files:
-
-```text
-src/llm_behavior_lab/data/
-  __init__.py
-  dataloader.py
-  sources.py
-  text_dataset.py
-  tokenizer.py
-```
-
-### `sources.py`
-
-This file provides config-driven dataset loading.
-
-Important functions/classes:
-
-```text
-LoadedTextDataset
-DatasetSourceError
-load_text_dataset_from_config
-load_local_text_from_config
-load_huggingface_text_from_config
-concatenate_text_examples
-```
-
-The main entry point is:
+The entry point returns a small object describing what was found:
 
 ```python
-load_text_dataset_from_config(data_config, repo_root=REPO_ROOT)
+resolved = resolve_dataset(dataset_config, policy, repo_root=REPO_ROOT)
+text = resolved.read_text()
 ```
 
-It returns a `LoadedTextDataset` containing:
-
-```text
-source_type
-source_name
-text
-num_examples
-metadata
-```
-
-Downstream code uses the returned `.text` field, regardless of whether the source was local or external.
-
-### `text_dataset.py`
-
-This file provides lower-level text-file and token-split utilities.
-
-Important functions/classes:
-
-```text
-load_text_file
-split_token_ids
-TokenSplits
-```
-
-`split_token_ids` creates deterministic contiguous train/validation splits.
-
-### `tokenizer.py`
-
-This file defines:
-
-```text
-CharTokenizer
-```
-
-The tokenizer:
-
-- builds a vocabulary from the loaded text
-- maps characters to integer token IDs
-- maps token IDs back to characters
-- is deterministic for a given corpus because the vocabulary is sorted
-
-### `dataloader.py`
-
-This file defines:
-
-```text
-CausalLMBatch
-CausalLMBatcher
-```
-
-The batcher samples fixed-length causal LM windows from token IDs and returns tensors:
-
-```text
-input_ids: [batch_size, block_size]
-targets:   [batch_size, block_size]
-```
-
-These tensors are compatible with the current LLaMA-style model forward pass.
+`ResolvedDataset` carries the dataset name, source, path, the route that
+supplied it, and provenance for experiment metadata. It exposes a path rather
+than a string of text, so later phases can stream large corpora without changing
+the interface.
 
 ---
 
 ## Data-loading flow
 
-The current data path is:
-
 ```text
 data config
    |
    v
-load_text_dataset_from_config
+DatasetConfig.from_config          identity: which dataset
+   |
+   +-- ResolutionPolicy            policy: what this invocation may do
    |
    v
-raw text
+resolve_dataset                    local first, acquire only if permitted
    |
    v
-CharTokenizer.from_text
+ResolvedDataset.read_text()
    |
    v
-token IDs
-   |
-   v
-split_token_ids
-   |
-   v
-train_ids / val_ids
-   |
-   v
-CausalLMBatcher
-   |
-   v
-CausalLMBatch(input_ids, targets)
+CharTokenizer.from_text -> encode -> split_token_ids -> CausalLMBatcher
    |
    v
 LLaMA-style model
 ```
 
-More explicitly:
-
-1. A YAML config is loaded from `configs/data/`.
-2. `dataset.source_type` determines the source loader.
-3. The loader returns raw text.
-4. `CharTokenizer.from_text` builds a tokenizer from that text.
-5. The text is encoded into token IDs.
-6. The token IDs are split into train and validation token streams.
-7. `CausalLMBatcher` samples shifted causal LM batches.
-8. The model receives `input_ids`.
-9. If `targets` are provided, the model computes causal LM loss.
-
-Expected model-facing shapes:
-
-```text
-input_ids: [batch_size, block_size]
-targets:   [batch_size, block_size]
-logits:    [batch_size, block_size, model_vocab_size]
-```
-
----
-
-## Interaction with the rest of the codebase
-
-### Model sanity checks
-
-The model-only smoke test does not need real data:
-
-```text
-scripts/smoke_test_llama.py
-```
-
-It creates dummy token IDs.
-
-### Data/model compatibility checks
-
-The data pipeline is tested with:
-
-```text
-scripts/check_data_pipeline.py
-scripts/check_dataset_options.py
-```
-
-These scripts verify that text can be loaded, tokenized, batched, and passed into the model.
-
-### Inference
-
-Inference uses the tokenizer to encode prompts:
-
-```text
-scripts/run_inference.py
-src/llm_behavior_lab/inference/generation.py
-```
-
-The current tokenizer is built from the selected dataset text. This means prompts should only contain characters present in the tokenizer vocabulary.
-
-### Phase 5 untrained-model analysis
-
-The untrained analysis script uses the same data path:
-
-```text
-scripts/analyze_untrained_model.py
-```
-
-It samples causal LM windows from the configured dataset and computes:
-
-- output entropy
-- top-k examples
-- top-1 prediction behavior
-- empirical token-frequency comparisons
-- optional per-layer gradient norms
-
-### Future training loops
-
-Later training code should reuse:
-
-```text
-load_text_dataset_from_config
-CharTokenizer
-split_token_ids
-CausalLMBatcher
-```
-
-This will keep training, evaluation, and analysis aligned around the same data representation.
+Identity and policy are kept apart on purpose. Identity belongs in tracked YAML
+and is snapshotted with a run. Policy comes from flags and the environment, is
+machine-specific, and never appears in a config file — which is why the data
+root is not a config field.
 
 ---
 
 ## Scripts using the data pipeline
 
-### `scripts/check_data_pipeline.py`
+| Script | Purpose |
+|---|---|
+| `prepare_dataset.py` | Stage a dataset ahead of time, or report what is missing. |
+| `check_data_pipeline.py` | Text to batches, with an optional model forward pass. |
+| `run_inference.py` | Build the tokenizer from the dataset and run inference. |
+| `analyze_untrained_model.py` | Initialization analysis, optionally persisted. |
 
-Purpose:
+Prepare a dataset before using it, which is useful on a login node before a
+batch job:
 
-- checks the default text-to-batch path
-- verifies data/model compatibility
-- runs one model forward pass
+```bash
+python3 scripts/prepare_dataset.py --data-config configs/data/wikitext2.yaml
+```
 
-Typical command:
+Check what is available without obtaining anything:
+
+```bash
+python3 scripts/prepare_dataset.py \
+  --data-config configs/data/wikitext2.yaml \
+  --no-download
+```
+
+Check the local pipeline:
 
 ```bash
 python3 scripts/check_data_pipeline.py \
@@ -590,186 +333,23 @@ python3 scripts/check_data_pipeline.py \
   --model-config configs/model/tiny_llama.yaml
 ```
 
-Successful output should confirm:
-
-```text
-Train input shape: (4, 16)
-Train target shape: (4, 16)
-Validation input shape: (4, 16)
-Validation target shape: (4, 16)
-Logits shape: (4, 16, 256)
-Loss shape: ()
-```
-
-### `scripts/check_dataset_options.py`
-
-Purpose:
-
-- checks config-driven dataset selection
-- supports local and Hugging Face dataset configs
-- verifies tokenization and batching
-- optionally verifies model compatibility
-
-Local dataset command:
-
-```bash
-python3 scripts/check_dataset_options.py \
-  --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-WikiText-2 command:
-
-```bash
-python3 scripts/check_dataset_options.py \
-  --data-config configs/data/wikitext2.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-If using Hugging Face datasets, install:
-
-```bash
-python3 -m pip install -e ".[dev,hf]"
-```
-
-Successful output should confirm:
-
-```text
-Dataset source type: local_text
-```
-
-or:
-
-```text
-Dataset source type: huggingface
-```
-
-and should also print token counts, batch shapes, and optional model logits shape.
-
-### `scripts/run_inference.py`
-
-Purpose:
-
-- builds the tokenizer from the selected data config
-- encodes a prompt
-- runs the model
-- prints top-k next-token predictions
-- generates a short continuation
-
-Typical command:
-
-```bash
-python3 scripts/run_inference.py \
-  --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-Successful output should confirm:
-
-```text
-Input tensor shape: ...
-Full logits shape: ...
-Top-k next-token predictions:
-Decoded generated text: ...
-```
-
-### `scripts/analyze_untrained_model.py`
-
-Purpose:
-
-- runs Phase 5 untrained-model analysis
-- uses data batches from the configured dataset
-- compares model output probabilities with empirical token frequencies
-- optionally computes per-layer gradient norms
-
-Typical command:
-
-```bash
-python3 scripts/analyze_untrained_model.py \
-  --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-With gradient norms:
-
-```bash
-python3 scripts/analyze_untrained_model.py \
-  --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml \
-  --compute-grad-norms
-```
-
-Successful output should confirm:
-
-```text
-Phase 5 untrained-model analysis completed successfully.
-Mean output entropy: ...
-Top-1 assignment concentration: ...
-KL(predicted || empirical): ...
-JS(predicted, empirical): ...
-```
-
-With gradient norms enabled, it should also save:
-
-```text
-outputs/phase5_gradient_norms/gradient_norms.json
-outputs/phase5_gradient_norms/gradient_norms.csv
-```
-
----
-
-## Practical usage
-
-### Check the local data pipeline
+Check dataset loading only, skipping the model:
 
 ```bash
 python3 scripts/check_data_pipeline.py \
   --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-### Check the local dataset through the dataset-options script
-
-```bash
-python3 scripts/check_dataset_options.py \
-  --data-config configs/data/tiny_text.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-### Check WikiText-2 support
-
-Install optional dependencies first:
-
-```bash
-python3 -m pip install -e ".[dev,hf]"
-```
-
-Then run:
-
-```bash
-python3 scripts/check_dataset_options.py \
-  --data-config configs/data/wikitext2.yaml \
-  --model-config configs/model/tiny_llama.yaml
-```
-
-If your Python environment has an old SciPy build with NumPy 2.x, refresh the optional stack:
-
-```bash
-python3 -m pip install --upgrade --force-reinstall -e ".[dev,hf]"
-```
-
-### Skip the model forward pass
-
-For dataset-only checks:
-
-```bash
-python3 scripts/check_dataset_options.py \
-  --data-config configs/data/wikitext2.yaml \
   --model-config configs/model/tiny_llama.yaml \
   --skip-model-check
 ```
 
-This is useful when you only want to verify dataset loading, tokenization, and batching.
+Run an experiment workflow on an external dataset. It is prepared on first use
+and reused afterwards:
+
+```bash
+python3 scripts/analyze_untrained_model.py \
+  --data-config configs/data/wikitext2.yaml \
+  --model-config configs/model/tiny_llama.yaml
+```
 
 ---
 
@@ -782,7 +362,7 @@ Current limitations:
 - the character tokenizer is rebuilt from the loaded text each run
 - tokenizers are not yet saved or reused
 - external datasets are concatenated into one text stream
-- there is no persistent tokenized cache yet
+- there is no persistent tokenized cache yet; preparation stores plain text
 - streaming/sharded training loaders are not implemented yet
 - there is no train/validation/test split metadata file yet
 - large-scale training is not implemented yet
@@ -802,7 +382,6 @@ Planned data-side extensions include:
 - streaming dataset support for training
 - dataset sharding
 - train/validation/test split improvements
-- dataset metadata tracking
 - dataset statistics and cached summaries
 - token grouping for bias and preference analysis
 - subgroup-aware or metadata-aware datasets
