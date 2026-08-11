@@ -24,11 +24,9 @@ dev = [
 ]
 # Optional: required only to acquire externally hosted datasets. The core
 # package, the default test suite, and the local text workflow never need it.
-# The NumPy bound is scoped to this extra so it cannot constrain users who
-# never touch external datasets.
+# Only what the project actually imports is declared here.
 hf = [
   "datasets>=2.19",
-  "scipy>=1.11.4",
 ]
 
 [tool.setuptools.packages.find]

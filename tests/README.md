@@ -84,7 +84,7 @@ tests/
 | `test_dataset_config.py` | Dataset identity, resolution policy, data-root selection | Unit tests | `data/config.py`, `data/errors.py` |
 | `test_dataset_resolver.py` | Local-first resolution, routes, unavailable-data messages | Unit/integration tests | `data/resolver.py` |
 | `test_dataset_prepared.py` | Prepared directories, manifests, staleness, atomicity | Filesystem tests | `data/prepared.py` |
-| `test_dataset_huggingface.py` | Acquisition, cache reuse, offline refusal, announcements | Mocked integration tests | `data/huggingface.py` |
+| `test_dataset_huggingface.py` | Acquisition, cache reuse, offline enforcement, refresh, resolved provenance, announcements | Mocked integration tests | `data/huggingface.py` |
 | `test_dataset_cli.py` | Shared dataset options and policy construction | Unit tests | `data/cli.py` |
 | `test_dataset_tracking.py` | Dataset contents cannot enter Git | Repository tests | `.gitignore` |
 | `test_migrated_workflows.py` | Migrated scripts still behave as before | End-to-end integration tests | `scripts/*.py` |

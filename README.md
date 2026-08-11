@@ -724,8 +724,14 @@ python3 scripts/analyze_untrained_model.py \
   --model-config configs/model/tiny_llama.yaml
 ```
 
+External datasets are larger than the tracked fixture, so their character
+vocabulary can exceed the `vocab_size: 256` in `configs/model/tiny_llama.yaml`.
+The dataset layer provides the text; sizing the model remains a model-config
+decision. If a run reports that the tokenizer vocab size exceeds the model vocab
+size, raise `model.params.vocab_size`.
+
 See [`data/README.md`](data/README.md) for the resolution order, prepared-data
-manifests, and staleness detection.
+manifests, staleness detection, and the limitations that come with them.
 
 ## Run the Phase 2 model sanity check
 

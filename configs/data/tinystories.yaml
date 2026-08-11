@@ -16,6 +16,11 @@
 # Hugging Face cache: a streamed dataset does not populate the arrow cache, so
 # the source-cache route will not serve this config.
 
+# The character vocabulary of this corpus may also exceed the tiny model's
+# vocab_size: 256. TinyStories is largely ASCII English so it may fit, but this
+# has not been verified against the real dataset. Check the reported tokenizer
+# vocab size before assuming compatibility.
+
 dataset:
   name: tinystories_train200
   source: huggingface

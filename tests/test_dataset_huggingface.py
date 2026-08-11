@@ -30,7 +30,6 @@ from llm_behavior_lab.data import (
 )
 from llm_behavior_lab.data import huggingface
 from llm_behavior_lab.data.huggingface import (
-    check_dependency_environment,
     concatenate_text_examples,
     describe_source,
 )
@@ -383,28 +382,6 @@ def test_loader_failures_are_wrapped_with_the_source(fake_datasets, tmp_path, mo
     assert "upstream exploded" in message
 
 
-def test_dependency_preflight_flags_incompatible_numpy_and_scipy(monkeypatch) -> None:
-    """A known-bad combination should be reported as an environment problem."""
-
-    versions = {"numpy": "2.2.6", "scipy": "1.8.0"}
-    monkeypatch.setattr(
-        "llm_behavior_lab.data.huggingface._installed_version", versions.get
-    )
-
-    with pytest.raises(DatasetAcquisitionError, match="incompatible with NumPy 2"):
-        check_dependency_environment()
-
-
-def test_dependency_preflight_accepts_supported_combinations(monkeypatch) -> None:
-    """Ordinary environments must not be rejected."""
-
-    for versions in ({"numpy": "1.26.4", "scipy": "1.8.0"}, {"numpy": "2.2.6", "scipy": "1.14.0"}):
-        monkeypatch.setattr(
-            "llm_behavior_lab.data.huggingface._installed_version", versions.get
-        )
-        check_dependency_environment()
-
-
 def test_cache_directory_lives_under_the_data_root(tmp_path) -> None:
     """All downloaded bytes stay under one configurable root."""
 
@@ -590,11 +567,16 @@ def test_resolved_details_never_trigger_a_staleness_mismatch(
 
 
 def test_no_hub_lookup_is_performed_for_provenance(fake_datasets, tmp_path) -> None:
-    """Recording provenance must not add a network operation."""
+    """Recording provenance must not add a network operation.
 
-    import sys
+    The module does reference huggingface_hub, but only to set offline mode.
+    What must not appear is a Hub API query for the resolved revision.
+    """
 
-    assert "huggingface_hub" not in Path(huggingface.__file__).read_text(encoding="utf-8")
+    source = Path(huggingface.__file__).read_text(encoding="utf-8")
+    for networked in ("HfApi", "dataset_info(", "list_repo_", "hf_hub_download"):
+        assert networked not in source
+
     materialize(
         _dataset(),
         prepared_directory(tmp_path, "wikitext2"),
@@ -602,3 +584,71 @@ def test_no_hub_lookup_is_performed_for_provenance(fake_datasets, tmp_path) -> N
         allow_network=True,
     )
     assert len(fake_datasets) == 1  # exactly one loader call, no extra lookup
+
+
+def test_offline_mode_is_actually_enabled_during_a_cache_read(monkeypatch, tmp_path) -> None:
+    """Setting the environment variable alone is not enough.
+
+    Both libraries read HF_HUB_OFFLINE into a module constant at import time,
+    and the loader is imported before the call, so the constant is what decides.
+    """
+
+    import huggingface_hub.constants as hub_constants
+
+    observed = {}
+
+    def load_dataset(repo_id, subset=None, **kwargs):
+        observed["env"] = os.environ.get("HF_HUB_OFFLINE")
+        observed["constant"] = hub_constants.HF_HUB_OFFLINE
+        return list(ROWS)
+
+    monkeypatch.setattr(huggingface, "_import_load_dataset", lambda: load_dataset)
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+    before = hub_constants.HF_HUB_OFFLINE
+
+    materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=False,
+    )
+
+    assert observed["env"] == "1"
+    assert observed["constant"] is True
+    assert hub_constants.HF_HUB_OFFLINE == before, "offline state must be restored"
+
+
+def test_offline_state_is_restored_even_when_loading_fails(monkeypatch, tmp_path) -> None:
+    """A failed cache probe must not leave the process stuck offline."""
+
+    import huggingface_hub.constants as hub_constants
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("nothing cached")
+
+    monkeypatch.setattr(huggingface, "_import_load_dataset", lambda: failing)
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+    before = hub_constants.HF_HUB_OFFLINE
+
+    with pytest.raises(DatasetAcquisitionError):
+        materialize(
+            _dataset(),
+            prepared_directory(tmp_path, "wikitext2"),
+            cache_dir=tmp_path / "hf",
+            allow_network=False,
+        )
+
+    assert hub_constants.HF_HUB_OFFLINE == before
+
+
+def test_acquisition_does_not_enable_offline_mode(fake_datasets, tmp_path) -> None:
+    """Fetching must leave offline mode off."""
+
+    materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert fake_datasets[0]["offline"] is False

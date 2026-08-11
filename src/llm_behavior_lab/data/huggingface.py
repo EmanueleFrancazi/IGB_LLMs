@@ -20,7 +20,9 @@ runs resolve from disk without consulting Hugging Face at all.
 from __future__ import annotations
 
 import os
-from importlib import metadata, util
+import sys
+from contextlib import contextmanager
+from importlib import util
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -59,56 +61,6 @@ def _import_load_dataset() -> Callable[..., Any]:
             f"Install it with: {INSTALL_HINT}"
         ) from exc
     return load_dataset
-
-
-def _installed_version(package: str) -> str | None:
-    """Return an installed package version without importing the package."""
-
-    try:
-        return metadata.version(package)
-    except metadata.PackageNotFoundError:
-        return None
-
-
-def _numeric_prefix(version: str) -> tuple[int, ...]:
-    """Parse the leading numeric components of a version string."""
-
-    parts: list[int] = []
-    for chunk in version.replace("-", ".").split("."):
-        digits = "".join(character for character in chunk if character.isdigit())
-        if not digits:
-            break
-        parts.append(int(digits))
-        if len(parts) == 3:
-            break
-    return tuple(parts)
-
-
-def check_dependency_environment() -> None:
-    """Detect a NumPy/SciPy combination known to break ``datasets`` imports.
-
-    Older SciPy builds compiled against NumPy 1.x fail to import beside NumPy
-    2.x with errors that look like dataset problems but are environment
-    problems. Catching it here keeps the message honest.
-    """
-
-    numpy_version = _installed_version("numpy")
-    scipy_version = _installed_version("scipy")
-    if not numpy_version or not scipy_version:
-        return
-
-    numpy_parts = _numeric_prefix(numpy_version)
-    scipy_parts = _numeric_prefix(scipy_version)
-    if not numpy_parts or len(scipy_parts) < 2:
-        return
-
-    if numpy_parts[0] >= 2 and scipy_parts[:2] < (1, 11):
-        raise DatasetAcquisitionError(
-            f"This environment has NumPy {numpy_version} with SciPy {scipy_version}. "
-            "SciPy builds older than 1.11 are incompatible with NumPy 2.x and can "
-            "fail while importing Hugging Face datasets.\n"
-            f"Refresh the optional dependencies with: {INSTALL_HINT}"
-        )
 
 
 def concatenate_text_examples(
@@ -191,6 +143,46 @@ def describe_source(dataset: DatasetConfig) -> str:
     return ", ".join(parts)
 
 
+@contextmanager
+def _offline_mode():
+    """Enable Hugging Face offline mode for the duration of a call.
+
+    ``HF_HUB_OFFLINE`` is the documented mechanism, and it is set here so that
+    any subprocess inherits it. It is not sufficient on its own: both
+    ``huggingface_hub`` and ``datasets`` read it into a module constant at
+    import time, and the loader is imported before this runs, so setting only
+    the variable would leave offline mode disabled. The corresponding constants
+    are therefore set too, and everything is restored afterwards.
+
+    This makes the offline guarantee explicit rather than assumed. It still
+    relies on the libraries honouring their own offline constant; there is no
+    independent network barrier here.
+    """
+
+    import huggingface_hub.constants as hub_constants
+
+    previous_env = os.environ.get("HF_HUB_OFFLINE")
+    previous_hub = hub_constants.HF_HUB_OFFLINE
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    hub_constants.HF_HUB_OFFLINE = True
+
+    datasets_config = sys.modules.get("datasets.config")
+    previous_datasets = getattr(datasets_config, "HF_HUB_OFFLINE", None)
+    if datasets_config is not None:
+        datasets_config.HF_HUB_OFFLINE = True
+
+    try:
+        yield
+    finally:
+        if previous_env is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = previous_env
+        hub_constants.HF_HUB_OFFLINE = previous_hub
+        if datasets_config is not None and previous_datasets is not None:
+            datasets_config.HF_HUB_OFFLINE = previous_datasets
+
+
 def describe_resolved(rows: Any) -> dict[str, Any]:
     """Summarize what the loader actually returned, for the manifest.
 
@@ -239,19 +231,15 @@ def _load_rows(
     if force_redownload:
         kwargs["download_mode"] = "force_redownload"
 
-    previous = os.environ.get("HF_HUB_OFFLINE")
-    if not allow_network:
-        os.environ["HF_HUB_OFFLINE"] = "1"
-    try:
+    if allow_network:
         if dataset.subset:
             return load_dataset(dataset.repo_id, dataset.subset, **kwargs)
         return load_dataset(dataset.repo_id, **kwargs)
-    finally:
-        if not allow_network:
-            if previous is None:
-                os.environ.pop("HF_HUB_OFFLINE", None)
-            else:
-                os.environ["HF_HUB_OFFLINE"] = previous
+
+    with _offline_mode():
+        if dataset.subset:
+            return load_dataset(dataset.repo_id, dataset.subset, **kwargs)
+        return load_dataset(dataset.repo_id, **kwargs)
 
 
 def materialize(

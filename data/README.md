@@ -209,6 +209,34 @@ Every part of the project obtains a dataset through one function,
 If none succeeds, the error names every location tried, says why acquisition did
 not happen, and gives the command that would fix it.
 
+### Limitations to know about
+
+**Replacement is not transactional.** An existing prepared copy is removed
+before the new one is renamed into place. A crash in that window leaves neither,
+and the next run prepares again. The guarantee that does hold unconditionally is
+that an incomplete preparation is never mistaken for a complete one.
+
+**Concurrent preparation is not supported.** Two processes preparing the same
+dataset under the same data root may collide at replacement time and one will
+fail with a filesystem error. Nothing deletes another process's staging
+directory, and no observer ever sees a half-written dataset, so the failure is
+safe and a re-run fixes it. Abandoned `.partial` directories are inert and
+ignored; remove them by hand if they accumulate.
+
+**Offline mode is enforced by Hugging Face, not by this project.** Cache reads
+run with `HF_HUB_OFFLINE` set and with the corresponding library constants set,
+because both libraries read that variable once at import. There is no
+independent network barrier here: the guarantee is only as strong as the
+library honouring its own offline flag.
+
+**`--offline` and `--no-download` currently follow the same code path.** Both
+read from the local cache and neither can fetch. They differ only in intent and
+in what the error message says.
+
+**Upstream drift is not detected.** With `revision` unpinned, a prepared copy
+stays valid even if the upstream dataset changes. Pin `revision` when that
+matters; the manifest records the fingerprint that was actually materialized.
+
 ### Controlling acquisition
 
 Every data-consuming script accepts the same options:
@@ -234,6 +262,12 @@ directory can be moved between machines.
 The manifest is written last, inside a directory that is moved into place
 atomically. Its presence therefore means the preparation finished; a directory
 without one is an interrupted attempt and is rebuilt rather than trusted.
+
+The manifest also records what the source actually returned — fingerprint,
+version, config name, split, and sizes — separately from what was requested, so
+a later reader can tell which corpus a run actually used. Those resolved values
+are excluded from staleness comparison, because two preparations of the same
+request may legitimately differ there.
 
 If the configuration later disagrees with the manifest — a different split or a
 larger `max_characters` — resolution reports the differing field instead of

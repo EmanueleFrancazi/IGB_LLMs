@@ -204,8 +204,23 @@ regardless of it. Scripts opt in explicitly.
 
 A prepared dataset directory holds `text.txt` and `manifest.json`. The manifest
 is written last inside a staging directory moved into place atomically, so its
-presence means the preparation completed. It records the dataset identity, a
-digest, and counts, and contains no filesystem paths.
+presence means the preparation completed. It records the requested identity, a
+digest, counts, and a `resolved` block describing what the source returned. It
+contains no filesystem paths.
+
+The guarantee is that an incomplete preparation is never mistaken for a complete
+one. Replacement is not transactional: an existing copy is removed before the
+new one is renamed in, so a crash in that window leaves neither. Concurrent
+preparation of one dataset is unsupported and fails with a filesystem error
+rather than corrupting anything.
+
+### Offline contract
+
+Cache reads run inside a context manager that sets `HF_HUB_OFFLINE` and the
+matching library constants, because `huggingface_hub` and `datasets` read that
+variable once at import and the loader is imported before the call. Enforcement
+is delegated to those libraries; this package adds no independent network
+barrier.
 
 ### Where to look
 
