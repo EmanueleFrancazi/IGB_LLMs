@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from contextlib import contextmanager
 from importlib import util
 from pathlib import Path
@@ -143,44 +144,68 @@ def describe_source(dataset: DatasetConfig) -> str:
     return ", ".join(parts)
 
 
+#: Loader calls are serialized because enabling offline mode means mutating
+#: process-global state. Without this, a cache-only call could force a
+#: concurrent acquisition offline, and overlapping calls could restore the
+#: flags in the wrong order and leave the process permanently offline.
+_LOADER_LOCK = threading.Lock()
+
+#: Environment variables that select offline mode. Both are set so a
+#: subprocess inherits the intent whichever library reads it.
+_OFFLINE_ENV_VARS = ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE")
+
+#: Module constants that decide offline mode at call time. The libraries read
+#: the environment once at import, so setting only the variables is not enough.
+#: Releases differ in which of these exist: older ``datasets`` uses
+#: ``HF_DATASETS_OFFLINE``, newer releases also carry the Hub-style name. Only
+#: attributes the installed version already defines are touched, so nothing
+#: meaningless is created.
+_OFFLINE_CONSTANTS = (
+    ("huggingface_hub.constants", "HF_HUB_OFFLINE"),
+    ("datasets.config", "HF_HUB_OFFLINE"),
+    ("datasets.config", "HF_DATASETS_OFFLINE"),
+)
+
+
 @contextmanager
 def _offline_mode():
     """Enable Hugging Face offline mode for the duration of a call.
 
-    ``HF_HUB_OFFLINE`` is the documented mechanism, and it is set here so that
-    any subprocess inherits it. It is not sufficient on its own: both
-    ``huggingface_hub`` and ``datasets`` read it into a module constant at
-    import time, and the loader is imported before this runs, so setting only
-    the variable would leave offline mode disabled. The corresponding constants
-    are therefore set too, and everything is restored afterwards.
+    ``HF_HUB_OFFLINE`` is the documented mechanism and is set here so that any
+    subprocess inherits it. It is not sufficient on its own: the libraries read
+    it into module constants at import time and the loader is imported before
+    this runs, so the constants are set too and restored afterwards, on normal
+    exit and on exceptions alike.
 
-    This makes the offline guarantee explicit rather than assumed. It still
-    relies on the libraries honouring their own offline constant; there is no
-    independent network barrier here.
+    Enforcement still belongs to those libraries; there is no independent
+    network barrier here. Callers must hold :data:`_LOADER_LOCK`, because the
+    state being changed is process-global.
     """
 
-    import huggingface_hub.constants as hub_constants
+    import huggingface_hub.constants  # noqa: F401  ensure it is in sys.modules
 
-    previous_env = os.environ.get("HF_HUB_OFFLINE")
-    previous_hub = hub_constants.HF_HUB_OFFLINE
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    hub_constants.HF_HUB_OFFLINE = True
+    saved_env = {name: os.environ.get(name) for name in _OFFLINE_ENV_VARS}
+    for name in _OFFLINE_ENV_VARS:
+        os.environ[name] = "1"
 
-    datasets_config = sys.modules.get("datasets.config")
-    previous_datasets = getattr(datasets_config, "HF_HUB_OFFLINE", None)
-    if datasets_config is not None:
-        datasets_config.HF_HUB_OFFLINE = True
+    saved_constants = []
+    for module_name, attribute in _OFFLINE_CONSTANTS:
+        module = sys.modules.get(module_name)
+        if module is None or not hasattr(module, attribute):
+            continue
+        saved_constants.append((module, attribute, getattr(module, attribute)))
+        setattr(module, attribute, True)
 
     try:
         yield
     finally:
-        if previous_env is None:
-            os.environ.pop("HF_HUB_OFFLINE", None)
-        else:
-            os.environ["HF_HUB_OFFLINE"] = previous_env
-        hub_constants.HF_HUB_OFFLINE = previous_hub
-        if datasets_config is not None and previous_datasets is not None:
-            datasets_config.HF_HUB_OFFLINE = previous_datasets
+        for module, attribute, previous in saved_constants:
+            setattr(module, attribute, previous)
+        for name, previous in saved_env.items():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
 
 
 def describe_resolved(rows: Any) -> dict[str, Any]:
@@ -231,15 +256,18 @@ def _load_rows(
     if force_redownload:
         kwargs["download_mode"] = "force_redownload"
 
-    if allow_network:
+    def call() -> Any:
         if dataset.subset:
             return load_dataset(dataset.repo_id, dataset.subset, **kwargs)
         return load_dataset(dataset.repo_id, **kwargs)
 
-    with _offline_mode():
-        if dataset.subset:
-            return load_dataset(dataset.repo_id, dataset.subset, **kwargs)
-        return load_dataset(dataset.repo_id, **kwargs)
+    # Held for acquisition too: otherwise a concurrent cache-only call could
+    # switch the global flags underneath a fetch that is meant to use the network.
+    with _LOADER_LOCK:
+        if allow_network:
+            return call()
+        with _offline_mode():
+            return call()
 
 
 def materialize(
@@ -265,7 +293,10 @@ def materialize(
         overwrite: Replace an existing prepared directory.
         prepared_by: Command recorded in the manifest.
         force_redownload: Ask the loader to re-fetch rather than reuse its own
-            cache. Only meaningful together with ``allow_network``.
+            cache. Only meaningful together with ``allow_network``, and only for
+            non-streaming loads: streaming bypasses the download-and-prepare
+            step this option governs, so a streamed refresh simply reopens the
+            source rather than invalidating a download cache.
 
     Returns:
         The manifest of the prepared dataset.

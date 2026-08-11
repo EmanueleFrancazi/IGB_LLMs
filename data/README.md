@@ -216,6 +216,12 @@ before the new one is renamed into place. A crash in that window leaves neither,
 and the next run prepares again. The guarantee that does hold unconditionally is
 that an incomplete preparation is never mistaken for a complete one.
 
+**Loader calls are serialized within a process.** Enabling offline mode means
+changing process-global state, so Hugging Face loader calls in this package run
+one at a time. A cache-only call therefore cannot force a concurrent
+acquisition offline, and overlapping calls cannot leave the process
+permanently offline. This covers threads inside one process only.
+
 **Concurrent preparation is not supported.** Two processes preparing the same
 dataset under the same data root may collide at replacement time and one will
 fail with a filesystem error. Nothing deletes another process's staging
@@ -235,7 +241,8 @@ in what the error message says.
 
 **Upstream drift is not detected.** With `revision` unpinned, a prepared copy
 stays valid even if the upstream dataset changes. Pin `revision` when that
-matters; the manifest records the fingerprint that was actually materialized.
+matters, using a real Hub reference obtained from the dataset repository (see
+*Four identifiers* below) — the manifest does not supply one.
 
 ### Controlling acquisition
 
@@ -246,11 +253,41 @@ Every data-consuming script accepts the same options:
 | `--data-root PATH` | Where prepared and cached data live. |
 | `--no-download` | Reuse what is already available; never obtain anything missing. |
 | `--offline` | Forbid all network access. Implies `--no-download`. |
-| `--force-refresh` | Re-acquire, replacing an existing prepared copy. |
+| `--force-refresh` | Re-acquire, replacing an existing prepared copy. See below. |
 
 Scripts acquire missing data by default, and always announce it first. Code that
 imports the library gets the conservative default instead: a
 `ResolutionPolicy()` built without arguments can never reach the network.
+
+#### Measuring what an acquisition actually costs
+
+The prepared corpus is bounded by `max_examples` and `max_characters`, and
+streaming means the whole split need not be materialized before those apply.
+What that costs over the network has **not** been measured.
+
+`/usr/bin/time -v` reports process resource use — wall time, peak memory, and
+block-device I/O — and `du -sh` on the data root reports local disk footprint,
+so a before/after pair gives data-root growth. Neither observes sockets, so
+neither measures bytes transferred. For streamed datasets `du` is not even a
+proxy, because streamed shards need not land in the cache at all.
+
+Exact network transfer remains unmeasured unless a network-monitoring method is
+used alongside a real acquisition.
+
+#### What `--force-refresh` guarantees
+
+Prepared and cache-only reuse are bypassed, the source is opened again, and
+whatever it yields becomes a replacement prepared corpus. The resulting bytes
+are **not** guaranteed to differ: upstream may legitimately be unchanged.
+
+For non-streaming datasets the loader is additionally asked to re-fetch rather
+than reuse its own download cache. For streamed datasets that request has no
+meaningful effect, because streaming bypasses the download-and-prepare step it
+governs; there the guarantee is simply that the current source stream is opened
+again.
+
+A refresh that cannot reach the source fails and leaves the previous prepared
+copy intact.
 
 ### Detecting stale or incomplete data
 
@@ -268,6 +305,19 @@ version, config name, split, and sizes — separately from what was requested, s
 a later reader can tell which corpus a run actually used. Those resolved values
 are excluded from staleness comparison, because two preparations of the same
 request may legitimately differ there.
+
+#### Four identifiers, easily confused
+
+| Identifier | What it is | Where |
+|---|---|---|
+| Requested Hub revision | A branch, tag, or commit SHA sent to the loader. Empty unless you pin it. | `dataset.revision`, copied to the manifest |
+| Datasets fingerprint | The Datasets library's **local** cache/state hash. Not a Hub reference and not accepted by `revision`. Absent for streamed datasets. | `manifest.resolved.fingerprint` |
+| Prepared-text SHA256 | Digest of the exact `text.txt` this project wrote. The reliable answer to "did two runs use the same corpus?" | `manifest.sha256` |
+| Actual Hub commit | The commit that served the data. **Not recorded**; obtaining it would need a Hub lookup, which the resolver deliberately avoids. | nowhere |
+
+To pin strictly, take a branch, tag, or commit SHA from the dataset's page on
+huggingface.co (or from `huggingface_hub`) and set `dataset.revision` to it.
+Nothing in a prepared manifest can be pasted into that field.
 
 If the configuration later disagrees with the manifest — a different split or a
 larger `max_characters` — resolution reports the differing field instead of

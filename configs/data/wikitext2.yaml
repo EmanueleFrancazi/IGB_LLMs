@@ -19,9 +19,13 @@ dataset:
   repo_id: Salesforce/wikitext
   subset: wikitext-2-raw-v1
   split: train[:1000]
-  # Unpinned. The prepared manifest records the fingerprint and version that
-  # were actually materialized; read them after the first real acquisition and
-  # pin this field to make the corpus reproducible from upstream.
+  # Unpinned. For strict upstream reproducibility, obtain a real Hub reference
+  # -- a branch, tag, or commit SHA from the dataset's page on huggingface.co
+  # or via huggingface_hub -- and put that value here. The prepared manifest
+  # does NOT supply one: its resolved.fingerprint is the Datasets library's
+  # local cache identity, not a Hub revision, and is unavailable for streamed
+  # datasets. The manifest's sha256 identifies the corpus that was actually
+  # materialized, which is what tells you whether two runs used the same text.
   revision: null
   text_field: text
   max_examples: 1000

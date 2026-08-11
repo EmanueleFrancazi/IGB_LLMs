@@ -586,61 +586,6 @@ def test_no_hub_lookup_is_performed_for_provenance(fake_datasets, tmp_path) -> N
     assert len(fake_datasets) == 1  # exactly one loader call, no extra lookup
 
 
-def test_offline_mode_is_actually_enabled_during_a_cache_read(monkeypatch, tmp_path) -> None:
-    """Setting the environment variable alone is not enough.
-
-    Both libraries read HF_HUB_OFFLINE into a module constant at import time,
-    and the loader is imported before the call, so the constant is what decides.
-    """
-
-    import huggingface_hub.constants as hub_constants
-
-    observed = {}
-
-    def load_dataset(repo_id, subset=None, **kwargs):
-        observed["env"] = os.environ.get("HF_HUB_OFFLINE")
-        observed["constant"] = hub_constants.HF_HUB_OFFLINE
-        return list(ROWS)
-
-    monkeypatch.setattr(huggingface, "_import_load_dataset", lambda: load_dataset)
-    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
-    before = hub_constants.HF_HUB_OFFLINE
-
-    materialize(
-        _dataset(),
-        prepared_directory(tmp_path, "wikitext2"),
-        cache_dir=tmp_path / "hf",
-        allow_network=False,
-    )
-
-    assert observed["env"] == "1"
-    assert observed["constant"] is True
-    assert hub_constants.HF_HUB_OFFLINE == before, "offline state must be restored"
-
-
-def test_offline_state_is_restored_even_when_loading_fails(monkeypatch, tmp_path) -> None:
-    """A failed cache probe must not leave the process stuck offline."""
-
-    import huggingface_hub.constants as hub_constants
-
-    def failing(*args, **kwargs):
-        raise RuntimeError("nothing cached")
-
-    monkeypatch.setattr(huggingface, "_import_load_dataset", lambda: failing)
-    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
-    before = hub_constants.HF_HUB_OFFLINE
-
-    with pytest.raises(DatasetAcquisitionError):
-        materialize(
-            _dataset(),
-            prepared_directory(tmp_path, "wikitext2"),
-            cache_dir=tmp_path / "hf",
-            allow_network=False,
-        )
-
-    assert hub_constants.HF_HUB_OFFLINE == before
-
-
 def test_acquisition_does_not_enable_offline_mode(fake_datasets, tmp_path) -> None:
     """Fetching must leave offline mode off."""
 
@@ -652,3 +597,131 @@ def test_acquisition_does_not_enable_offline_mode(fake_datasets, tmp_path) -> No
     )
 
     assert fake_datasets[0]["offline"] is False
+
+
+import sys
+import types
+
+from llm_behavior_lab.data.huggingface import _LOADER_LOCK, _offline_mode
+
+
+def _fake_datasets_config(monkeypatch, **attributes):
+    """Install a fake datasets.config exposing only the given attributes."""
+
+    module = types.ModuleType("datasets.config")
+    for name, value in attributes.items():
+        setattr(module, name, value)
+    monkeypatch.setitem(sys.modules, "datasets.config", module)
+    return module
+
+
+def test_offline_mode_sets_every_flag_the_version_exposes(monkeypatch) -> None:
+    """Newer Datasets carries both names; both must be enabled."""
+
+    import huggingface_hub.constants as hub_constants
+
+    config = _fake_datasets_config(
+        monkeypatch, HF_HUB_OFFLINE=False, HF_DATASETS_OFFLINE=False
+    )
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
+
+    with _offline_mode():
+        assert hub_constants.HF_HUB_OFFLINE is True
+        assert config.HF_HUB_OFFLINE is True
+        assert config.HF_DATASETS_OFFLINE is True
+        assert os.environ["HF_HUB_OFFLINE"] == "1"
+        assert os.environ["HF_DATASETS_OFFLINE"] == "1"
+
+    assert hub_constants.HF_HUB_OFFLINE is False
+    assert config.HF_HUB_OFFLINE is False
+    assert config.HF_DATASETS_OFFLINE is False
+
+
+def test_offline_mode_supports_older_datasets_without_the_hub_name(monkeypatch) -> None:
+    """Datasets 2.19 exposes only HF_DATASETS_OFFLINE; it must still be enabled."""
+
+    import huggingface_hub.constants as hub_constants
+
+    config = _fake_datasets_config(monkeypatch, HF_DATASETS_OFFLINE=False)
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
+
+    with _offline_mode():
+        assert config.HF_DATASETS_OFFLINE is True
+        assert hub_constants.HF_HUB_OFFLINE is True
+
+    assert config.HF_DATASETS_OFFLINE is False
+    # The absent attribute must not be invented on a version that lacks it.
+    assert not hasattr(config, "HF_HUB_OFFLINE")
+
+
+def test_offline_mode_creates_no_attributes_when_datasets_is_absent(monkeypatch) -> None:
+    """A missing datasets.config must not stop offline mode working."""
+
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.delitem(sys.modules, "datasets.config", raising=False)
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
+
+    with _offline_mode():
+        assert hub_constants.HF_HUB_OFFLINE is True
+
+    assert hub_constants.HF_HUB_OFFLINE is False
+
+
+def test_offline_mode_preserves_a_pre_existing_offline_setting(monkeypatch) -> None:
+    """A process already offline must stay offline afterwards."""
+
+    import huggingface_hub.constants as hub_constants
+
+    config = _fake_datasets_config(monkeypatch, HF_DATASETS_OFFLINE=True)
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    with _offline_mode():
+        assert hub_constants.HF_HUB_OFFLINE is True
+
+    assert hub_constants.HF_HUB_OFFLINE is True
+    assert config.HF_DATASETS_OFFLINE is True
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_offline_state_is_restored_after_an_exception(monkeypatch) -> None:
+    """A failure inside the context must not leave the process offline."""
+
+    import huggingface_hub.constants as hub_constants
+
+    config = _fake_datasets_config(monkeypatch, HF_DATASETS_OFFLINE=False)
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+
+    with pytest.raises(RuntimeError):
+        with _offline_mode():
+            raise RuntimeError("loading failed")
+
+    assert hub_constants.HF_HUB_OFFLINE is False
+    assert config.HF_DATASETS_OFFLINE is False
+    assert "HF_HUB_OFFLINE" not in os.environ
+    assert "HF_DATASETS_OFFLINE" not in os.environ
+
+
+def test_loader_calls_are_serialized(monkeypatch, tmp_path) -> None:
+    """Global offline state is only safe if one loader call runs at a time."""
+
+    observed = {}
+
+    def load_dataset(repo_id, subset=None, **kwargs):
+        observed["locked"] = _LOADER_LOCK.locked()
+        return list(ROWS)
+
+    monkeypatch.setattr(huggingface, "_import_load_dataset", lambda: load_dataset)
+    monkeypatch.setattr(huggingface, "datasets_available", lambda: True)
+
+    materialize(
+        _dataset(),
+        prepared_directory(tmp_path, "wikitext2"),
+        cache_dir=tmp_path / "hf",
+        allow_network=True,
+    )
+
+    assert observed["locked"] is True
+    assert not _LOADER_LOCK.locked(), "the lock must be released afterwards"
