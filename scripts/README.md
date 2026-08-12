@@ -61,7 +61,7 @@ scripts/
 | `analyze_untrained_model.py` | Analysis script | Phase 5 + Phase 6 integration | Computes initialization metrics and optionally persists a structured run. |
 | `check_experiment_tracking.py` | Smoke test | Phase 6 persistence | Creates a run, logs metrics/arrays, saves a checkpoint, restores it, and verifies parameter equality. |
 | `prepare_dataset.py` | Utility | Dataset resolution | Stages a dataset ahead of time, or reports what is missing without obtaining it. |
-| `run_initialization_distribution_experiment.py` | Experiment | Initialization distributions | Measures greedy and nucleus token guesses across several random initializations on fixed evaluation positions, then writes a record and figures. |
+| `run_initialization_distribution_experiment.py` | Experiment | Initialization distributions | Measures greedy and nucleus token guesses across several random initializations on fixed evaluation positions, then writes a record and figures. Supports both the character tokenizer and a pretrained subword tokenizer. |
 
 ---
 

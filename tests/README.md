@@ -92,7 +92,8 @@ tests/
 | `test_init_distribution.py` | Deterministic evaluation positions, seed separation, per-initialization measurement | Unit tests | `evaluation/init_distribution.py` |
 | `test_analysis_records.py` | Record round trip, token alignment, validation | Filesystem/unit tests | `analysis/records.py` |
 | `test_analysis_aggregation.py` | Ranked profiles, same-token gaps, SEM, scalar measures | Unit tests | `analysis/aggregation.py` |
-| `test_analysis_figures.py` | Headless figure generation and deterministic filenames | Filesystem tests | `analysis/figures.py` |
+| `test_analysis_figures.py` | Headless figure generation, deterministic filenames, 32k-vocabulary rendering, token-label escaping | Filesystem tests | `analysis/figures.py` |
+| `test_tokenizers.py` | Tokenizer interface, character implementation, pretrained adapter, special-token exclusion, offline load, absence of any model-loading path | Unit tests with fakes | `data/tokenizer.py`, `data/pretrained_tokenizer.py` |
 
 ---
 

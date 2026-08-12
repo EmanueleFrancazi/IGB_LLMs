@@ -91,6 +91,7 @@ src/llm_behavior_lab/
     errors.py
     huggingface.py
     prepared.py
+    pretrained_tokenizer.py
     resolver.py
     text_dataset.py
     tokenizer.py
@@ -263,6 +264,53 @@ independent network barrier.
 | Modify the character tokenizer | `data/tokenizer.py` |
 | Change batch sampling or input/target shifting | `data/dataloader.py` |
 | Export new data utilities | `data/__init__.py` |
+
+### Tokenizers
+
+One interface, two implementations, no registry:
+
+| Implementation | Vocabulary | External dependency |
+|---|---|---|
+| `CharTokenizer` | derived from the corpus, tens of tokens | none |
+| `PretrainedTokenizer` | a Hugging Face subword vocabulary, ~32k | `transformers`, optional `[tokenizers]` extra |
+
+`Tokenizer` is a `Protocol`, so `CharTokenizer` stays the plain frozen dataclass
+it always was. Beyond encode/decode it requires what a large vocabulary forces
+the analysis to know: `special_token_ids`, `eligible_token_ids`, `token_repr`,
+and `describe()`.
+
+`build_tokenizer` dispatches on the data config's `tokenizer.type`. Character is
+the default, so every existing config keeps working untouched.
+
+#### Tokenizer artifacts and offline use
+
+`pretrained_tokenizer.py` loads **tokenizer files only**. It calls
+`AutoTokenizer.from_pretrained` and nothing else — no `AutoModel`, no
+`AutoModelForCausalLM`, no pipeline. A test asserts this against the parsed
+source, because the interpretation of every result depends on the model staying
+randomly initialized.
+
+Loading tries the local cache first, so a cached tokenizer works with no network
+at all. Acquisition happens only when explicitly permitted and is announced
+first. Artifacts live in `<data_root>/tokenizers/`, outside the repository,
+alongside the dataset caches.
+
+#### Special tokens and the predictive support
+
+A pretrained vocabulary contains structural IDs — BOS, EOS, padding — that are
+not ordinary corpus tokens. The policy is:
+
+1. keep the canonical vocabulary and canonical IDs;
+2. encode corpus text with **no** automatic BOS/EOS;
+3. identify structural IDs explicitly;
+4. exclude them from the predictive support used for the empirical
+   distributions, greedy selection, and nucleus sampling alike;
+5. never renumber what remains.
+
+Exclusion is implemented as a `-inf` mask applied once per batch. Softmax then
+gives those tokens exactly zero, argmax cannot choose them, and nucleus
+truncation sorts them to the tail — one masking step covers all three consumers,
+which is what keeps them on the same support.
 
 ### Adding a dataset source
 
@@ -698,6 +746,54 @@ because a truncated summary cannot answer a question nobody asked yet.
 
 ### Measures
 
+#### Four vocabulary sizes, four questions
+
+| Quantity | Question |
+|---|---|
+| `V` full | how many tokens the tokenizer defines |
+| `V` eligible | how many a model may be scored on, after removing structural IDs |
+| `V` corpus-observed | how many actually occur in the analysis split |
+| `N_eff = exp(H)` | how broadly the mass is spread |
+
+Only the first three are counts. Effective support is the size of a uniform
+distribution with the same entropy, so it sits far below the observed support
+whenever a few tokens dominate — which at initialization they do.
+
+#### Zero frequency and effective support answer different questions
+
+Both are retained; neither replaces the other.
+
+*Zero-frequency count/fraction* asks **how much of the eligible vocabulary was
+never selected in exactly `N` guesses**. It depends strongly on `N`: with fewer
+draws than vocabulary entries, most tokens are unreachable regardless of the
+model.
+
+*Effective support* asks **how broadly the guess mass is distributed**. Two
+policies can touch the same number of distinct tokens while one concentrates
+almost all its mass on a handful; entropy separates them, a count cannot.
+
+#### The zero-frequency comparison must use equal draw counts
+
+Greedy makes exactly one selection per position, so it has `N` draws. A single
+nucleus replicate also has `N`, but the `R` replicates *pooled* have `R*N`, and
+more draws mean more chances to reach a rare token.
+
+The headline nucleus figure is therefore **per replicate**: each replicate is
+scored on its own `N` draws and the counts are averaged within the
+initialization, then compared across initializations. Both policies are measured
+at the same sample size.
+
+```text
+greedy   Z_s      = #{i in V_eligible : greedy count = 0}          over N draws
+nucleus  Z_s      = (1/R) * sum_r #{i : replicate r count = 0}     over N draws each
+pooled   (diagnostic only)                                         over R*N draws
+```
+
+The pooled figure is kept under the separate name
+`pooled_zero_frequency_count_mean`. It answers a real question — what the policy
+can reach given more attempts — but it is not comparable with greedy and is
+never displayed beside it.
+
 | Measure | Definition | Reads as |
 |---|---|---|
 | ranked profile | a distribution sorted descending | concentration, token identity discarded |
@@ -706,7 +802,9 @@ because a truncated summary cannot answer a question nobody asked yet.
 | total variation | `0.5 * sum_i \|p_i - q_i\|`, in `[0, 1]` | overall disagreement |
 | Jensen–Shannon | bounded by `ln 2` | overall disagreement, divergence-flavoured |
 | entropy / effective support | `H(p)` in nats, `exp(H)` in tokens | how many tokens are really in play |
-| zero-guess count | valid tokens never selected | breadth, **strongly** dependent on position count |
+| zero-frequency count | eligible tokens never selected in `N` draws | breadth, **strongly** dependent on `N` |
+| zero-frequency fraction | that count over the eligible support | the same, comparable across vocabulary sizes |
+| corpus-observed zero-guess | corpus tokens never guessed | a secondary diagnostic, narrower than the above |
 | top-1/top-2 gap | `p_(1) - p_(2)` | how far the leading token leads |
 
 Ranking before differencing would answer a much weaker question — a distribution with the
@@ -729,11 +827,44 @@ Three kinds are deliberately not mixed:
 The fixed whole-split empirical distribution never carries an initialization SEM: it is one
 distribution, not a sample.
 
+### Memory: nothing is indexed by evaluation position
+
+`measure_initialization` runs the model batch by batch, folds each transient
+`[batch, block, vocab]` tensor into `[vocab]`-sized counters, and discards it. No
+accumulator is indexed by position, so memory is flat in the position count.
+
+That is not an optimization. Holding every position's logits at a realistic
+vocabulary would cost roughly 3.9 GiB for 32768 positions over 32000 tokens, so
+the experiment simply could not run.
+
+Sampling randomness is drawn up front and indexed by position, so a streamed
+measurement equals an all-at-once one **exactly** rather than approximately.
+`measure_from_logits` is the all-at-once reference the streaming path is tested
+against; `compute_evaluation_logits` materializes everything and is appropriate
+only for small vocabularies or few positions.
+
+Size `forward_batch_size` against the vocabulary: the transient logits are
+`batch x block x vocab`, and nucleus truncation sorts them, which costs several
+multiples again.
+
 ### What the experiment does not measure
 
 Model quality. The model is randomly initialized and has learned nothing. Results describe
 the interaction between an untrained architecture, its initialization scheme, and the
 corpus it is compared against.
+
+With a pretrained tokenizer there is a second, sharper boundary. The tokenizer
+carries linguistic structure learned from **its own** training corpus: the
+segmentation, the frequency profile of the pieces, and which strings are single
+tokens at all. The experiment therefore measures
+
+> the distributional behavior of a randomly initialized tiny LLaMA **over a
+> realistic pretrained subword vocabulary**,
+
+not a completely unlearned text-processing system. Structure visible in the
+corpus token distribution belongs to the tokenizer and the text; only the guess
+distribution belongs to the random model. Do not attribute the former to the
+latter.
 
 ### Scripts using this package
 

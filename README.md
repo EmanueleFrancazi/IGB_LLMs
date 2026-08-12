@@ -78,8 +78,10 @@ IGB_LLMs/
       tiny_text.yaml
       wikitext2.yaml
       tinystories.yaml
+      wikitext2_subword.yaml
     model/
       tiny_llama.yaml
+      tiny_llama_32k.yaml
     experiment/
       phase6_smoke.yaml
       untrained_baseline.yaml
@@ -119,6 +121,7 @@ IGB_LLMs/
         errors.py
         huggingface.py
         prepared.py
+        pretrained_tokenizer.py
         resolver.py
         text_dataset.py
         tokenizer.py
@@ -126,6 +129,8 @@ IGB_LLMs/
       evaluation/
         __init__.py
         gradient_norms.py
+        guessing.py
+        init_distribution.py
         output_stats.py
         token_frequency.py
         untrained_analysis.py
@@ -174,6 +179,12 @@ IGB_LLMs/
     test_llama_shapes.py
     test_migrated_workflows.py
     test_persisted_analysis_run.py
+    test_guessing.py
+    test_init_distribution.py
+    test_tokenizers.py
+    test_analysis_records.py
+    test_analysis_aggregation.py
+    test_analysis_figures.py
 
   pyproject.toml
   README.md
@@ -1031,6 +1042,43 @@ Both read the **same** logits, so they describe one model state rather than two 
 
 Written under `outputs/initialization_distribution/<run_id>/figures/` as PNG and SVG.
 `outputs/` is ignored by Git, so results never enter the repository.
+
+### Realistic subword tokenizer
+
+The character baseline uses a vocabulary of 39–147 tokens. To ask the same
+question at a realistic scale, the experiment can read the corpus through the
+pretrained `mistralai/Mistral-7B-v0.1` tokenizer (~32k tokens) while the model
+stays randomly initialized:
+
+```bash
+python3 -m pip install -e ".[tokenizers]"
+
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml \
+  --forward-batch-size 4
+```
+
+**Only the tokenizer is pretrained.** No model weights are downloaded, and a
+test asserts the tokenizer backend never references a pretrained model loader.
+Read the results accordingly: the corpus token distribution reflects the
+tokenizer's own training, and only the *guess* distribution reflects the random
+model.
+
+Tokenizer files are cached under `<data_root>/tokenizers/`, outside the
+repository. Once cached, `--offline` works with no network.
+
+| Setting | Character | Subword |
+|---|---|---|
+| data config | `configs/data/wikitext2.yaml` | `configs/data/wikitext2_subword.yaml` |
+| model config | `configs/model/tiny_llama.yaml` | `configs/model/tiny_llama_32k.yaml` |
+| vocabulary | 147 observed | 32000 canonical |
+| `--forward-batch-size` | 32 | 4–8 |
+
+Sampling adequacy must be re-established after the switch: a subword tokenizer
+changes the token count, the support, and the frequency structure at once, so a
+position count that was adequate for characters says nothing about the new
+regime. Read figure 0 first.
 
 Read the results with `notebooks/initialization_distribution.ipynb`, and see
 [`src/README.md`](src/README.md) for the precise definition of every distribution and
