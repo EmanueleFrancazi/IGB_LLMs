@@ -44,12 +44,14 @@ from llm_behavior_lab.data.resolver import (
     resolve_repo_path,
 )
 from llm_behavior_lab.data.text_dataset import TokenSplits, load_text_file, split_token_ids
-from llm_behavior_lab.data.tokenizer import CharTokenizer
+from llm_behavior_lab.data.tokenizer import CharTokenizer, Tokenizer, build_tokenizer
 
 __all__ = [
     "CausalLMBatch",
     "CausalLMBatcher",
     "CharTokenizer",
+    "Tokenizer",
+    "build_tokenizer",
     "DATA_ROOT_ENV_VAR",
     "DatasetAcquisitionError",
     "DatasetConfig",

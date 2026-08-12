@@ -28,6 +28,12 @@ dev = [
 hf = [
   "datasets>=2.19",
 ]
+# Optional: required only to load a pretrained subword tokenizer. Tokenizer
+# artifacts only -- no pretrained model weights are ever fetched. The character
+# tokenizer and every character workflow run without this.
+tokenizers = [
+  "transformers>=4.34",
+]
 # Optional: required only to draw figures from persisted experiment records.
 # Loading and aggregating those records needs NumPy alone, so re-analysis stays
 # possible without this extra.
