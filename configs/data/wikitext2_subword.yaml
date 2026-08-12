@@ -1,0 +1,49 @@
+# WikiText-2 read through a realistic pretrained subword tokenizer.
+#
+# The dataset section is identical to wikitext2.yaml, so both configs resolve to
+# the same prepared corpus and the same manifest identity. Only the tokenizer
+# differs: this is the character-vs-subword comparison, on one fixed text.
+#
+# Requires the optional dependency:
+#   python3 -m pip install -e ".[tokenizers]"
+#
+# Use with configs/model/tiny_llama_32k.yaml, whose vocab_size matches this
+# tokenizer. The model weights stay randomly initialized; only the tokenizer is
+# pretrained, which is what the results may and may not be read as saying.
+
+dataset:
+  name: wikitext2_raw_train1k
+  source: huggingface
+  repo_id: Salesforce/wikitext
+  subset: wikitext-2-raw-v1
+  split: train[:1000]
+  revision: null
+  text_field: text
+  max_examples: 1000
+  max_characters: 200000
+  document_separator: "\n\n"
+  val_fraction: 0.1
+  verify: false
+
+tokenizer:
+  type: pretrained
+  identifier: mistralai/Mistral-7B-v0.1
+  # Unpinned by default. Pin a real Hub reference -- a branch, tag, or commit
+  # SHA from the model page -- before a serious experiment: the tokenizer now
+  # determines the vocabulary, the token stream, and therefore every
+  # distribution being compared.
+  revision: null
+  # Ordinary corpus text is measured, not a prompt assembled, so no BOS or EOS
+  # is inserted. Structural IDs are excluded from the predictive support
+  # instead, and canonical IDs are never renumbered.
+  add_special_tokens: false
+
+batching:
+  # A subword tokenizer produces far fewer tokens per character than a
+  # character tokenizer, so a window of 64 tokens covers much more text.
+  batch_size: 4
+  block_size: 64
+
+runtime:
+  seed: 1234
+  device: auto

@@ -72,5 +72,16 @@ sampling:
   num_replicates: 8
 
 runtime:
-  # Windows per forward pass. Only affects memory, never the result.
+  # Windows per forward pass. Affects memory only, never the result: the
+  # measurement folds each batch into per-token counters and discards it, and
+  # the sampling draws are indexed by position rather than by batch.
+  #
+  # Size it against the vocabulary. The transient logits are
+  # batch x block x vocab, and nucleus truncation sorts them, which costs
+  # several multiples again (the sort indices alone are int64).
+  #
+  #   character vocabulary (~150):   32 x 64 x 150   ~ 1 MiB    -> 32 is fine
+  #   subword vocabulary (32000):    32 x 64 x 32000 ~ 250 MiB  -> use 4-8
+  #
+  # Override per run with --forward-batch-size.
   forward_batch_size: 32

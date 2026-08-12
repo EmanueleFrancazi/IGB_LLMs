@@ -21,7 +21,9 @@ standard experiment-run directory. Figures are produced from that record by
 from __future__ import annotations
 
 import argparse
+import resource
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -37,12 +39,13 @@ if str(SRC_ROOT) not in sys.path:
 
 from llm_behavior_lab.analysis import (  # noqa: E402
     InitializationExperimentRecord,
+    pooled_nucleus_zero_frequency,
     sampling_adequacy,
     summarize_policy,
+    support_summary,
     within_initialization_sampling_spread,
 )
 from llm_behavior_lab.data import (  # noqa: E402
-    CharTokenizer,
     DatasetConfig,
     add_dataset_arguments,
     resolution_policy_from_args,
@@ -50,11 +53,11 @@ from llm_behavior_lab.data import (  # noqa: E402
     resolve_repo_path,
     split_token_ids,
 )
+from llm_behavior_lab.data.tokenizer import build_tokenizer  # noqa: E402
 from llm_behavior_lab.evaluation import empirical_token_counts  # noqa: E402
 from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     NucleusSamplingSettings,
     build_evaluation_positions,
-    compute_evaluation_logits,
     measure_initialization,
 )
 from llm_behavior_lab.experiment import ExperimentRun, experiment_settings_from_config  # noqa: E402
@@ -147,6 +150,17 @@ def parse_args() -> argparse.Namespace:
         help="Optional run notes overriding the experiment config.",
     )
     parser.add_argument(
+        "--forward-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Windows per forward pass. Affects memory only, never the result. "
+            "Lower it for a large vocabulary: the transient logits are "
+            "batch x block x vocab, and sorting for nucleus truncation costs "
+            "several multiples of that again."
+        ),
+    )
+    parser.add_argument(
         "--no-figures",
         action="store_true",
         help="Skip figure generation. The record is written either way.",
@@ -184,7 +198,11 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             if args.num_replicates is not None
             else sampling.get("num_replicates", 8)
         ),
-        "forward_batch_size": int(runtime.get("forward_batch_size", 32)),
+        "forward_batch_size": int(
+            args.forward_batch_size
+            if args.forward_batch_size is not None
+            else runtime.get("forward_batch_size", 32)
+        ),
     }
 
 
@@ -214,8 +232,17 @@ def main() -> None:
         resolution_policy_from_args(args),
         repo_root=REPO_ROOT,
     )
+
     text = resolved.read_text()
-    tokenizer = CharTokenizer.from_text(text)
+    policy = resolution_policy_from_args(args)
+    tokenizer = build_tokenizer(
+        data_config.get("tokenizer"),
+        text=text,
+        data_root=policy.data_root,
+        allow_download=policy.allow_download,
+        offline=policy.offline,
+        reporter=print,
+    )
     token_ids = tokenizer.encode(text)
     splits = split_token_ids(
         token_ids,
@@ -227,10 +254,34 @@ def main() -> None:
 
     model_params = model_config["model"]["params"]
     model_vocab_size = int(model_params["vocab_size"])
+    tokenizer_description = tokenizer.describe()
+    is_pretrained = tokenizer_description.get("type") == "pretrained"
     if tokenizer.vocab_size > model_vocab_size:
         raise ValueError(
             f"Tokenizer vocab size {tokenizer.vocab_size} exceeds model vocab size "
             f"{model_vocab_size}. Increase model.params.vocab_size."
+        )
+    if is_pretrained and tokenizer.vocab_size != model_vocab_size:
+        # A wider model would waste an embedding row per unused ID and put
+        # unreachable logits in every comparison. For a pretrained vocabulary the
+        # two must agree exactly; the character tokenizer keeps the historical
+        # "may be narrower" behaviour, since its vocabulary depends on the text.
+        raise ValueError(
+            f"Tokenizer {tokenizer_description.get('identifier')!r} has vocabulary "
+            f"{tokenizer.vocab_size} but the model config declares {model_vocab_size}. "
+            "A pretrained tokenizer requires an exact match; use "
+            "configs/model/tiny_llama_32k.yaml or set model.params.vocab_size to "
+            f"{tokenizer.vocab_size}."
+        )
+
+    eligible_token_ids = tokenizer.eligible_token_ids
+    special_token_ids = set(tokenizer.special_token_ids)
+    if special_token_ids.intersection(token_ids):
+        raise ValueError(
+            "The encoded corpus contains structural token IDs "
+            f"{sorted(special_token_ids.intersection(token_ids))[:5]}, so the empirical "
+            "distribution and the predictive support would disagree. Set "
+            "tokenizer.add_special_tokens to false."
         )
     if block_size > int(model_params["max_seq_len"]):
         raise ValueError(
@@ -281,28 +332,34 @@ def main() -> None:
     model_seeds: list[int] = []
     measurements = []
     parameter_count = 0
+    started = time.perf_counter()
     for index in range(protocol["num_initializations"]):
         model_seed = protocol["base_seed"] + index * protocol["seed_stride"]
         seed_everything(model_seed)
         model = build_model_from_config(model_config).to(device)
         parameter_count = model.count_parameters()
-        logits = compute_evaluation_logits(
-            model,
-            positions,
-            vocab_size=tokenizer.vocab_size,
-            forward_batch_size=protocol["forward_batch_size"],
-        )
+        # Streamed: logits exist one batch at a time and are folded into
+        # per-token counters, so memory does not grow with the position count.
         measurements.append(
             measure_initialization(
+                model,
+                positions,
                 model_seed=model_seed,
-                logits=logits,
                 vocab_size=tokenizer.vocab_size,
                 sampling=sampling,
+                eligible_token_ids=eligible_token_ids,
+                forward_batch_size=protocol["forward_batch_size"],
                 device=device,
             )
         )
         model_seeds.append(model_seed)
-        print(f"  initialization {index + 1}/{protocol['num_initializations']} (seed {model_seed}) measured")
+        del model
+        print(
+            f"  initialization {index + 1}/{protocol['num_initializations']} "
+            f"(seed {model_seed}) measured"
+        )
+    elapsed = time.perf_counter() - started
+    peak_rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
     # ---- assemble the record ----------------------------------------------
     def stacked(attribute: str) -> Any:
@@ -324,7 +381,7 @@ def main() -> None:
         "model_vocab_size": model_vocab_size,
         "dataset_path": str(resolved.path),
         "dataset": resolved.provenance(),
-        "tokenizer": {"type": "char", "vocab_size": tokenizer.vocab_size},
+        "tokenizer": tokenizer_description,
         "analysis": {
             "split": protocol["split"],
             "split_token_count": len(split_ids),
@@ -334,6 +391,20 @@ def main() -> None:
             "num_initializations": protocol["num_initializations"],
             "model_seeds": model_seeds,
             "sampling": sampling.as_dict(),
+            "vocab_size": tokenizer.vocab_size,
+            "eligible_vocab_size": len(eligible_token_ids),
+            "excluded_special_token_ids": sorted(special_token_ids),
+            "forward_batch_size": protocol["forward_batch_size"],
+            "transient_logits_shape": [
+                min(protocol["forward_batch_size"], positions.num_windows),
+                block_size,
+                tokenizer.vocab_size,
+            ],
+            "retains_all_position_logits": False,
+        },
+        "runtime": {
+            "measurement_seconds": round(elapsed, 3),
+            "peak_rss_mib": round(peak_rss_mib, 1),
         },
     }
 
@@ -351,7 +422,9 @@ def main() -> None:
 
     record_metadata = dict(metadata)
     record_metadata["num_positions"] = positions.num_positions
-    record_metadata["tokens"] = [tokenizer.decode([token_id]) for token_id in range(tokenizer.vocab_size)]
+    record_metadata["tokens"] = [
+        tokenizer.token_repr(token_id) for token_id in range(tokenizer.vocab_size)
+    ]
     record_metadata["run_id"] = run.run_id
     record_metadata["experiment_name"] = run.experiment_name
 
@@ -362,6 +435,7 @@ def main() -> None:
         nucleus_counts=stacked("nucleus_counts"),
         mean_predicted_probabilities=stacked("mean_predicted_probabilities"),
         model_seeds=model_seeds,
+        eligible_token_ids=list(eligible_token_ids),
         metadata=record_metadata,
     )
     record.save(run.paths.analyses_dir)
@@ -404,21 +478,52 @@ def main() -> None:
         },
     )
 
+    support = support_summary(record)
+    print("\nVocabulary and support (four different questions, four numbers):")
+    print(f"  V full                : {support['vocab_size']:,}")
+    print(f"  V eligible            : {support['eligible_vocab_size']:,}")
+    print(f"  V corpus-observed     : {support['corpus_observed_support']:,}")
+    print(f"  corpus effective N_eff: {support['corpus_effective_support']:,.2f}")
+
     print("\nEmpirical sampling adequacy of the evaluation positions:")
     print(f"  TV(split, selected targets): {adequacy['total_variation_distance']:.6f}")
     print(f"  JS(split, selected targets): {adequacy['js_divergence']:.6f}")
+    print(f"  selected effective N_eff   : {adequacy['selected_effective_support']:,.2f}")
     print(
-        f"  vocabulary represented in targets: "
-        f"{adequacy['tokens_represented_in_selection']}/{adequacy['vocab_size']}"
+        f"  eligible vocabulary represented in targets: "
+        f"{adequacy['tokens_represented_in_selection']:,}/{adequacy['eligible_vocab_size']:,}"
     )
+
     for policy, summary in summaries.items():
-        print(f"\n{policy} guessing policy (mean ± SEM across {summary.num_initializations} initializations):")
-        print(f"  TV(corpus, guesses): {summary.total_variation_mean:.6f} ± {summary.total_variation_sem:.6f}")
-        print(f"  effective support: {summary.effective_support_mean:.3f} tokens")
-        print(f"  zero-guess tokens: {summary.zero_guess_tokens_mean:.2f} ± {summary.zero_guess_tokens_sem:.2f}")
-        print(f"  q(1) - q(2): {summary.top_two_gap_mean:.6f} ± {summary.top_two_gap_sem:.6f}")
-        print(f"  max typical |q-p|: {summary.typical_gap_max_mean:.6f}")
-        print(f"  max persistent |mean(q)-p|: {summary.persistent_gap_max:.6f}")
+        print(
+            f"\n{policy} guessing policy "
+            f"(mean ± SEM across {summary.num_initializations} initializations):"
+        )
+        print(f"  TV(corpus, guesses)  : {summary.total_variation_mean:.6f} ± {summary.total_variation_sem:.6f}")
+        print(
+            f"  effective support    : {summary.effective_support_mean:,.3f}"
+            f" ± {summary.effective_support_sem:,.3f} tokens"
+        )
+        print(
+            f"  zero-frequency tokens: {summary.zero_frequency_count_mean:,.2f}"
+            f" ± {summary.zero_frequency_count_sem:,.2f}"
+            f"  ({summary.zero_frequency_fraction_mean:.2%})"
+            f"  over {summary.zero_frequency_draws:,} draws"
+            + ("  [per replicate]" if policy == "nucleus" else "")
+        )
+        print(f"  q(1) - q(2)          : {summary.top_two_gap_mean:.6f} ± {summary.top_two_gap_sem:.6f}")
+        print(f"  max typical |q-p|    : {summary.typical_gap_max_mean:.6f}")
+        print(f"  max persistent       : {summary.persistent_gap_max:.6f}")
+        print(f"  corpus tokens never guessed: {summary.corpus_observed_zero_guess_mean:,.1f}")
+
+    pooled = pooled_nucleus_zero_frequency(record)
+    print(
+        f"\nNucleus pooled coverage diagnostic (NOT comparable with greedy): "
+        f"{pooled.counts.mean():,.1f} tokens unreached over "
+        f"{pooled.draws_per_measurement:,} pooled draws"
+    )
+    print(f"\nRuntime: {elapsed:.1f}s | peak RSS: {peak_rss_mib:,.0f} MiB")
+    print(f"Model parameters: {parameter_count:,}")
     print("\nStochastic sampling variability (nucleus policy):")
     print(f"  mean within-initialization std of TV: {sampling_spread['mean_within_initialization_std_tv']:.6f}")
     print(f"  between-initialization std of TV: {sampling_spread['between_initialization_std_tv']:.6f}")
