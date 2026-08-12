@@ -28,11 +28,10 @@ dataset:
 tokenizer:
   type: pretrained
   identifier: mistralai/Mistral-7B-v0.1
-  # Unpinned by default. Pin a real Hub reference -- a branch, tag, or commit
-  # SHA from the model page -- before a serious experiment: the tokenizer now
-  # determines the vocabulary, the token stream, and therefore every
+  # Pinned to the exact Hugging Face snapshot used for the experiment.
+  # The tokenizer determines the vocabulary, token stream, and therefore every
   # distribution being compared.
-  revision: null
+  revision: "27d67f1b5f57dc0953326b2601d68371d40ea8da"
   # Ordinary corpus text is measured, not a prompt assembled, so no BOS or EOS
   # is inserted. Structural IDs are excluded from the predictive support
   # instead, and canonical IDs are never renumbered.
