@@ -68,8 +68,54 @@ sampling:
   # Independent of the model-initialization seeds on purpose: sampling noise and
   # initialization noise must stay separable.
   seed: 20240601
-  # Averaged within an initialization before initializations are compared.
-  num_replicates: 8
+  # One stochastic draw per evaluated position, matching greedy exactly, so both
+  # policies are summarised over the same D assignments and neither needs
+  # rescaling to be compared with the other or with the uniform null.
+  #
+  # Consequence: within-initialization stochastic variance is not estimable and
+  # is reported as "not estimated (R=1)" rather than as a misleading zero. The
+  # nucleus SEM across initializations then describes the combined
+  # "random initialization + one fixed sampling realization" procedure.
+  #
+  # Values above 1 remain supported for historical configurations, where the
+  # per-replicate zero-frequency correction applies. Historical R=2/R=4 pilot
+  # results stay valid records of what those protocols measured.
+  num_replicates: 1
+  # Draw the sampling uniforms from the position alone, so every input condition
+  # and every initialization sees the same underlying randomness. This conditions
+  # the input-structure comparison on one fixed stochastic realization instead of
+  # letting sampling noise drift between conditions.
+  common_random_numbers: true
+
+uniform_null:
+  # A uniform categorical chooser over the same eligible support K, drawing the
+  # same D tokens. It answers how much of the ranked structure differs from what
+  # finite sampling alone produces, and is the reference curve on figure 1.
+  #
+  # Each replicate is one JOINT multinomial draw. Independent binomials would
+  # reproduce the marginal counts while getting the ranked histogram wrong: the
+  # counts are dependent and must sum to exactly D.
+  enabled: true
+  # Independent of every other stream.
+  seed: 20260812
+  # Monte Carlo replicates -- NOT nucleus replicates. 256 gives a smooth mean and
+  # a usable 95% envelope at a 32k vocabulary for well under a second and about
+  # 65 MB of transient storage.
+  replicates: 256
+
+input_structure:
+  # Three inputs through one initialized model: real windows, the same token
+  # multiset with ordering destroyed, and Gaussian vectors at the embedding
+  # boundary. Requires num_replicates: 1.
+  #
+  # real vs shuffled approximately isolates sequential ordering.
+  # shuffled vs gaussian adds discrete token identity.
+  # real vs gaussian is the broadest contrast and is NOT a clean correlation test.
+  enabled: true
+  # Both seeds are fixed across model initializations on purpose: the controls
+  # must not vary with the weights.
+  shuffle_seed: 60001
+  gaussian_seed: 60002
 
 runtime:
   # Windows per forward pass. Affects memory only, never the result: the

@@ -38,7 +38,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from llm_behavior_lab.analysis import (  # noqa: E402
+    DEFAULT_NULL_REPLICATES,
     InitializationExperimentRecord,
+    paired_concentration_differences,
+    paired_condition_distances,
+    simulate_uniform_null,
     pooled_nucleus_zero_frequency,
     sampling_adequacy,
     summarize_policy,
@@ -55,6 +59,13 @@ from llm_behavior_lab.data import (  # noqa: E402
 )
 from llm_behavior_lab.data.tokenizer import build_tokenizer  # noqa: E402
 from llm_behavior_lab.evaluation import empirical_token_counts  # noqa: E402
+from llm_behavior_lab.evaluation.input_conditions import (  # noqa: E402
+    INPUT_CONDITIONS,
+    embedding_moments,
+    scaled_gaussian_embeddings,
+    shuffled_input_ids,
+    standardized_gaussian_bank,
+)
 from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     NucleusSamplingSettings,
     build_evaluation_positions,
@@ -162,6 +173,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-uniform-null",
+        action="store_true",
+        help="Skip the uniform categorical output null.",
+    )
+    parser.add_argument(
+        "--no-input-structure",
+        action="store_true",
+        help="Skip the shuffled and Gaussian input conditions.",
+    )
+    parser.add_argument(
         "--no-figures",
         action="store_true",
         help="Skip figure generation. The record is written either way.",
@@ -201,6 +222,8 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
     positions = experiment_config.get("positions", {})
     sampling = experiment_config.get("sampling", {})
     runtime = experiment_config.get("runtime", {})
+    null = experiment_config.get("uniform_null", {})
+    structure = experiment_config.get("input_structure", {})
 
     return {
         "num_initializations": int(
@@ -228,6 +251,14 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             if args.forward_batch_size is not None
             else runtime.get("forward_batch_size", 32)
         ),
+        "common_random_numbers": bool(sampling.get("common_random_numbers", True)),
+        "uniform_null_enabled": bool(null.get("enabled", True)) and not args.no_uniform_null,
+        "uniform_null_seed": int(null.get("seed", 20260812)),
+        "uniform_null_replicates": int(null.get("replicates", DEFAULT_NULL_REPLICATES)),
+        "input_structure_enabled": bool(structure.get("enabled", True))
+        and not args.no_input_structure,
+        "shuffle_seed": int(structure.get("shuffle_seed", 60001)),
+        "gaussian_seed": int(structure.get("gaussian_seed", 60002)),
     }
 
 
@@ -334,8 +365,18 @@ def main() -> None:
         top_p=protocol["top_p"],
         seed=protocol["sampling_seed"],
         num_replicates=protocol["num_replicates"],
+        common_random_numbers=protocol["common_random_numbers"],
     )
     sampling.validate()
+    if protocol["input_structure_enabled"] and sampling.num_replicates != 1:
+        # Fail rather than silently reinterpreting the request: the paired
+        # comparison is defined at one stochastic realization per position.
+        raise ValueError(
+            "The input-structure comparison requires exactly one nucleus replicate "
+            f"(R=1), but the protocol asks for R={sampling.num_replicates}. Set "
+            "sampling.num_replicates to 1, or disable the comparison with "
+            "--no-input-structure."
+        )
 
     print("Initialization-distribution experiment")
     print(f"Dataset: {resolved.name} ({resolved.source}, via {resolved.route})")
@@ -356,7 +397,28 @@ def main() -> None:
     # ---- one measurement per initialization -------------------------------
     model_seeds: list[int] = []
     measurements = []
+    condition_measurements: dict[str, list] = {"shuffled": [], "gaussian": []}
+    embedding_moment_log: list[dict[str, Any]] = []
     parameter_count = 0
+
+    shuffled_ids = None
+    gaussian_bank = None
+    if protocol["input_structure_enabled"]:
+        # Drawn once, before any model exists, and reused for every
+        # initialization: the controls must not vary with the weights.
+        shuffled_ids = shuffled_input_ids(positions.input_ids, seed=protocol["shuffle_seed"])
+        gaussian_bank = standardized_gaussian_bank(
+            num_windows=positions.num_windows,
+            block_size=block_size,
+            dim=int(model_params["dim"]),
+            seed=protocol["gaussian_seed"],
+            device=device,
+        )
+        print(
+            f"Input conditions: {', '.join(INPUT_CONDITIONS)} "
+            f"(shuffle seed {protocol['shuffle_seed']}, Gaussian seed {protocol['gaussian_seed']})"
+        )
+
     started = time.perf_counter()
     for index in range(protocol["num_initializations"]):
         model_seed = protocol["base_seed"] + index * protocol["seed_stride"]
@@ -365,8 +427,8 @@ def main() -> None:
         parameter_count = model.count_parameters()
         # Streamed: logits exist one batch at a time and are folded into
         # per-token counters, so memory does not grow with the position count.
-        measurements.append(
-            measure_initialization(
+        def measure(**condition_inputs):
+            return measure_initialization(
                 model,
                 positions,
                 model_seed=model_seed,
@@ -375,8 +437,21 @@ def main() -> None:
                 eligible_token_ids=eligible_token_ids,
                 forward_batch_size=protocol["forward_batch_size"],
                 device=device,
+                **condition_inputs,
             )
-        )
+
+        measurements.append(measure())
+        if protocol["input_structure_enabled"]:
+            # Same model object, same weights, same nucleus uniforms: only the
+            # input changes, so any difference is attributable to the input.
+            condition_measurements["shuffled"].append(measure(input_ids=shuffled_ids))
+            moments = embedding_moments(
+                model.tok_embeddings.weight, eligible_token_ids=eligible_token_ids
+            )
+            embedding_moment_log.append(moments.as_dict())
+            condition_measurements["gaussian"].append(
+                measure(inputs_embeds=scaled_gaussian_embeddings(gaussian_bank, moments))
+            )
         model_seeds.append(model_seed)
         del model
         print(
@@ -387,8 +462,18 @@ def main() -> None:
     peak_rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
     # ---- assemble the record ----------------------------------------------
-    def stacked(attribute: str) -> Any:
-        return torch.stack([getattr(item, attribute) for item in measurements]).cpu().numpy()
+    def stacked(attribute: str, source=None) -> Any:
+        items = measurements if source is None else source
+        return torch.stack([getattr(item, attribute) for item in items]).cpu().numpy()
+
+    null_summary = None
+    if protocol["uniform_null_enabled"]:
+        null_summary = simulate_uniform_null(
+            eligible_vocab_size=len(eligible_token_ids),
+            num_draws=positions.num_positions,
+            num_replicates=protocol["uniform_null_replicates"],
+            seed=protocol["uniform_null_seed"],
+        )
 
     settings = experiment_settings_from_config(experiment_config)
     output_dir = settings.output_dir if args.output_dir is None else args.output_dir
@@ -416,6 +501,12 @@ def main() -> None:
             "num_initializations": protocol["num_initializations"],
             "model_seeds": model_seeds,
             "sampling": sampling.as_dict(),
+            "input_conditions": (
+                list(INPUT_CONDITIONS) if protocol["input_structure_enabled"] else ["real"]
+            ),
+            "shuffle_seed": protocol["shuffle_seed"] if protocol["input_structure_enabled"] else None,
+            "gaussian_seed": protocol["gaussian_seed"] if protocol["input_structure_enabled"] else None,
+            "gaussian_embedding_moments": embedding_moment_log,
             "vocab_size": tokenizer.vocab_size,
             "eligible_vocab_size": len(eligible_token_ids),
             "excluded_special_token_ids": sorted(special_token_ids),
@@ -460,6 +551,8 @@ def main() -> None:
         tokenizer.token_repr(token_id) for token_id in range(tokenizer.vocab_size)
     ]
     record_metadata["run_id"] = run.run_id
+    if null_summary is not None:
+        record_metadata["uniform_null"] = null_summary.as_dict()
     record_metadata["experiment_name"] = run.experiment_name
 
     record = InitializationExperimentRecord.build(
@@ -471,6 +564,25 @@ def main() -> None:
         model_seeds=model_seeds,
         eligible_token_ids=list(eligible_token_ids),
         metadata=record_metadata,
+        condition_greedy_counts={
+            name: stacked("greedy_counts", items)
+            for name, items in condition_measurements.items()
+            if items
+        },
+        condition_nucleus_counts={
+            name: stacked("nucleus_counts", items)
+            for name, items in condition_measurements.items()
+            if items
+        },
+        uniform_null=(
+            {}
+            if null_summary is None
+            else {
+                "ranked_mean": null_summary.ranked_mean,
+                "ranked_low": null_summary.ranked_low,
+                "ranked_high": null_summary.ranked_high,
+            }
+        ),
     )
     record.save(run.paths.analyses_dir)
 
@@ -559,8 +671,57 @@ def main() -> None:
     print(f"\nRuntime: {elapsed:.1f}s | peak RSS: {peak_rss_mib:,.0f} MiB")
     print(f"Model parameters: {parameter_count:,}")
     print("\nStochastic sampling variability (nucleus policy):")
-    print(f"  mean within-initialization std of TV: {sampling_spread['mean_within_initialization_std_tv']:.6f}")
-    print(f"  between-initialization std of TV: {sampling_spread['between_initialization_std_tv']:.6f}")
+    if sampling_spread.get("estimated"):
+        print(
+            f"  mean within-initialization std of TV: "
+            f"{sampling_spread['mean_within_initialization_std_tv']:.6f}"
+        )
+        print(
+            f"  between-initialization std of TV: "
+            f"{sampling_spread['between_initialization_std_tv']:.6f}"
+        )
+    else:
+        print(f"  within-initialization stochastic variability: {sampling_spread['reason']}")
+        print(
+            "  the nucleus SEM across initializations therefore describes the combined "
+            "initialization + one fixed sampling realization"
+        )
+
+    if null_summary is not None:
+        described = null_summary.as_dict()
+        print(
+            f"\nUniform categorical output null "
+            f"(K={described['eligible_vocab_size']:,}, D={described['num_draws']:,}, "
+            f"M={described['monte_carlo_replicates']} Monte Carlo replicates):"
+        )
+        print(
+            f"  zero-frequency: {described['zero_frequency_count_mean']:,.1f} "
+            f"({described['zero_frequency_fraction_mean']:.2%}); "
+            f"analytic K(1-1/K)^D = {described['analytic_zero_frequency_count']:,.1f}"
+        )
+        print(
+            f"  effective support: {described['effective_support_mean']:,.1f} "
+            f"[{described['effective_support_mc_low']:,.1f}, "
+            f"{described['effective_support_mc_high']:,.1f}] Monte Carlo interval"
+        )
+        print(f"  top1-top2 gap: {described['top_two_gap_mean']:.6f}")
+
+    if protocol["input_structure_enabled"]:
+        print("\nInput-structure comparison (paired within each initialization):")
+        for policy in ("greedy", "nucleus"):
+            distances = paired_condition_distances(record, policy)
+            differences = paired_concentration_differences(record, policy)
+            print(f"  {policy}:")
+            for name, values in distances["pairs"].items():
+                label = name.replace("tv_", "").replace("_vs_", " vs ")
+                print(f"    same-token TV {label}: {values['mean']:.6f} ± {values['sem']:.6f}")
+            for pair, measures in differences["pairs"].items():
+                support = measures["effective_support"]
+                zero = measures["zero_frequency_fraction"]
+                print(
+                    f"    delta {pair}: N_eff {support['mean']:+,.2f} ± {support['sem']:,.2f}, "
+                    f"zero-frac {zero['mean']:+.4f} ± {zero['sem']:.4f}"
+                )
 
     figure_paths: list[Path] = []
     if not args.no_figures:
