@@ -306,9 +306,10 @@ class LlamaForCausalLM(BaseLanguageModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
         targets: torch.Tensor | None = None,
         *,
+        inputs_embeds: torch.Tensor | None = None,
         start_pos: int = 0,
         use_cache: bool = False,
         **_: Any,
@@ -317,7 +318,15 @@ class LlamaForCausalLM(BaseLanguageModel):
 
         Args:
             input_ids: Token IDs with shape ``[batch, sequence]``.
-            targets: Optional next-token targets with the same shape.
+            targets: Optional next-token targets shaped like the input positions.
+            inputs_embeds: Optional pre-computed input vectors with shape
+                ``[batch, sequence, dim]``, supplied *instead of* ``input_ids``.
+                This bypasses the embedding lookup and nothing else: rotary
+                embeddings, causal masking, every decoder block, the final norm,
+                and the output projection are the same objects on the same
+                weights. It exists so a synthetic-input control can be compared
+                against real tokens through an identical network, and it is the
+                only difference between those conditions.
             start_pos: Starting position for rotary embeddings and KV cache.
             use_cache: If true, update and read the KV cache. This preserves
                 the original educational inference pathway. For Phase 2 sanity
@@ -325,19 +334,45 @@ class LlamaForCausalLM(BaseLanguageModel):
 
         Returns:
             ``ModelOutput`` containing logits and optional cross-entropy loss.
+
+        Raises:
+            ValueError: If neither or both input forms are given, or if a shape
+                is wrong.
         """
 
-        if input_ids.ndim != 2:
+        if (input_ids is None) == (inputs_embeds is None):
             raise ValueError(
-                f"input_ids must have shape [batch, sequence], got {tuple(input_ids.shape)}."
-            )
-        if targets is not None and targets.shape != input_ids.shape:
-            raise ValueError(
-                "targets must have the same shape as input_ids, "
-                f"got targets={tuple(targets.shape)} and input_ids={tuple(input_ids.shape)}."
+                "Provide exactly one of input_ids or inputs_embeds; "
+                f"got input_ids={'set' if input_ids is not None else 'None'} and "
+                f"inputs_embeds={'set' if inputs_embeds is not None else 'None'}."
             )
 
-        batch_size, sequence_length = input_ids.shape
+        if input_ids is not None:
+            if input_ids.ndim != 2:
+                raise ValueError(
+                    f"input_ids must have shape [batch, sequence], got {tuple(input_ids.shape)}."
+                )
+            position_shape = input_ids.shape
+        else:
+            if inputs_embeds.ndim != 3:
+                raise ValueError(
+                    "inputs_embeds must have shape [batch, sequence, dim], got "
+                    f"{tuple(inputs_embeds.shape)}."
+                )
+            if inputs_embeds.shape[-1] != self.config.dim:
+                raise ValueError(
+                    f"inputs_embeds last dimension {inputs_embeds.shape[-1]} does not match "
+                    f"the model dimension {self.config.dim}."
+                )
+            position_shape = inputs_embeds.shape[:2]
+
+        if targets is not None and tuple(targets.shape) != tuple(position_shape):
+            raise ValueError(
+                "targets must have the same shape as the input positions, "
+                f"got targets={tuple(targets.shape)} and inputs={tuple(position_shape)}."
+            )
+
+        batch_size, sequence_length = position_shape
         if sequence_length == 0:
             raise ValueError("sequence_length must be positive.")
         if start_pos < 0:
@@ -352,7 +387,13 @@ class LlamaForCausalLM(BaseLanguageModel):
                 f"batch_size={batch_size} exceeds max_batch_size={self.config.max_batch_size}."
             )
 
-        hidden_states = self.tok_embeddings(input_ids)
+        # The one and only divergence between token input and synthetic input:
+        # after this line the two conditions share every parameter and every op.
+        hidden_states = (
+            self.tok_embeddings(input_ids)
+            if input_ids is not None
+            else inputs_embeds.to(dtype=self.tok_embeddings.weight.dtype)
+        )
         freqs_complex = self.freqs_complex[start_pos : start_pos + sequence_length].to(
             device=hidden_states.device
         )

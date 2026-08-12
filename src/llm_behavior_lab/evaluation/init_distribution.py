@@ -64,12 +64,26 @@ class NucleusSamplingSettings:
     Defaults follow the reference LLaMA inference settings. They are carried as
     data rather than hard-coded inside the analysis so every persisted result
     records the policy that produced it.
+
+    ``num_replicates`` defaults to **1**, the current protocol: greedy and
+    nucleus each produce exactly one token per evaluated position, so both
+    policies are summarised over the same ``D`` assignments and no rescaling is
+    needed to compare them. Values above 1 remain fully supported for historical
+    configurations, where the per-replicate zero-frequency correction applies.
+
+    ``common_random_numbers`` makes the sampling draws depend on the position
+    alone, so every input condition *and* every model initialization sees the
+    same underlying uniforms. That is what conditions the input-structure
+    comparison on one fixed stochastic realization instead of letting sampling
+    noise move between conditions. Setting it false restores the historical
+    behaviour, where each initialization got its own stream.
     """
 
     temperature: float = 0.6
     top_p: float = 0.9
     seed: int = 20240601
-    num_replicates: int = 8
+    num_replicates: int = 1
+    common_random_numbers: bool = True
 
     def validate(self) -> None:
         if self.temperature <= 0:
@@ -90,6 +104,7 @@ class NucleusSamplingSettings:
             "top_p": self.top_p,
             "sampling_seed": self.seed,
             "num_replicates": self.num_replicates,
+            "common_random_numbers": self.common_random_numbers,
         }
 
 
@@ -312,9 +327,13 @@ def sampling_uniforms(
     rows = []
     for replicate in range(sampling.num_replicates):
         generator = torch.Generator(device=device)
-        # Distinct per (initialization, replicate): the multiplier is larger
-        # than any plausible replicate count, so no two pairs collide.
-        generator.manual_seed((sampling.seed + model_seed) * 1_000_003 + replicate)
+        # With common random numbers the stream depends on the replicate alone,
+        # so the same position draws the same uniform in every condition and
+        # every initialization. Otherwise it is distinct per (initialization,
+        # replicate); the multiplier exceeds any plausible replicate count, so no
+        # two pairs collide.
+        offset = 0 if sampling.common_random_numbers else model_seed
+        generator.manual_seed((sampling.seed + offset) * 1_000_003 + replicate)
         rows.append(torch.rand(num_positions, generator=generator, device=device))
     return torch.stack(rows)
 
@@ -363,6 +382,8 @@ def measure_initialization(
     eligible_token_ids: Sequence[int] | None = None,
     forward_batch_size: int = 32,
     device: torch.device | str = "cpu",
+    input_ids: torch.Tensor | None = None,
+    inputs_embeds: torch.Tensor | None = None,
 ) -> InitializationMeasurement:
     """Measure one initialization without ever holding all logits.
 
@@ -385,9 +406,19 @@ def measure_initialization(
             character-tokenizer case.
         forward_batch_size: Windows per forward pass. Affects memory only.
         device: Device for the counters and the sampling draws.
+        input_ids: Token windows to feed instead of ``positions.input_ids``, for
+            the shuffled condition. Must match the real windows' shape, so the
+            position count and the sampling draws line up.
+        inputs_embeds: Synthetic ``[windows, block, dim]`` vectors fed at the
+            embedding boundary instead of any token IDs, for the Gaussian
+            condition. Mutually exclusive with ``input_ids``.
 
     Returns:
         One :class:`InitializationMeasurement` with complete per-token vectors.
+
+    Note:
+        The evaluation *targets* are never altered by a condition. Only the
+        model input changes; the corpus reference stays what it always was.
     """
 
     sampling.validate()
@@ -409,12 +440,33 @@ def measure_initialization(
     )
     probability_sum = torch.zeros(vocab_size, dtype=torch.float64, device=device)
 
+    if input_ids is not None and inputs_embeds is not None:
+        raise ValueError("Provide at most one of input_ids or inputs_embeds.")
+    source_ids = positions.input_ids if input_ids is None else input_ids
+    if inputs_embeds is None and tuple(source_ids.shape) != tuple(positions.input_ids.shape):
+        raise ValueError(
+            f"input_ids shape {tuple(source_ids.shape)} does not match the evaluation "
+            f"windows {tuple(positions.input_ids.shape)}; the conditions must cover the "
+            "same positions for the sampling draws to align."
+        )
+    if inputs_embeds is not None and tuple(inputs_embeds.shape[:2]) != tuple(
+        positions.input_ids.shape
+    ):
+        raise ValueError(
+            f"inputs_embeds covers {tuple(inputs_embeds.shape[:2])} positions but the "
+            f"evaluation windows are {tuple(positions.input_ids.shape)}."
+        )
+
     model.eval()
     consumed = 0
     with torch.no_grad():
         for start in range(0, positions.num_windows, forward_batch_size):
-            window = positions.input_ids[start : start + forward_batch_size]
-            output = model(input_ids=window)
+            if inputs_embeds is None:
+                output = model(input_ids=source_ids[start : start + forward_batch_size])
+            else:
+                output = model(
+                    inputs_embeds=inputs_embeds[start : start + forward_batch_size]
+                )
             logits = restrict_to_support(output.logits, vocab_size=vocab_size)
             # Cloned because the mask is applied in place and the model may hand
             # back a view of its own buffer.
