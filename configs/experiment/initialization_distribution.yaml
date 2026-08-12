@@ -1,0 +1,76 @@
+# Protocol for the initialization-distribution experiment.
+#
+# The question: at random initialization, how do the model's selected token
+# guesses compare with the corpus token distribution, and how much of that
+# comparison changes when only the initialization seed changes?
+#
+# Everything except the model-initialization seed is held fixed. The corpus,
+# tokenizer, vocabulary, split, and evaluation positions are computed once and
+# reused for every initialization, so a difference between initializations
+# cannot come from looking at different text.
+#
+# These are first-experiment settings chosen to be informative while still
+# running routinely on a laptop CPU. They are not research defaults.
+
+experiment:
+  name: initialization_distribution
+  output_dir: outputs
+  phase: initialization_distribution
+  seed: 1234
+  notes: null
+  tags:
+    - initialization
+    - token-distribution
+    - guessing-policies
+
+logging:
+  log_every_steps: 10
+  evaluate_every_steps: 100
+  flush_every_records: 1
+  training_metrics_filename: training_metrics.jsonl
+  evaluation_metrics_filename: evaluation_metrics.jsonl
+
+checkpointing:
+  # Disabled on purpose. The experiment produces one randomly initialized model
+  # per seed and each is fully reconstructible from its seed plus the snapshotted
+  # model config, so storing a dozen checkpoints of untrained weights would cost
+  # disk without adding information.
+  enabled: false
+  save_every_steps: 500
+  save_latest_pointer: true
+  filename_width: 6
+
+initialization:
+  # The independent unit for every reported standard error. Twelve gives a
+  # usable SEM without a long runtime; raise it when a difference looks marginal.
+  num_initializations: 12
+  base_seed: 1000
+  seed_stride: 1
+
+positions:
+  # Evaluated positions = num_windows * block_size. The count controls two
+  # things at once: how representative the analyzed targets are of the split
+  # (figure 0), and how many tokens can possibly be guessed at all, which caps
+  # the zero-guess statistic. 512 windows of 64 tokens gives 32768 positions,
+  # a few hundred per token for a character vocabulary of ~150.
+  num_windows: 512
+  # Defaults to the data config's batching.block_size when left null. The model
+  # config's max_seq_len is the hard upper bound.
+  block_size: 64
+  split: train
+
+sampling:
+  # Reference LLaMA inference defaults. Recorded with every result so a figure
+  # can never be read without the policy that produced it.
+  method: temperature_top_p
+  temperature: 0.6
+  top_p: 0.9
+  # Independent of the model-initialization seeds on purpose: sampling noise and
+  # initialization noise must stay separable.
+  seed: 20240601
+  # Averaged within an initialization before initializations are compared.
+  num_replicates: 8
+
+runtime:
+  # Windows per forward pass. Only affects memory, never the result.
+  forward_batch_size: 32
