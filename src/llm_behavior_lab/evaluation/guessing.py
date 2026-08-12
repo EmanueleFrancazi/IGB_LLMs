@@ -20,9 +20,13 @@ an undecodable token to a comparison.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
 
 __all__ = [
+    "apply_support_mask",
+    "eligible_support_mask",
     "greedy_guess_ids",
     "guess_counts",
     "guess_fractions",
@@ -81,12 +85,62 @@ def greedy_guess_ids(logits: torch.Tensor) -> torch.Tensor:
     return torch.argmax(logits, dim=-1)
 
 
+def eligible_support_mask(
+    vocab_size: int,
+    eligible_token_ids: Sequence[int] | None,
+    *,
+    device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    """Build a boolean mask selecting the predictive support.
+
+    ``None`` means every token is eligible, which is the character-tokenizer
+    case. Otherwise the listed canonical IDs are kept and everything else -- the
+    structural tokens of a pretrained vocabulary -- is excluded. IDs are never
+    renumbered: an excluded token keeps its position in every vector and simply
+    holds zero.
+    """
+
+    if vocab_size <= 0:
+        raise ValueError("vocab_size must be positive.")
+    if eligible_token_ids is None:
+        return torch.ones(vocab_size, dtype=torch.bool, device=torch.device(device))
+
+    ids = torch.as_tensor(list(eligible_token_ids), dtype=torch.long)
+    if ids.numel() == 0:
+        raise ValueError("eligible_token_ids must not be empty.")
+    if int(ids.min()) < 0 or int(ids.max()) >= vocab_size:
+        raise ValueError("eligible_token_ids contain values outside the vocabulary.")
+    mask = torch.zeros(vocab_size, dtype=torch.bool, device=torch.device(device))
+    mask[ids.to(mask.device)] = True
+    return mask
+
+
+def apply_support_mask(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Drive excluded tokens to ``-inf`` in place.
+
+    After this, softmax gives them exactly zero, argmax can never choose them,
+    and nucleus truncation sorts them to the tail with no mass. One masking step
+    therefore covers all three consumers, which is what keeps the empirical
+    comparison and both policies on the same support.
+    """
+
+    if mask.shape[0] != logits.shape[-1]:
+        raise ValueError(
+            f"support mask of size {mask.shape[0]} does not match the vocabulary "
+            f"dimension {logits.shape[-1]}."
+        )
+    if bool(mask.all()):
+        return logits
+    return logits.masked_fill_(~mask, float("-inf"))
+
+
 def nucleus_guess_ids(
     logits: torch.Tensor,
     *,
     temperature: float,
     top_p: float,
     generator: torch.Generator | None = None,
+    uniforms: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample one token per position with temperature and top-p truncation.
 
@@ -104,7 +158,13 @@ def nucleus_guess_ids(
             concentrate the distribution.
         top_p: Nucleus mass in ``(0, 1]``.
         generator: Optional torch generator, so sampling randomness is
-            controlled separately from model-initialization randomness.
+            controlled separately from model-initialization randomness. Used
+            only when ``uniforms`` is not supplied.
+        uniforms: Optional pre-drawn values in ``[0, 1)``, one per position,
+            used to invert the truncated CDF instead of calling
+            ``multinomial``. Supplying them makes the draw depend only on the
+            position, never on how positions were grouped into batches, which is
+            what lets a streamed measurement equal an all-at-once one exactly.
 
     Returns:
         Token IDs with shape ``logits.shape[:-1]``.
@@ -129,7 +189,27 @@ def nucleus_guess_ids(
     sorted_probabilities = sorted_probabilities.masked_fill(excluded, 0.0)
     sorted_probabilities = sorted_probabilities / sorted_probabilities.sum(dim=-1, keepdim=True)
 
-    sampled_positions = torch.multinomial(sorted_probabilities, num_samples=1, generator=generator)
+    if uniforms is None:
+        sampled_positions = torch.multinomial(
+            sorted_probabilities, num_samples=1, generator=generator
+        )
+    else:
+        draws = uniforms.reshape(-1)
+        if draws.numel() != sorted_probabilities.shape[0]:
+            raise ValueError(
+                f"uniforms holds {draws.numel()} values but there are "
+                f"{sorted_probabilities.shape[0]} positions to sample."
+            )
+        kept_cumulative = torch.cumsum(sorted_probabilities, dim=-1).contiguous()
+        sampled_positions = torch.searchsorted(
+            kept_cumulative, draws.to(kept_cumulative.dtype).unsqueeze(-1)
+        )
+        # A draw at or just below the final cumulative value can land one past
+        # the truncated head through rounding. Clamping to the last kept rank
+        # keeps every sample inside the nucleus.
+        last_kept = (~excluded).sum(dim=-1, keepdim=True) - 1
+        sampled_positions = torch.minimum(sampled_positions, last_kept)
+
     sampled_ids = torch.gather(sorted_indices, -1, sampled_positions).squeeze(-1)
     return sampled_ids.reshape(original_shape)
 

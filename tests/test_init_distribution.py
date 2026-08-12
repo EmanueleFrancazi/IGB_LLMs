@@ -17,6 +17,7 @@ from llm_behavior_lab.evaluation.init_distribution import (
     build_evaluation_positions,
     compute_evaluation_logits,
     deterministic_window_starts,
+    measure_from_logits,
     measure_initialization,
 )
 from llm_behavior_lab.utils import seed_everything
@@ -179,7 +180,7 @@ def test_measurement_produces_aligned_per_token_vectors() -> None:
 
     logits = torch.randn(4, 5, VOCAB_SIZE)
 
-    measurement = measure_initialization(
+    measurement = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
 
@@ -196,7 +197,7 @@ def test_mean_predicted_probabilities_form_a_distribution() -> None:
 
     logits = torch.randn(3, 4, VOCAB_SIZE)
 
-    measurement = measure_initialization(
+    measurement = measure_from_logits(
         model_seed=7, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
 
@@ -212,7 +213,7 @@ def test_mean_predicted_probabilities_differ_from_guess_frequencies() -> None:
 
     logits = torch.tensor([[[5.0, 0.0, 0.0, 0.0, 0.0, 0.0]]]).repeat(1, 8, 1)
 
-    measurement = measure_initialization(
+    measurement = measure_from_logits(
         model_seed=3, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
     greedy_fractions = measurement.greedy_counts.float() / measurement.greedy_counts.sum()
@@ -227,7 +228,7 @@ def test_replicates_within_one_initialization_are_not_identical() -> None:
 
     logits = torch.randn(6, 8, VOCAB_SIZE)
 
-    measurement = measure_initialization(
+    measurement = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings(num_replicates=4)
     )
 
@@ -240,10 +241,10 @@ def test_measurement_is_reproducible_for_the_same_seeds() -> None:
 
     logits = torch.randn(4, 6, VOCAB_SIZE)
 
-    first = measure_initialization(
+    first = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
-    second = measure_initialization(
+    second = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
 
@@ -260,10 +261,10 @@ def test_sampling_stream_is_separated_per_initialization() -> None:
 
     logits = torch.randn(8, 8, VOCAB_SIZE)
 
-    first = measure_initialization(
+    first = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
-    second = measure_initialization(
+    second = measure_from_logits(
         model_seed=1001, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings()
     )
 
@@ -277,10 +278,10 @@ def test_sampling_seed_changes_the_draws_without_touching_greedy() -> None:
 
     logits = torch.randn(8, 8, VOCAB_SIZE)
 
-    first = measure_initialization(
+    first = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings(seed=1)
     )
-    second = measure_initialization(
+    second = measure_from_logits(
         model_seed=1000, logits=logits, vocab_size=VOCAB_SIZE, sampling=_settings(seed=99999)
     )
 
@@ -292,7 +293,7 @@ def test_unrestricted_logits_are_rejected() -> None:
     """Measuring on a wider vocabulary would silently break every comparison."""
 
     with pytest.raises(ValueError, match="does not match vocab_size"):
-        measure_initialization(
+        measure_from_logits(
             model_seed=1,
             logits=torch.randn(2, 3, VOCAB_SIZE + 4),
             vocab_size=VOCAB_SIZE,
@@ -321,3 +322,207 @@ def test_sampling_settings_are_recorded_for_persistence() -> None:
     assert described["top_p"] == 0.9
     assert described["sampling_seed"] == 555
     assert described["num_replicates"] == 3
+
+
+# -- streaming measurement and its memory invariant -----------------------
+#
+# A realistic subword vocabulary makes an all-position logits tensor
+# prohibitive: 32768 positions over 32000 tokens is about 3.9 GiB in float32.
+# measure_initialization therefore folds each batch into per-token counters and
+# discards it. These tests pin both halves of that claim -- the result is
+# unchanged, and no per-position accumulator exists.
+
+
+def test_streamed_measurement_equals_the_all_at_once_reference() -> None:
+    """Batching must change when logits are freed, not what they are.
+
+    Both paths consume the same pre-drawn uniforms, so this is exact equality
+    rather than a statistical comparison.
+    """
+
+    positions = build_evaluation_positions(TOKENS, block_size=4, num_windows=8)
+    model = _StubModel(output_size=VOCAB_SIZE)
+    settings = _settings()
+
+    streamed = measure_initialization(
+        model,
+        positions,
+        model_seed=1000,
+        vocab_size=VOCAB_SIZE,
+        sampling=settings,
+        forward_batch_size=3,
+    )
+    reference = measure_from_logits(
+        model_seed=1000,
+        logits=compute_evaluation_logits(model, positions, vocab_size=VOCAB_SIZE),
+        vocab_size=VOCAB_SIZE,
+        sampling=settings,
+    )
+
+    assert torch.equal(streamed.greedy_counts, reference.greedy_counts)
+    assert torch.equal(streamed.nucleus_counts, reference.nucleus_counts)
+    assert torch.allclose(
+        streamed.mean_predicted_probabilities,
+        reference.mean_predicted_probabilities,
+        atol=1e-6,
+    )
+    assert streamed.num_positions == reference.num_positions
+
+
+def test_the_batch_size_does_not_change_the_result() -> None:
+    """Memory is a free parameter; the measurement is not."""
+
+    positions = build_evaluation_positions(TOKENS, block_size=4, num_windows=12)
+    model = _StubModel(output_size=VOCAB_SIZE)
+
+    results = [
+        measure_initialization(
+            model,
+            positions,
+            model_seed=7,
+            vocab_size=VOCAB_SIZE,
+            sampling=_settings(),
+            forward_batch_size=size,
+        )
+        for size in (1, 5, 12)
+    ]
+
+    for other in results[1:]:
+        assert torch.equal(results[0].greedy_counts, other.greedy_counts)
+        assert torch.equal(results[0].nucleus_counts, other.nucleus_counts)
+
+
+def test_no_accumulator_is_indexed_by_evaluation_position() -> None:
+    """Only ``[vocab]``-sized state may survive a batch.
+
+    Asserted on the returned tensors, which are the only things the function
+    keeps: anything proportional to the position count would show up here.
+    """
+
+    positions = build_evaluation_positions(TOKENS, block_size=8, num_windows=16)
+    settings = _settings(num_replicates=3)
+
+    measurement = measure_initialization(
+        _StubModel(output_size=VOCAB_SIZE),
+        positions,
+        model_seed=1,
+        vocab_size=VOCAB_SIZE,
+        sampling=settings,
+        forward_batch_size=4,
+    )
+
+    assert positions.num_positions == 128
+    assert measurement.greedy_counts.shape == (VOCAB_SIZE,)
+    assert measurement.nucleus_counts.shape == (3, VOCAB_SIZE)
+    assert measurement.mean_predicted_probabilities.shape == (VOCAB_SIZE,)
+
+
+def test_the_streaming_path_never_concatenates_logits() -> None:
+    """The reference implementation may materialize everything; the experiment may not.
+
+    Checked on the parsed source of ``measure_initialization`` alone, so the
+    module may still offer ``compute_evaluation_logits`` for small cases.
+    """
+
+    import ast
+    import inspect
+
+    from llm_behavior_lab.evaluation import init_distribution
+
+    tree = ast.parse(inspect.getsource(init_distribution.measure_initialization))
+    calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+    assert "cat" not in calls
+    assert "stack" not in calls
+
+
+def test_transient_logits_are_bounded_by_the_batch_size() -> None:
+    """The model is only ever asked for one batch of windows at a time."""
+
+    positions = build_evaluation_positions(TOKENS, block_size=4, num_windows=10)
+
+    class _RecordingModel(_StubModel):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.batch_shapes: list[tuple[int, ...]] = []
+
+        def __call__(self, *, input_ids):
+            self.batch_shapes.append(tuple(input_ids.shape))
+            return super().__call__(input_ids=input_ids)
+
+    model = _RecordingModel(output_size=VOCAB_SIZE)
+    measure_initialization(
+        model,
+        positions,
+        model_seed=1,
+        vocab_size=VOCAB_SIZE,
+        sampling=_settings(),
+        forward_batch_size=3,
+    )
+
+    assert max(shape[0] for shape in model.batch_shapes) == 3
+    assert sum(shape[0] for shape in model.batch_shapes) == positions.num_windows
+
+
+# -- the predictive support ----------------------------------------------
+
+
+def test_excluded_tokens_are_never_guessed() -> None:
+    """Structural IDs leave the support for greedy, nucleus, and probabilities alike."""
+
+    positions = build_evaluation_positions(TOKENS, block_size=4, num_windows=6)
+    eligible = [2, 3, 4, 5]
+
+    measurement = measure_initialization(
+        _StubModel(output_size=VOCAB_SIZE),
+        positions,
+        model_seed=1,
+        vocab_size=VOCAB_SIZE,
+        sampling=_settings(),
+        eligible_token_ids=eligible,
+    )
+
+    excluded = [0, 1]
+    assert measurement.greedy_counts[excluded].sum() == 0
+    assert measurement.nucleus_counts[:, excluded].sum() == 0
+    assert float(measurement.mean_predicted_probabilities[excluded].sum()) == pytest.approx(0.0)
+
+
+def test_excluded_tokens_keep_their_canonical_positions() -> None:
+    """Vectors stay full length; exclusion is a mask, never a renumbering."""
+
+    positions = build_evaluation_positions(TOKENS, block_size=4, num_windows=6)
+
+    measurement = measure_initialization(
+        _StubModel(output_size=VOCAB_SIZE),
+        positions,
+        model_seed=1,
+        vocab_size=VOCAB_SIZE,
+        sampling=_settings(),
+        eligible_token_ids=[2, 3, 4, 5],
+    )
+
+    assert measurement.greedy_counts.shape == (VOCAB_SIZE,)
+    assert int(measurement.greedy_counts.sum()) == positions.num_positions
+
+
+def test_probability_mass_is_renormalized_over_the_support() -> None:
+    """Masked logits give the excluded tokens exactly zero, not a small residue."""
+
+    positions = build_evaluation_positions(TOKENS, block_size=4, num_windows=4)
+
+    measurement = measure_initialization(
+        _StubModel(output_size=VOCAB_SIZE),
+        positions,
+        model_seed=1,
+        vocab_size=VOCAB_SIZE,
+        sampling=_settings(),
+        eligible_token_ids=[1, 2, 3],
+    )
+
+    assert float(measurement.mean_predicted_probabilities.sum()) == pytest.approx(1.0, abs=1e-5)
+    assert float(measurement.mean_predicted_probabilities[0]) == 0.0
