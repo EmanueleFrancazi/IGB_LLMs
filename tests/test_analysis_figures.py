@@ -153,3 +153,108 @@ def test_a_single_initialization_still_plots() -> None:
     written = generate_all_figures(record, pytest.importorskip("tempfile").mkdtemp())
 
     assert all(path.stat().st_size > 0 for path in written)
+
+
+# --- Large-vocabulary rendering ------------------------------------------
+
+from llm_behavior_lab.analysis.figures import (  # noqa: E402
+    LARGE_VOCAB_THRESHOLD,
+    escape_token_label,
+)
+
+LARGE_VOCAB = 32000
+
+
+def _large_record(num_positions: int = 4096) -> InitializationExperimentRecord:
+    """A subword-sized record with structural tokens and a long zero tail."""
+
+    rng = np.random.default_rng(5)
+    eligible = np.arange(3, LARGE_VOCAB)
+    weights = 1.0 / np.arange(1, eligible.size + 1) ** 1.1
+    weights /= weights.sum()
+
+    corpus = np.zeros(LARGE_VOCAB, dtype=np.int64)
+    corpus[eligible] = rng.multinomial(200_000, weights)
+    selected = np.zeros(LARGE_VOCAB, dtype=np.int64)
+    selected[eligible] = rng.multinomial(num_positions, weights)
+
+    peaked = 1.0 / np.arange(1, eligible.size + 1) ** 2.0
+    peaked /= peaked.sum()
+    greedy = np.zeros((2, LARGE_VOCAB), dtype=np.int64)
+    nucleus = np.zeros((2, 2, LARGE_VOCAB), dtype=np.int64)
+    for index in range(2):
+        greedy[index, eligible] = rng.multinomial(num_positions, peaked)
+        nucleus[index][:, eligible] = rng.multinomial(num_positions, peaked, size=2)
+
+    return InitializationExperimentRecord.build(
+        corpus_counts=corpus,
+        selected_target_counts=selected,
+        greedy_counts=greedy,
+        nucleus_counts=nucleus,
+        mean_predicted_probabilities=np.tile(corpus / corpus.sum(), (2, 1)),
+        model_seeds=np.array([1, 2]),
+        eligible_token_ids=eligible,
+        metadata={
+            "num_positions": num_positions,
+            "tokens": [f"▁piece{index}" for index in range(LARGE_VOCAB)],
+        },
+    )
+
+
+def test_all_figures_render_at_a_subword_vocabulary(tmp_path) -> None:
+    """32k tokens, long zero tails, and wide rank ranges must not break plotting."""
+
+    written = generate_all_figures(_large_record(), tmp_path)
+
+    assert len(written) == 4 * len(FIGURE_FORMATS)
+    for path in written:
+        assert path.stat().st_size > 0
+
+
+def test_large_vocabulary_output_stays_a_reasonable_size(tmp_path) -> None:
+    """Vector output must not blow up once curves have tens of thousands of points.
+
+    Rasterizing only the dense curves keeps axes and text as vector while
+    preventing a multi-megabyte SVG.
+    """
+
+    generate_all_figures(_large_record(), tmp_path)
+
+    for path in tmp_path.glob("*.svg"):
+        assert path.stat().st_size < 2_000_000, f"{path.name} is too large"
+
+
+def test_the_large_vocabulary_threshold_is_what_switches_rendering() -> None:
+    """The regime is chosen by eligible support, not by the full vocabulary."""
+
+    assert _large_record().eligible_vocab_size > LARGE_VOCAB_THRESHOLD
+    assert _record().eligible_vocab_size <= LARGE_VOCAB_THRESHOLD
+
+
+def test_a_zero_tail_does_not_prevent_rendering(tmp_path) -> None:
+    """Most of a subword vocabulary is never guessed; a log axis must cope."""
+
+    record = _large_record(num_positions=64)
+    guessed = (record.greedy_counts[0] > 0).sum()
+
+    written = generate_all_figures(record, tmp_path)
+
+    assert guessed < record.eligible_vocab_size / 100
+    assert all(path.stat().st_size > 0 for path in written)
+
+
+def test_token_labels_escape_whitespace_and_control_characters() -> None:
+    """Two different tokens must never render identically."""
+
+    assert escape_token_label("\n") != escape_token_label(" ")
+    assert "\\n" in escape_token_label("\n")
+    assert escape_token_label("▁the").strip("'\"") == "▁the"
+
+
+def test_token_labels_are_truncated_rather_than_overflowing() -> None:
+    """A long byte-fallback piece must not take over the figure."""
+
+    label = escape_token_label("a" * 200)
+
+    assert len(label) <= 16
+    assert "…" in label
