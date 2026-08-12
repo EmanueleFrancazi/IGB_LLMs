@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -33,10 +33,13 @@ __all__ = [
     "load_record",
 ]
 
-#: Version 2 added ``eligible_token_ids``. A version 1 record loads unchanged:
-#: it predates special-token exclusion, so every token was eligible, which is
-#: exactly the default applied when the array is absent.
-RECORD_VERSION = 2
+#: Version 2 added ``eligible_token_ids``. Version 3 added the optional
+#: input-condition counts and the uniform-null profile. Older records load
+#: unchanged: version 1 predates special-token exclusion, so every token was
+#: eligible -- exactly the default applied when that array is absent -- and the
+#: version 3 additions are optional, so their absence simply means the run did
+#: not carry those comparisons.
+RECORD_VERSION = 3
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -50,6 +53,13 @@ _ARRAY_NAMES = (
 
 #: Present from version 2 onward; defaulted when loading an older record.
 _OPTIONAL_ARRAY_NAMES = ("eligible_token_ids",)
+
+#: Version 3 additions, stored under flat prefixed keys so the archive stays a
+#: plain name-to-array mapping. ``real`` is not stored again here: it is already
+#: ``greedy_counts`` / ``nucleus_counts``.
+_CONDITION_GREEDY_PREFIX = "condition_greedy__"
+_CONDITION_NUCLEUS_PREFIX = "condition_nucleus__"
+_NULL_PREFIX = "uniform_null__"
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -122,6 +132,12 @@ class InitializationExperimentRecord:
     model_seeds: np.ndarray
     eligible_token_ids: np.ndarray
     metadata: dict[str, Any]
+    #: Input condition -> ``[S, V]`` greedy counts. Excludes ``real``.
+    condition_greedy_counts: dict[str, np.ndarray] = field(default_factory=dict)
+    #: Input condition -> ``[S, R, V]`` nucleus counts. Excludes ``real``.
+    condition_nucleus_counts: dict[str, np.ndarray] = field(default_factory=dict)
+    #: ``ranked_mean`` / ``ranked_low`` / ``ranked_high`` over the eligible support.
+    uniform_null: dict[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.validate()
@@ -225,6 +241,57 @@ class InitializationExperimentRecord:
 
         return self.nucleus_replicate_fractions.mean(axis=1)
 
+    @property
+    def available_conditions(self) -> tuple[str, ...]:
+        """Input conditions this record carries, ``real`` always first."""
+
+        extra = [name for name in ("shuffled", "gaussian") if name in self.condition_greedy_counts]
+        return ("real", *extra)
+
+    @property
+    def has_input_structure(self) -> bool:
+        """Whether the paired input-structure comparison is available."""
+
+        return len(self.available_conditions) > 1
+
+    @property
+    def has_uniform_null(self) -> bool:
+        """Whether a simulated uniform-null profile is available."""
+
+        return "ranked_mean" in self.uniform_null
+
+    def condition_counts(self, condition: str, policy: str) -> np.ndarray:
+        """Raw counts for one input condition and policy.
+
+        ``real`` is served from the primary arrays rather than duplicated, so a
+        record never holds the same numbers twice.
+        """
+
+        if condition == "real":
+            return self.greedy_counts if policy == "greedy" else self.nucleus_counts
+        store = (
+            self.condition_greedy_counts if policy == "greedy" else self.condition_nucleus_counts
+        )
+        if condition not in store:
+            raise KeyError(
+                f"Record has no {policy!r} counts for condition {condition!r}; "
+                f"available: {self.available_conditions}."
+            )
+        return store[condition]
+
+    def condition_policy_fractions(self, condition: str, policy: str) -> np.ndarray:
+        """``[S, V]`` guess fractions for one input condition and policy.
+
+        Nucleus replicates are averaged within an initialization exactly as for
+        the real condition, so the comparison across conditions is like-for-like.
+        """
+
+        if policy not in ("greedy", "nucleus"):
+            raise ValueError(f"Unknown policy {policy!r}; expected 'greedy' or 'nucleus'.")
+        counts = self.condition_counts(condition, policy)
+        fractions = _fractions(counts)
+        return fractions if policy == "greedy" else fractions.mean(axis=1)
+
     def policy_fractions(self, policy: str) -> np.ndarray:
         """Return the ``[S, V]`` guess fractions for ``"greedy"`` or ``"nucleus"``."""
 
@@ -288,6 +355,30 @@ class InitializationExperimentRecord:
                 "structural tokens."
             )
 
+        for name, store in (
+            ("condition_greedy_counts", self.condition_greedy_counts),
+            ("condition_nucleus_counts", self.condition_nucleus_counts),
+        ):
+            for condition, array in store.items():
+                if condition == "real":
+                    raise ValueError(
+                        "The 'real' condition lives in the primary arrays and must not be "
+                        f"duplicated in {name}."
+                    )
+                expected = (
+                    self.greedy_counts.shape
+                    if name == "condition_greedy_counts"
+                    else self.nucleus_counts.shape
+                )
+                if array.shape != expected:
+                    raise ValueError(
+                        f"{name}[{condition!r}] has shape {array.shape}, expected {expected}; "
+                        "every condition must cover the same initializations and support."
+                    )
+        for key, array in self.uniform_null.items():
+            if array.ndim != 1:
+                raise ValueError(f"uniform_null[{key!r}] must be one-dimensional.")
+
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
             raise ValueError("metadata['tokens'] must have one entry per valid token ID.")
@@ -301,8 +392,14 @@ class InitializationExperimentRecord:
 
         directory = Path(directory)
         arrays = {
-            field: getattr(self, field) for field in _ARRAY_NAMES + _OPTIONAL_ARRAY_NAMES
+            name: getattr(self, name) for name in _ARRAY_NAMES + _OPTIONAL_ARRAY_NAMES
         }
+        for condition, values in self.condition_greedy_counts.items():
+            arrays[f"{_CONDITION_GREEDY_PREFIX}{condition}"] = values
+        for condition, values in self.condition_nucleus_counts.items():
+            arrays[f"{_CONDITION_NUCLEUS_PREFIX}{condition}"] = values
+        for key, values in self.uniform_null.items():
+            arrays[f"{_NULL_PREFIX}{key}"] = values
         _atomic_write_bytes(
             directory / f"{name}.npz",
             lambda path: np.savez_compressed(path, **arrays),
@@ -336,7 +433,21 @@ class InitializationExperimentRecord:
             # Version 1 predates special-token exclusion: every token was
             # eligible, so defaulting preserves the original meaning exactly.
             eligible = np.arange(loaded["token_ids"].shape[0])
-        return cls(**loaded, eligible_token_ids=eligible, metadata=dict(metadata))
+        def collect(prefix: str) -> dict[str, np.ndarray]:
+            return {
+                key[len(prefix) :]: np.asarray(value)
+                for key, value in arrays.items()
+                if key.startswith(prefix)
+            }
+
+        return cls(
+            **loaded,
+            eligible_token_ids=eligible,
+            metadata=dict(metadata),
+            condition_greedy_counts=collect(_CONDITION_GREEDY_PREFIX),
+            condition_nucleus_counts=collect(_CONDITION_NUCLEUS_PREFIX),
+            uniform_null=collect(_NULL_PREFIX),
+        )
 
     @classmethod
     def build(
@@ -350,6 +461,9 @@ class InitializationExperimentRecord:
         model_seeds: Sequence[int] | np.ndarray,
         metadata: Mapping[str, Any],
         eligible_token_ids: Sequence[int] | np.ndarray | None = None,
+        condition_greedy_counts: Mapping[str, np.ndarray] | None = None,
+        condition_nucleus_counts: Mapping[str, np.ndarray] | None = None,
+        uniform_null: Mapping[str, np.ndarray] | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -374,6 +488,13 @@ class InitializationExperimentRecord:
             model_seeds=np.asarray(model_seeds),
             eligible_token_ids=eligible,
             metadata=dict(metadata),
+            condition_greedy_counts={
+                key: np.asarray(value) for key, value in (condition_greedy_counts or {}).items()
+            },
+            condition_nucleus_counts={
+                key: np.asarray(value) for key, value in (condition_nucleus_counts or {}).items()
+            },
+            uniform_null={key: np.asarray(value) for key, value in (uniform_null or {}).items()},
         )
 
 

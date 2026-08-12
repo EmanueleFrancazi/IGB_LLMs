@@ -267,3 +267,124 @@ def test_out_of_range_eligible_ids_are_rejected() -> None:
         _record(eligible_token_ids=np.array([0, 1, VOCAB_SIZE]))
     with pytest.raises(ValueError, match="distinct"):
         _record(eligible_token_ids=np.array([0, 0, 1]))
+
+
+# --- Input conditions and the uniform null (record version 3) -------------
+
+
+def _extended(**overrides) -> InitializationExperimentRecord:
+    """A record carrying both version-3 additions."""
+
+    fields = {
+        "condition_greedy_counts": {
+            "shuffled": np.zeros((NUM_INITIALIZATIONS, VOCAB_SIZE), dtype=np.int64),
+            "gaussian": np.zeros((NUM_INITIALIZATIONS, VOCAB_SIZE), dtype=np.int64),
+        },
+        "condition_nucleus_counts": {
+            "shuffled": np.zeros(
+                (NUM_INITIALIZATIONS, NUM_REPLICATES, VOCAB_SIZE), dtype=np.int64
+            ),
+            "gaussian": np.zeros(
+                (NUM_INITIALIZATIONS, NUM_REPLICATES, VOCAB_SIZE), dtype=np.int64
+            ),
+        },
+        "uniform_null": {
+            "ranked_mean": np.array([0.4, 0.3, 0.2, 0.1, 0.0]),
+            "ranked_low": np.array([0.35, 0.25, 0.15, 0.05, 0.0]),
+            "ranked_high": np.array([0.45, 0.35, 0.25, 0.15, 0.0]),
+        },
+    }
+    for store in ("condition_greedy_counts", "condition_nucleus_counts"):
+        for values in fields[store].values():
+            values[..., 1] = 40 if store == "condition_greedy_counts" else 40
+    fields.update(overrides)
+    return _record(**fields)
+
+
+def test_available_conditions_lists_real_first() -> None:
+    """``real`` is always present and always first."""
+
+    assert _extended().available_conditions == ("real", "shuffled", "gaussian")
+    assert _record().available_conditions == ("real",)
+
+
+def test_the_real_condition_is_not_stored_twice() -> None:
+    """It is served from the primary arrays instead."""
+
+    record = _extended()
+
+    assert "real" not in record.condition_greedy_counts
+    assert np.array_equal(
+        record.condition_policy_fractions("real", "greedy"), record.greedy_fractions
+    )
+    assert np.array_equal(
+        record.condition_policy_fractions("real", "nucleus"), record.nucleus_fractions
+    )
+
+
+def test_duplicating_the_real_condition_is_rejected() -> None:
+    """Two sources of truth for one condition is a bug waiting to happen."""
+
+    with pytest.raises(ValueError, match="must not be duplicated"):
+        _extended(
+            condition_greedy_counts={
+                "real": np.zeros((NUM_INITIALIZATIONS, VOCAB_SIZE), dtype=np.int64)
+            }
+        )
+
+
+def test_condition_arrays_must_match_the_primary_shapes() -> None:
+    """Every condition covers the same initializations and support."""
+
+    with pytest.raises(ValueError, match="every condition must cover"):
+        _extended(
+            condition_greedy_counts={
+                "shuffled": np.zeros((NUM_INITIALIZATIONS + 1, VOCAB_SIZE), dtype=np.int64)
+            }
+        )
+
+
+def test_input_conditions_and_the_null_round_trip(tmp_path) -> None:
+    """Both additions must survive persistence, or a replot loses them."""
+
+    record = _extended()
+    record.save(tmp_path)
+
+    reloaded = load_record(tmp_path)
+
+    assert reloaded.available_conditions == ("real", "shuffled", "gaussian")
+    assert np.array_equal(
+        reloaded.condition_greedy_counts["gaussian"], record.condition_greedy_counts["gaussian"]
+    )
+    assert np.allclose(reloaded.uniform_null["ranked_high"], record.uniform_null["ranked_high"])
+    assert reloaded.has_input_structure and reloaded.has_uniform_null
+
+
+def test_a_record_without_the_additions_still_loads(tmp_path) -> None:
+    """Version 1 and 2 records predate both and must keep working."""
+
+    _record().save(tmp_path)
+
+    reloaded = load_record(tmp_path)
+
+    assert reloaded.available_conditions == ("real",)
+    assert not reloaded.has_input_structure
+    assert not reloaded.has_uniform_null
+
+
+def test_requesting_a_missing_condition_names_what_is_available() -> None:
+    """A silent fallback would compare the wrong thing."""
+
+    with pytest.raises(KeyError, match="available"):
+        _record().condition_counts("gaussian", "greedy")
+
+
+def test_nucleus_condition_fractions_average_replicates() -> None:
+    """Matching how the real condition is summarised, so pairs are comparable."""
+
+    record = _extended()
+
+    fractions = record.condition_policy_fractions("shuffled", "nucleus")
+
+    assert fractions.shape == (NUM_INITIALIZATIONS, VOCAB_SIZE)
+    assert fractions.sum(axis=1).tolist() == pytest.approx([1.0] * NUM_INITIALIZATIONS)

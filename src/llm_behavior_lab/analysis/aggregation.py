@@ -36,6 +36,9 @@ __all__ = [
     "eligible_view",
     "js_divergence",
     "mean_with_sem",
+    "CONDITION_PAIRS",
+    "paired_concentration_differences",
+    "paired_condition_distances",
     "persistent_absolute_gaps",
     "ranked_profile",
     "ranked_profiles",
@@ -230,37 +233,144 @@ def top_two_gap(vector: np.ndarray) -> float:
     return float(ranked[0] - ranked[1])
 
 
-def within_initialization_sampling_spread(record: Any) -> dict[str, float]:
+def within_initialization_sampling_spread(record: Any) -> dict[str, Any]:
     """Quantify stochastic-sampling noise *inside* one initialization.
 
-    For every initialization the replicate-wise distance to the corpus
-    distribution is computed, and the spread of those replicate values is
-    averaged over initializations. Comparing it with the between-initialization
-    spread of the same quantity shows which source of randomness dominates.
+    Requires at least two nucleus replicates. Under the current ``R = 1``
+    protocol there is exactly one stochastic realization per initialization, so
+    within-initialization variance is **not estimable** and is reported as
+    ``estimated: False`` with ``None`` values rather than as a zero that would
+    read like an observed absence of noise.
+
+    With ``R > 1`` the replicate-wise distance to the corpus distribution is
+    computed per initialization and its spread averaged, so it can be compared
+    against the between-initialization spread of the same quantity.
     """
 
     replicate_fractions = record.nucleus_replicate_fractions
-    corpus = record.corpus_fractions
+    num_replicates = int(replicate_fractions.shape[1])
+    corpus = eligible_view(record, record.corpus_fractions)
+
+    if num_replicates < 2:
+        return {
+            "estimated": False,
+            "reason": "not estimated (R=1): one stochastic realization per initialization",
+            "mean_within_initialization_std_tv": None,
+            "between_initialization_std_tv": None,
+            "mean_tv_to_corpus": float(
+                np.mean(
+                    [
+                        total_variation_distance(corpus, eligible_view(record, row[0]))
+                        for row in replicate_fractions
+                    ]
+                )
+            ),
+            "num_replicates": num_replicates,
+            "num_initializations": int(replicate_fractions.shape[0]),
+        }
+
     per_replicate = np.array(
         [
-            [total_variation_distance(corpus, replicate) for replicate in initialization]
+            [
+                total_variation_distance(corpus, eligible_view(record, replicate))
+                for replicate in initialization
+            ]
             for initialization in replicate_fractions
         ]
     )
-    within_std = (
-        per_replicate.std(axis=1, ddof=1) if per_replicate.shape[1] > 1 else np.zeros(len(per_replicate))
-    )
+    within_std = per_replicate.std(axis=1, ddof=1)
     initialization_means = per_replicate.mean(axis=1)
     between_std = (
         float(initialization_means.std(ddof=1)) if initialization_means.shape[0] > 1 else 0.0
     )
     return {
+        "estimated": True,
+        "reason": None,
         "mean_within_initialization_std_tv": float(np.mean(within_std)),
         "between_initialization_std_tv": between_std,
         "mean_tv_to_corpus": float(initialization_means.mean()),
-        "num_replicates": int(per_replicate.shape[1]),
+        "num_replicates": num_replicates,
         "num_initializations": int(per_replicate.shape[0]),
     }
+
+
+#: Ordered pairs compared by the input-structure analysis. Each answers a
+#: different question, and only the first is close to a controlled contrast.
+CONDITION_PAIRS = (("real", "shuffled"), ("real", "gaussian"), ("shuffled", "gaussian"))
+
+
+def paired_condition_distances(record: Any, policy: str) -> dict[str, Any]:
+    """Same-token distance between input conditions, paired by initialization.
+
+    Every distance compares two conditions **of the same initialization**, so
+    the weights cancel and what remains is attributable to the input. These are
+    *not* distances to the empirical corpus: name them
+    ``tv_real_vs_shuffled`` and never ``TV(corpus, guesses)``.
+
+    Returns:
+        Per-pair mean and SEM across initializations, plus the per-initialization
+        values so a caller can inspect the spread.
+    """
+
+    if not record.has_input_structure:
+        return {"available": False, "pairs": {}}
+
+    results: dict[str, Any] = {}
+    for left, right in CONDITION_PAIRS:
+        if left not in record.available_conditions or right not in record.available_conditions:
+            continue
+        first = eligible_view(record, record.condition_policy_fractions(left, policy))
+        second = eligible_view(record, record.condition_policy_fractions(right, policy))
+        values = np.array(
+            [total_variation_distance(a, b) for a, b in zip(first, second)]
+        )
+        mean, sem = _mean_sem(values)
+        results[f"tv_{left}_vs_{right}"] = {
+            "mean": mean,
+            "sem": sem,
+            "per_initialization": values.tolist(),
+        }
+    return {"available": True, "policy": policy, "pairs": results}
+
+
+def _concentration_scalars(record: Any, condition: str, policy: str) -> dict[str, np.ndarray]:
+    """Per-initialization concentration scalars for one condition."""
+
+    fractions = eligible_view(record, record.condition_policy_fractions(condition, policy))
+    return {
+        "effective_support": np.array([effective_support(row) for row in fractions]),
+        "entropy": np.array([shannon_entropy(row) for row in fractions]),
+        "zero_frequency_fraction": (fractions <= 0.0).sum(axis=1) / record.eligible_vocab_size,
+        "top_two_gap": np.array([top_two_gap(row) for row in fractions]),
+    }
+
+
+def paired_concentration_differences(record: Any, policy: str) -> dict[str, Any]:
+    """Paired per-initialization differences in concentration between conditions.
+
+    Differences are taken **within** an initialization and only then averaged.
+    Comparing two independent mean-with-SEM intervals instead would throw away
+    the pairing and inflate the apparent uncertainty, since the initialization
+    contributes to both terms.
+    """
+
+    if not record.has_input_structure:
+        return {"available": False, "pairs": {}}
+
+    measures = ("effective_support", "entropy", "zero_frequency_fraction", "top_two_gap")
+    results: dict[str, Any] = {}
+    for left, right in CONDITION_PAIRS:
+        if left not in record.available_conditions or right not in record.available_conditions:
+            continue
+        first = _concentration_scalars(record, left, policy)
+        second = _concentration_scalars(record, right, policy)
+        differences: dict[str, Any] = {}
+        for measure in measures:
+            values = first[measure] - second[measure]
+            mean, sem = _mean_sem(values)
+            differences[measure] = {"mean": mean, "sem": sem}
+        results[f"{left}_minus_{right}"] = differences
+    return {"available": True, "policy": policy, "pairs": results}
 
 
 @dataclass(frozen=True)

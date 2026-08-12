@@ -405,3 +405,165 @@ def test_aggregation_scales_to_a_subword_vocabulary() -> None:
         (eligible_count - 100) / eligible_count
     )
     assert summary.effective_support_mean == pytest.approx(100.0)
+
+
+# --- Paired input-condition metrics --------------------------------------
+
+from llm_behavior_lab.analysis import (  # noqa: E402
+    CONDITION_PAIRS,
+    paired_concentration_differences,
+    paired_condition_distances,
+    within_initialization_sampling_spread,
+)
+
+
+def _paired_record(**overrides) -> InitializationExperimentRecord:
+    """Two initializations, one replicate, three conditions, hand-chosen counts."""
+
+    fields = {
+        "corpus_counts": np.array([0, 10, 10, 10, 10, 10]),
+        "selected_target_counts": np.array([0, 2, 2, 2, 2, 2]),
+        "greedy_counts": np.array([[0, 10, 0, 0, 0, 0], [0, 0, 10, 0, 0, 0]]),
+        "nucleus_counts": np.array([[[0, 10, 0, 0, 0, 0]], [[0, 0, 10, 0, 0, 0]]]),
+        "mean_predicted_probabilities": np.tile(np.array([0.0, 0.2, 0.2, 0.2, 0.2, 0.2]), (2, 1)),
+        "model_seeds": np.array([1, 2]),
+        "eligible_token_ids": np.array([1, 2, 3, 4, 5]),
+        "metadata": {"num_positions": 10},
+        "condition_greedy_counts": {
+            "shuffled": np.array([[0, 5, 5, 0, 0, 0], [0, 0, 5, 5, 0, 0]]),
+            "gaussian": np.array([[0, 0, 0, 10, 0, 0], [0, 0, 0, 0, 10, 0]]),
+        },
+        "condition_nucleus_counts": {
+            "shuffled": np.array([[[0, 5, 5, 0, 0, 0]], [[0, 0, 5, 5, 0, 0]]]),
+            "gaussian": np.array([[[0, 0, 0, 10, 0, 0]], [[0, 0, 0, 0, 10, 0]]]),
+        },
+    }
+    fields.update(overrides)
+    return InitializationExperimentRecord.build(**fields)
+
+
+def test_paired_distances_are_hand_computable() -> None:
+    """Real puts all mass on one token; shuffled splits it over two.
+
+    ``TV = ½(|1-0.5| + |0-0.5|) = 0.5``. Against Gaussian, which moves the mass
+    to a different token entirely, ``TV = 1``.
+    """
+
+    pairs = paired_condition_distances(_paired_record(), "greedy")["pairs"]
+
+    assert pairs["tv_real_vs_shuffled"]["mean"] == pytest.approx(0.5)
+    assert pairs["tv_real_vs_gaussian"]["mean"] == pytest.approx(1.0)
+
+
+def test_paired_distances_are_not_distances_to_the_corpus() -> None:
+    """Their names must make that impossible to misread."""
+
+    pairs = paired_condition_distances(_paired_record(), "greedy")["pairs"]
+
+    for name in pairs:
+        assert name.startswith("tv_")
+        assert "corpus" not in name
+
+
+def test_all_three_condition_pairs_are_reported() -> None:
+    """Each answers a different question about input structure."""
+
+    pairs = paired_condition_distances(_paired_record(), "nucleus")["pairs"]
+
+    assert set(pairs) == {
+        f"tv_{left}_vs_{right}" for left, right in CONDITION_PAIRS
+    }
+
+
+def test_paired_effective_support_differences_are_hand_computable() -> None:
+    """Real has ``e^H = 1``; shuffled splits evenly over two tokens, ``e^H = 2``."""
+
+    differences = paired_concentration_differences(_paired_record(), "greedy")["pairs"]
+
+    support = differences["real_minus_shuffled"]["effective_support"]
+    assert support["mean"] == pytest.approx(-1.0)
+    assert support["sem"] == pytest.approx(0.0)
+
+
+def test_paired_zero_frequency_differences_are_hand_computable() -> None:
+    """Real leaves 4 of 5 eligible tokens unreached; shuffled leaves 3."""
+
+    differences = paired_concentration_differences(_paired_record(), "greedy")["pairs"]
+
+    zero = differences["real_minus_shuffled"]["zero_frequency_fraction"]
+    assert zero["mean"] == pytest.approx(0.2)
+
+
+def test_paired_differences_cover_every_requested_measure() -> None:
+    """Effective support, entropy, zero fraction, and the top gap."""
+
+    differences = paired_concentration_differences(_paired_record(), "greedy")["pairs"]
+
+    assert set(differences["real_minus_gaussian"]) == {
+        "effective_support",
+        "entropy",
+        "zero_frequency_fraction",
+        "top_two_gap",
+    }
+
+
+def test_differences_are_paired_within_an_initialization() -> None:
+    """Pairing removes the initialization, which both conditions share.
+
+    Here each initialization has an identical within-pair difference while the
+    two initializations differ from each other, so an unpaired comparison would
+    show spread where the paired one correctly shows none.
+    """
+
+    record = _paired_record()
+
+    support = paired_concentration_differences(record, "greedy")["pairs"][
+        "real_minus_shuffled"
+    ]["effective_support"]
+
+    assert support["sem"] == pytest.approx(0.0)
+
+
+def test_paired_metrics_are_absent_without_input_conditions() -> None:
+    """A record that never ran them must say so rather than invent zeros."""
+
+    record = _paired_record(condition_greedy_counts={}, condition_nucleus_counts={})
+
+    assert paired_condition_distances(record, "greedy") == {"available": False, "pairs": {}}
+    assert paired_concentration_differences(record, "greedy")["available"] is False
+
+
+def test_within_initialization_spread_is_not_estimated_at_one_replicate() -> None:
+    """R=1 has no within-initialization variance, and must not pretend to.
+
+    Reporting zero would read as an observed absence of sampling noise.
+    """
+
+    spread = within_initialization_sampling_spread(_paired_record())
+
+    assert spread["estimated"] is False
+    assert spread["mean_within_initialization_std_tv"] is None
+    assert spread["between_initialization_std_tv"] is None
+    assert "R=1" in spread["reason"]
+    assert spread["num_replicates"] == 1
+
+
+def test_within_initialization_spread_is_estimated_when_replicates_allow() -> None:
+    """Historical R>1 configurations keep the estimate."""
+
+    record = _paired_record(
+        nucleus_counts=np.array(
+            [
+                [[0, 10, 0, 0, 0, 0], [0, 0, 10, 0, 0, 0]],
+                [[0, 0, 10, 0, 0, 0], [0, 0, 0, 10, 0, 0]],
+            ]
+        ),
+        condition_nucleus_counts={},
+        condition_greedy_counts={},
+    )
+
+    spread = within_initialization_sampling_spread(record)
+
+    assert spread["estimated"] is True
+    assert spread["mean_within_initialization_std_tv"] is not None
+    assert spread["num_replicates"] == 2

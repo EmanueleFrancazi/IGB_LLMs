@@ -35,6 +35,7 @@ from matplotlib.figure import Figure
 
 from llm_behavior_lab.analysis.aggregation import (
     corpus_observed_zero_guess_counts,
+    paired_condition_distances,
     effective_support,
     effective_supports,
     eligible_view,
@@ -52,11 +53,14 @@ from llm_behavior_lab.analysis.aggregation import (
 __all__ = [
     "FIGURE_FORMATS",
     "LARGE_VOCAB_THRESHOLD",
+    "CONDITION_STYLES",
+    "NULL_STYLE",
     "POLICY_STYLES",
     "escape_token_label",
     "generate_all_figures",
     "plot_ranked_frequency_profiles",
     "plot_sampling_adequacy",
+    "plot_input_structure_profiles",
     "plot_token_identity_scatter",
     "plot_token_wise_mismatch",
     "save_figure",
@@ -78,6 +82,19 @@ POLICY_STYLES = {
     "greedy": {"color": "#1f77b4", "label": "greedy guesses"},
     "nucleus": {"color": "#d62728", "label": "nucleus guesses"},
     "selected": {"color": "#2ca02c", "label": "selected-position targets"},
+}
+
+#: The uniform null is deliberately styled unlike any policy: grey, dashed, and
+#: with a hatched band. Its envelope is a **Monte Carlo** interval over null
+#: realizations, not a SEM across model initializations, and the two must never
+#: be mistaken for one another on the same axes.
+NULL_STYLE = {"color": "#7f7f7f", "label": "uniform D-draw null"}
+
+#: One colour per input condition, shared by both panels of figure 4.
+CONDITION_STYLES = {
+    "real": {"color": "#1f77b4", "label": "real corpus"},
+    "shuffled": {"color": "#ff7f0e", "label": "shuffled tokens"},
+    "gaussian": {"color": "#9467bd", "label": "Gaussian embeddings"},
 }
 
 _ANNOTATION_BOX = {"boxstyle": "round", "facecolor": "white", "alpha": 0.85, "edgecolor": "#999999"}
@@ -283,6 +300,31 @@ def plot_ranked_frequency_profiles(record: Any, directory: str | Path) -> list[P
         **style,
     )
 
+    if record.has_uniform_null:
+        null_mean = record.uniform_null["ranked_mean"]
+        axes.plot(
+            ranks[: null_mean.shape[0]],
+            _positive(null_mean),
+            color=NULL_STYLE["color"],
+            linewidth=1.4,
+            linestyle="--",
+            label="uniform D-draw null (mean)",
+            **style,
+        )
+        if "ranked_low" in record.uniform_null and "ranked_high" in record.uniform_null:
+            axes.fill_between(
+                ranks[: null_mean.shape[0]],
+                _positive(record.uniform_null["ranked_low"]),
+                _positive(record.uniform_null["ranked_high"]),
+                color=NULL_STYLE["color"],
+                alpha=0.30,
+                linewidth=0.0,
+                hatch="///",
+                edgecolor=NULL_STYLE["color"],
+                label="null Monte Carlo interval (not a SEM)",
+                **({"step": "mid"} if not _is_large(record) else {"rasterized": True}),
+            )
+
     effective_lines = [f"  corpus {effective_support(corpus_fractions):,.1f}"]
     gap_lines = [f"  corpus {top_two_gap(corpus_fractions):.4f}"]
     zero_lines: list[str] = []
@@ -325,6 +367,18 @@ def plot_ranked_frequency_profiles(record: Any, directory: str | Path) -> list[P
             f"  {policy}{qualifier} {_format_count(counts.mean[0])}"
             f" ± {_format_count(counts.sem[0])}"
             f"  ({fractions.mean[0]:.1%} ± {fractions.sem[0]:.1%})"
+        )
+
+    null_summary = record.metadata.get("uniform_null", {})
+    if null_summary:
+        effective_lines.append(
+            f"  null {null_summary.get('effective_support_mean', float('nan')):,.1f}"
+            " (MC)"
+        )
+        gap_lines.append(f"  null {null_summary.get('top_two_gap_mean', float('nan')):.4f}")
+        zero_lines.append(
+            f"  null {_format_count(null_summary.get('zero_frequency_count_mean', 0))}"
+            f"  ({null_summary.get('zero_frequency_fraction_mean', 0):.1%})"
         )
 
     annotation = "\n".join(
@@ -538,6 +592,98 @@ def plot_token_identity_scatter(
     return save_figure(figure, directory, "figure3_token_identity_scatter")
 
 
+def plot_input_structure_profiles(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 4 -- does the guess distribution depend on input structure?
+
+    One initialized model, three inputs: the real corpus windows, the same token
+    multiset with its ordering destroyed, and synthetic Gaussian vectors at the
+    embedding boundary. Any difference between the curves is attributable to the
+    input, because the weights are identical.
+
+    Two panels, because greedy and nucleus respond differently and overlaying
+    six curves would be unreadable. Each condition is ranked independently
+    within an initialization and then aggregated rank by rank, exactly as in
+    figure 1, so **token identity is discarded here too**. Curves that coincide
+    mean the *shape* is insensitive to input structure; they say nothing about
+    whether the same tokens are chosen. The paired same-token distances printed
+    with the run answer that question.
+
+    Interpretation of the contrasts:
+
+    * real vs shuffled -- approximately isolates sequential ordering;
+    * shuffled vs Gaussian -- what discrete token identity adds once ordering
+      is already gone;
+    * real vs Gaussian -- the broadest contrast, and **not** a clean test of
+      correlation on its own.
+    """
+
+    if not record.has_input_structure:
+        raise ValueError(
+            "This record carries no input-structure conditions; run the experiment with "
+            "input_structure enabled to produce figure 4."
+        )
+
+    ranks = np.arange(1, record.eligible_vocab_size + 1)
+    style = _profile_kwargs(_is_large(record))
+    conditions = record.available_conditions
+
+    figure = _new_figure(width=11.0, height=5.5)
+    panels = figure.subplots(1, 2, sharey=True)
+
+    for axes, policy in zip(panels, ("greedy", "nucleus")):
+        for condition in conditions:
+            fractions = eligible_view(
+                record, record.condition_policy_fractions(condition, policy)
+            )
+            profile = mean_with_sem(ranked_profiles(fractions))
+            colour = CONDITION_STYLES[condition]["color"]
+            axes.plot(
+                ranks,
+                _positive(profile.mean),
+                color=colour,
+                linewidth=1.6,
+                label=f"{CONDITION_STYLES[condition]['label']} (mean of {profile.num_samples})",
+                **style,
+            )
+            axes.fill_between(
+                ranks,
+                _positive(profile.mean - profile.sem),
+                _positive(profile.mean + profile.sem),
+                color=colour,
+                alpha=0.25,
+                linewidth=0.0,
+                **({"step": "mid"} if not _is_large(record) else {"rasterized": True}),
+            )
+        _configure_rank_axis(axes, record, "frequency rank")
+        axes.set_title(f"{policy} guesses")
+        axes.legend(loc="upper right", fontsize=7.5, frameon=True)
+
+        distances = paired_condition_distances(record, policy)
+        lines = [
+            f"{name.replace('tv_', '').replace('_vs_', ' vs ')}: "
+            f"{values['mean']:.4f} ± {values['sem']:.4f}"
+            for name, values in distances.get("pairs", {}).items()
+        ]
+        if lines:
+            axes.text(
+                0.02,
+                0.03,
+                "same-token TV between conditions\n(± SEM across initializations)\n"
+                + "\n".join(f"  {line}" for line in lines),
+                transform=axes.transAxes,
+                fontsize=7,
+                va="bottom",
+                ha="left",
+                bbox=_ANNOTATION_BOX,
+            )
+
+    panels[0].set_ylabel("selected-guess fraction")
+    figure.suptitle(
+        "Input structure: ranked guess concentration under real, shuffled, and Gaussian input"
+    )
+    return save_figure(figure, directory, "figure4_input_structure_profiles")
+
+
 def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     """Write every figure for one record and return the paths in figure order."""
 
@@ -546,4 +692,6 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     written.extend(plot_ranked_frequency_profiles(record, directory))
     written.extend(plot_token_wise_mismatch(record, directory))
     written.extend(plot_token_identity_scatter(record, directory))
+    if record.has_input_structure:
+        written.extend(plot_input_structure_profiles(record, directory))
     return written

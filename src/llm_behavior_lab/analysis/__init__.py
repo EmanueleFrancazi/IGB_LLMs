@@ -20,6 +20,7 @@ appears in a figure alone.
 """
 
 from llm_behavior_lab.analysis.aggregation import (
+    CONDITION_PAIRS,
     MeanWithError,
     PolicySummary,
     ZeroFrequency,
@@ -29,6 +30,8 @@ from llm_behavior_lab.analysis.aggregation import (
     eligible_view,
     js_divergence,
     mean_with_sem,
+    paired_concentration_differences,
+    paired_condition_distances,
     persistent_absolute_gaps,
     policy_zero_frequency,
     pooled_nucleus_zero_frequency,
@@ -44,6 +47,14 @@ from llm_behavior_lab.analysis.aggregation import (
     within_initialization_sampling_spread,
     zero_guess_counts,
 )
+from llm_behavior_lab.analysis.nulls import (
+    DEFAULT_NULL_REPLICATES,
+    UniformNullSummary,
+    expected_occupancy_counts,
+    expected_zero_frequency_count,
+    expected_zero_frequency_fraction,
+    simulate_uniform_null,
+)
 from llm_behavior_lab.analysis.records import (
     RECORD_VERSION,
     InitializationExperimentRecord,
@@ -51,7 +62,16 @@ from llm_behavior_lab.analysis.records import (
 )
 
 __all__ = [
+    "CONDITION_PAIRS",
+    "DEFAULT_NULL_REPLICATES",
     "InitializationExperimentRecord",
+    "UniformNullSummary",
+    "expected_occupancy_counts",
+    "expected_zero_frequency_count",
+    "expected_zero_frequency_fraction",
+    "paired_concentration_differences",
+    "paired_condition_distances",
+    "simulate_uniform_null",
     "MeanWithError",
     "PolicySummary",
     "RECORD_VERSION",
