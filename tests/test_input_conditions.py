@@ -20,6 +20,7 @@ from llm_behavior_lab.evaluation.init_distribution import (
 )
 from llm_behavior_lab.evaluation.input_conditions import (
     INPUT_CONDITIONS,
+    EmbeddingMoments,
     embedding_moments,
     scaled_gaussian_embeddings,
     shuffled_input_ids,
@@ -611,3 +612,89 @@ def test_forward_batch_size_invariance_holds_under_the_new_protocol() -> None:
     for other in results[1:]:
         assert torch.equal(results[0].nucleus_counts, other.nucleus_counts)
         assert torch.equal(results[0].greedy_counts, other.greedy_counts)
+
+
+# -- embedding-moment provenance ------------------------------------------
+#
+# These exist because the first implementation subclassed ``tuple`` with
+# ``__slots__ = ()`` and then assigned instance attributes in ``__new__``. A
+# tuple subclass with empty slots has no ``__dict__`` and tuples are immutable,
+# so every construction raised AttributeError and both smoke runs died in
+# embedding_moments(). Nothing ever unpacked the pair, so the tuple base bought
+# nothing and cost the whole condition.
+
+
+def test_embedding_moments_construct_and_expose_four_fields() -> None:
+    """The construction that used to raise AttributeError."""
+
+    moments = EmbeddingMoments(mean=1.5, std=0.25, num_rows=9, rule="eligible rows")
+
+    assert moments.mean == 1.5
+    assert moments.std == 0.25
+    assert moments.num_rows == 9
+    assert moments.rule == "eligible rows"
+
+
+def test_embedding_moments_are_immutable_values() -> None:
+    """Value-like: frozen, and equal when their fields are equal."""
+
+    moments = EmbeddingMoments(mean=1.0, std=2.0, num_rows=3, rule="r")
+
+    assert moments == EmbeddingMoments(mean=1.0, std=2.0, num_rows=3, rule="r")
+    with pytest.raises(Exception):
+        moments.mean = 9.0  # type: ignore[misc]
+
+
+def test_a_constant_embedding_table_gives_a_constant_control() -> None:
+    """Zero variance is a valid measurement, not an error.
+
+    The control becomes exactly ``mu``. Nothing divides by ``sigma``, and no
+    arbitrary variance may be substituted to avoid the case.
+    """
+
+    weight = torch.full((8, 4), 2.5)
+    moments = embedding_moments(weight)
+    bank = standardized_gaussian_bank(num_windows=3, block_size=4, dim=4, seed=1)
+
+    scaled = scaled_gaussian_embeddings(bank, moments)
+
+    assert moments.std == pytest.approx(0.0)
+    assert torch.allclose(scaled, torch.full_like(scaled, 2.5))
+    assert not torch.isnan(scaled).any()
+
+
+def test_a_single_entry_table_reports_zero_rather_than_nan() -> None:
+    """Unbiased variance is undefined for one sample; zero is the honest answer."""
+
+    moments = embedding_moments(torch.tensor([[7.0]]))
+
+    assert moments.std == 0.0
+    assert moments.mean == pytest.approx(7.0)
+
+
+def test_gaussian_provenance_keeps_every_field() -> None:
+    """Losing ``num_rows`` or ``rule`` would leave the control unexplained."""
+
+    described = embedding_moments(
+        torch.randn(12, 5), eligible_token_ids=list(range(2, 12))
+    ).as_dict()
+
+    assert set(described) == {"mean", "std", "num_rows", "rule"}
+    assert described["num_rows"] == 10
+    assert "eligible" in described["rule"]
+
+
+def test_gaussian_provenance_survives_json_round_trip() -> None:
+    """It is persisted in run metadata, so it must serialize as plain data."""
+
+    import json
+
+    moments = embedding_moments(torch.randn(6, 3))
+
+    restored = json.loads(json.dumps({"gaussian_embedding_moments": [moments.as_dict()]}))
+
+    recorded = restored["gaussian_embedding_moments"][0]
+    assert set(recorded) == {"mean", "std", "num_rows", "rule"}
+    assert recorded["num_rows"] == 6
+    assert recorded["mean"] == pytest.approx(moments.mean)
+    assert recorded["std"] == pytest.approx(moments.std)

@@ -36,6 +36,7 @@ purpose is to vary only the weights.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Sequence
 
 import torch
@@ -114,36 +115,25 @@ def standardized_gaussian_bank(
     return bank.to(torch.device(device))
 
 
-class EmbeddingMoments(tuple):
-    """The ``(mean, std)`` used to scale the Gaussian condition.
+@dataclass(frozen=True)
+class EmbeddingMoments:
+    """What the Gaussian condition was scaled to, and how it was measured.
 
-    A named pair rather than a bare tuple so the provenance recorded alongside a
-    run says what was measured and over which rows.
+    Four fields, all of them provenance: the scale itself, plus enough to say
+    what it was taken over. A plain frozen dataclass, like every other small
+    value type in this package.
+
+    Attributes:
+        mean: Realized entry-wise mean of the measured rows.
+        std: Realized entry-wise standard deviation of the measured rows.
+        num_rows: How many embedding rows were measured.
+        rule: Human-readable description of which rows and which statistic.
     """
 
-    __slots__ = ()
-
-    def __new__(cls, mean: float, std: float, num_rows: int, rule: str) -> "EmbeddingMoments":
-        instance = super().__new__(cls, (mean, std))
-        instance._num_rows = num_rows  # type: ignore[attr-defined]
-        instance._rule = rule  # type: ignore[attr-defined]
-        return instance
-
-    @property
-    def mean(self) -> float:
-        return self[0]
-
-    @property
-    def std(self) -> float:
-        return self[1]
-
-    @property
-    def num_rows(self) -> int:
-        return self._num_rows  # type: ignore[attr-defined]
-
-    @property
-    def rule(self) -> str:
-        return self._rule  # type: ignore[attr-defined]
+    mean: float
+    std: float
+    num_rows: int
+    rule: str
 
     def as_dict(self) -> dict[str, object]:
         """Provenance persisted with the run."""
@@ -180,7 +170,7 @@ def embedding_moments(
         eligible_token_ids: Rows to measure. ``None`` uses every row.
 
     Returns:
-        An :class:`EmbeddingMoments` pair carrying its own provenance.
+        An :class:`EmbeddingMoments` carrying its own provenance.
     """
 
     if embedding_weight.ndim != 2:
@@ -199,9 +189,13 @@ def embedding_moments(
         rule = "eligible embedding rows only, entry-wise mean and std"
 
     values = rows.detach().float().reshape(-1)
+    # A single entry has no unbiased variance and would give nan. Zero is the
+    # honest answer there and matches the constant-table case below: a table with
+    # no spread scales the control to a constant, it does not invent one.
+    std = float(values.std(unbiased=True)) if values.numel() > 1 else 0.0
     return EmbeddingMoments(
         mean=float(values.mean()),
-        std=float(values.std(unbiased=True)),
+        std=std,
         num_rows=int(rows.shape[0]),
         rule=rule,
     )
@@ -216,6 +210,10 @@ def scaled_gaussian_embeddings(
     ``G = mu + sigma * Z``. The randomness is identical across initializations;
     only the scale follows the weights, so the Gaussian condition stays a
     like-for-like control rather than an arbitrary magnitude.
+
+    A constant embedding table gives ``sigma = 0`` and therefore a constant
+    control at ``mu``. That is correct and must not be special-cased into some
+    arbitrary variance: nothing here divides by ``sigma``.
     """
 
     return moments.mean + moments.std * standardized
