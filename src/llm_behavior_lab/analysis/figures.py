@@ -62,8 +62,11 @@ __all__ = [
     "save_figure",
 ]
 
-#: Raster for quick viewing, vector for publication. Two formats, no more.
-FIGURE_FORMATS = ("png", "svg")
+#: One artifact per figure. SVG alone: it stays sharp at any zoom, carries the
+#: text as text, and -- because the dense curves of a 32k-token figure are
+#: rasterized *inside* the SVG -- costs about the same as the PNG it replaces.
+#: A second raster file per figure was duplication, not a second format.
+FIGURE_FORMATS = ("svg",)
 
 #: Above this eligible-support size the figures switch to large-vocabulary
 #: rendering: logarithmic rank axis, plain lines, rasterized scatter.

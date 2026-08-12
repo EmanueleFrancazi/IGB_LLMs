@@ -258,3 +258,48 @@ def test_token_labels_are_truncated_rather_than_overflowing() -> None:
 
     assert len(label) <= 16
     assert "…" in label
+
+
+# --- SVG-only artifacts ---------------------------------------------------
+
+
+def test_only_svg_artifacts_are_written(tmp_path) -> None:
+    """One artifact per figure, and it is vector.
+
+    The dense curves of a subword figure are rasterized *inside* the SVG, so a
+    companion PNG added a second file without adding a second format.
+    """
+
+    generate_all_figures(_record(), tmp_path)
+
+    written = sorted(path.name for path in tmp_path.iterdir())
+    assert written == [
+        "figure0_sampling_adequacy.svg",
+        "figure1_ranked_frequency_profiles.svg",
+        "figure2_token_wise_mismatch.svg",
+        "figure3_token_identity_scatter.svg",
+    ]
+
+
+def test_no_png_is_produced(tmp_path) -> None:
+    """Asserted separately, because it is the property that regressed."""
+
+    generate_all_figures(_record(), tmp_path)
+
+    assert list(tmp_path.glob("*.png")) == []
+    assert len(list(tmp_path.glob("*.svg"))) == 4
+
+
+def test_the_declared_format_list_is_svg_only() -> None:
+    """Every caller derives its expectations from this constant."""
+
+    assert FIGURE_FORMATS == ("svg",)
+
+
+def test_a_subword_figure_set_is_also_svg_only(tmp_path) -> None:
+    """The large-vocabulary path shares the export code, so it must agree."""
+
+    generate_all_figures(_large_record(), tmp_path)
+
+    assert list(tmp_path.glob("*.png")) == []
+    assert len(list(tmp_path.glob("*.svg"))) == 4
