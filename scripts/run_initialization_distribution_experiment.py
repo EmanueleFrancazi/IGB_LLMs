@@ -61,6 +61,7 @@ from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     measure_initialization,
 )
 from llm_behavior_lab.experiment import ExperimentRun, experiment_settings_from_config  # noqa: E402
+from llm_behavior_lab.experiment.naming import compose_run_id  # noqa: E402
 from llm_behavior_lab.models import build_model_from_config  # noqa: E402
 from llm_behavior_lab.utils import get_device, seed_everything  # noqa: E402
 
@@ -167,6 +168,30 @@ def parse_args() -> argparse.Namespace:
     )
     add_dataset_arguments(parser)
     return parser.parse_args()
+
+
+def _describe_tokenizer_line(description: dict[str, Any]) -> str:
+    """Render the resolved tokenizer identity for the console summary.
+
+    Derived entirely from the tokenizer's own ``describe()`` output. Hard-coding
+    the kind here is what previously made a Mistral run announce itself as
+    ``char``: the persisted metadata was right and only the printed line lied,
+    which is the worst version of the bug because the number beside it looked
+    plausible.
+    """
+
+    kind = str(description.get("type", "unknown"))
+    vocab = description.get("vocab_size")
+    eligible = description.get("eligible_vocab_size")
+    parts = [kind]
+    if kind == "pretrained" and description.get("identifier"):
+        parts.append(str(description["identifier"]))
+        revision = description.get("requested_revision")
+        parts.append(f"revision={revision or 'unpinned'}")
+    rendered = ", ".join(parts)
+    if eligible is not None and vocab is not None and eligible != vocab:
+        return f"{rendered}, vocab size {vocab} ({eligible} eligible)"
+    return f"{rendered}, vocab size {vocab}"
 
 
 def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -315,7 +340,7 @@ def main() -> None:
     print("Initialization-distribution experiment")
     print(f"Dataset: {resolved.name} ({resolved.source}, via {resolved.route})")
     print(f"Dataset path: {resolved.path}")
-    print(f"Tokenizer: char, vocab size {tokenizer.vocab_size}")
+    print(f"Tokenizer: {_describe_tokenizer_line(tokenizer_description)}")
     print(f"Analysis split: {protocol['split']} ({len(split_ids)} tokens)")
     print(
         f"Evaluation positions: {positions.num_positions} "
@@ -408,9 +433,18 @@ def main() -> None:
         },
     }
 
+    run_id = args.run_id or compose_run_id(
+        dataset=resolved.name,
+        tokenizer=tokenizer_description,
+        model_name=model_config["model"]["name"],
+        model_vocab_size=model_vocab_size,
+        num_positions=positions.num_positions,
+        num_initializations=protocol["num_initializations"],
+        num_replicates=sampling.num_replicates,
+    )
     run = ExperimentRun.create(
         settings,
-        run_id=args.run_id,
+        run_id=run_id,
         repo_root=REPO_ROOT,
         metadata=metadata,
     )

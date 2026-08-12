@@ -226,10 +226,9 @@ def _persist_analysis_run(
             "model_parameter_count": parameter_count,
             "dataset_path": str(text_path),
             "dataset": dataset_provenance or {},
-            "tokenizer": {
-                "type": "char",
-                "vocab_size": tokenizer.vocab_size,
-            },
+            # Derived from the tokenizer rather than asserted here, so the
+            # recorded identity cannot drift from the one actually used.
+            "tokenizer": tokenizer.describe(),
             "analysis": {
                 "split": args.split,
                 "num_batches": args.num_batches,

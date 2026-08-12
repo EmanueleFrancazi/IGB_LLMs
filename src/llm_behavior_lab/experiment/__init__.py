@@ -14,6 +14,7 @@ from llm_behavior_lab.experiment.config import (
     LoggingSettings,
     experiment_settings_from_config,
 )
+from llm_behavior_lab.experiment.naming import compose_run_id
 from llm_behavior_lab.experiment.metrics import MetricLogger
 from llm_behavior_lab.experiment.run import (
     ExperimentRun,
@@ -31,6 +32,7 @@ from llm_behavior_lab.experiment.serialization import (
 )
 
 __all__ = [
+    "compose_run_id",
     "ArrayArtifact",
     "ArrayMetricStore",
     "CHECKPOINT_FORMAT_VERSION",
