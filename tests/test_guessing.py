@@ -104,13 +104,12 @@ def test_nucleus_only_selects_tokens_inside_the_support() -> None:
     assert int(guesses.max()) < 9
 
 
-def test_nucleus_keeps_only_the_top_p_head() -> None:
+def test_nucleus_drops_a_token_above_the_threshold() -> None:
     """Tokens whose preceding cumulative mass exceeds top_p are unreachable.
 
-    The cumulative mass *before* each token here is ``[0, 0.6, 0.9, 0.97]``, so
-    at ``top_p = 0.85`` the first two tokens survive and the rest cannot be
-    drawn. Note the boundary is exclusive: raising ``top_p`` to 0.9 would keep
-    the third token, since 0.9 is not greater than 0.9.
+    The mass *before* each token here is about ``[0, 0.6, 0.9, 0.97]``. At
+    ``top_p = 0.85`` the third token is above the threshold by a wide margin, so
+    only the first two survive.
     """
 
     probabilities = torch.tensor([0.6, 0.3, 0.07, 0.03])
@@ -122,20 +121,51 @@ def test_nucleus_keeps_only_the_top_p_head() -> None:
     assert set(guesses.tolist()) == {0, 1}
 
 
-def test_the_nucleus_boundary_is_exclusive() -> None:
-    """A token sitting exactly on the threshold is kept, not dropped.
+def test_nucleus_keeps_a_token_below_the_threshold() -> None:
+    """The same distribution, with the third token comfortably inside.
 
-    This mirrors the reference LLaMA rule, where the comparison is against the
-    mass strictly preceding a token.
+    Its preceding mass of about 0.9 is below ``top_p = 0.92``, so it becomes
+    reachable while the fourth token stays excluded.
     """
 
     probabilities = torch.tensor([0.6, 0.3, 0.07, 0.03])
     logits = probabilities.log().unsqueeze(0).repeat(600, 1)
     generator = torch.Generator().manual_seed(11)
 
-    guesses = nucleus_guess_ids(logits, temperature=1.0, top_p=0.9, generator=generator)
+    guesses = nucleus_guess_ids(logits, temperature=1.0, top_p=0.92, generator=generator)
 
     assert set(guesses.tolist()) == {0, 1, 2}
+
+
+def test_the_nucleus_boundary_is_exclusive() -> None:
+    """A token whose preceding mass equals top_p exactly is kept, not dropped.
+
+    This mirrors the reference LLaMA rule, where the comparison is against the
+    mass strictly preceding a token.
+
+    The construction matters. Recovering probabilities through ``log`` and
+    ``softmax`` cannot test an exact boundary: rebuilding ``[0.6, 0.3, ...]``
+    that way yields a preceding mass near 0.9 that lands a few units in the last
+    place on either side of it, differing between float32 backends, so the
+    outcome would be arbitrary rather than wrong.
+
+    Uniform logits avoid that entirely. ``exp(0)`` is exactly 1, the sum is
+    exactly 4, and ``1/4`` is exact in binary floating point, so the preceding
+    masses are exactly ``[0, 0.25, 0.5, 0.75]``. With ``top_p = 0.5`` the third
+    token sits precisely on the threshold and must survive, leaving three
+    reachable tokens rather than two.
+
+    The assertion counts reachable tokens instead of naming them, because the
+    probabilities are tied and which IDs occupy the kept head depends on the
+    sort's tie ordering.
+    """
+
+    logits = torch.zeros(600, 4)
+    generator = torch.Generator().manual_seed(11)
+
+    guesses = nucleus_guess_ids(logits, temperature=1.0, top_p=0.5, generator=generator)
+
+    assert len(set(guesses.tolist())) == 3
 
 
 def test_nucleus_always_keeps_the_most_probable_token() -> None:
