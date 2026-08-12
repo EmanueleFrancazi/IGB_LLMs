@@ -1048,9 +1048,29 @@ support, never renumbered.
 | File | Shows |
 |---|---|
 | `figure0_sampling_adequacy` | ranked split frequencies vs. ranked selected-position targets, with TV and JS |
-| `figure1_ranked_frequency_profiles` | ranked concentration of corpus vs. both policies, with initialization SEM |
+| `figure1_ranked_frequency_profiles` | ranked concentration of corpus vs. both policies, with initialization SEM, plus the uniform-null reference |
 | `figure2_token_wise_mismatch` | same-token `\|q - p\|` ranked after differencing, typical vs. persistent |
 | `figure3_token_identity_scatter` | corpus fraction vs. mean guess fraction, per token, with the identity line |
+| `figure4_input_structure_profiles` | ranked guess concentration under real, shuffled, and Gaussian input, one panel per policy |
+
+### Null comparisons
+
+Two reference families sit alongside the model measurements:
+
+- a **uniform categorical output null** — the same `D` draws over the same eligible
+  support `K`, simulated as a joint multinomial, answering how much ranked structure
+  differs from what finite sampling alone produces. Its envelope is a **Monte Carlo
+  interval**, never a SEM across initializations;
+- an **input-structure comparison** — one initialized model evaluated on real corpus
+  windows, the same token multiset with its ordering destroyed, and Gaussian vectors at the
+  embedding boundary.
+
+The current protocol takes **one nucleus draw per initialization and position** (`R = 1`),
+so greedy and nucleus summarise the same `D` assignments. Within-initialization stochastic
+variance is therefore not estimable and is reported as such rather than as zero.
+
+See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) for the definitions and what each
+contrast can and cannot identify.
 
 One **SVG** per figure — no companion PNG. Dense curves are rasterized inside the SVG, so
 a 32k-token figure stays small while text and axes remain vector.

@@ -107,7 +107,7 @@ fixed corpus + fixed evaluation positions
        ↙                    ↘
    greedy              nucleus sampling
                             ↓
-                 R controlled replicates
+              R controlled replicates (R = 1 now)
        ↘                    ↙
      complete per-token result records
             ↓
@@ -134,9 +134,10 @@ exceeds `top_p`, so the most probable token always survives.
 1. **Position sampling** — removed entirely; positions are deterministic.
 2. **Model initialization** — the quantity under study, and the independent unit
    for every reported standard error.
-3. **Token sampling** — affects only the nucleus policy, driven by its own seed,
-   averaged over replicates *within* an initialization before initializations are
-   compared.
+3. **Token sampling** — affects only the nucleus policy and is driven by its own
+   seed. With `R > 1` it is averaged over replicates *within* an initialization
+   before initializations are compared. The current protocol uses `R = 1`; see
+   §5 for what that does and does not allow.
 
 Sampling draws are pre-drawn and indexed by position, so a streamed measurement
 equals an all-at-once one exactly and the batch size cannot influence a result.
@@ -222,7 +223,144 @@ initializations cannot repair unrepresentative evaluation positions.
 
 ---
 
-## 5. The figures
+## 5. Null comparisons
+
+Two reference families were added after the pilots. Both answer "compared with
+what?", which the model measurements alone cannot.
+
+### The uniform categorical output null
+
+Let `K = V eligible` and let `D` be the evaluated position count. Under the null
+every eligible token is chosen with probability `1/K`, and one realization is
+
+```
+(C_1, ..., C_K) ~ Multinomial(D; 1/K, ..., 1/K),    q_i^null = C_i / D
+```
+
+ranked descending. `M` independent realizations give a mean ranked profile and a
+pointwise **Monte Carlo interval** (95% by default).
+
+**The draw is joint, not marginal.** Each `C_i` is marginally
+`Binomial(D, 1/K)`, but simulating `K` independent binomials would get the ranked
+histogram wrong: the counts are negatively dependent and must sum to exactly `D`.
+Independent binomials do neither, and produce a systematically over-spread
+profile.
+
+`M` is **not** `R`. It is `uniform_null.replicates`, defaults to 256, and is
+persisted with the run. At `K = 31,997` it costs about 0.6 s and ~65 MB of
+transient storage.
+
+**Analytic checks.** For a uniform chooser, exactly:
+
+```
+E[Z]   = K (1 - 1/K)^D                                   zero-frequency count
+E[Z]/K = (1 - 1/K)^D                                     zero-frequency fraction
+E[N_j] = K C(D, j) (1/K)^j (1 - 1/K)^(D-j)               tokens seen exactly j times
+```
+
+These are unit checks on the simulation, never substitutes for it — none of them
+produces a *ranked* profile. Measured agreement at `K = 31,997`, `D = 8192`:
+Monte Carlo 24,769.7 against analytic 24,769.5.
+
+**What it is not.** The null is not a model and has no initializations, so it has
+no initialization SEM. Figure 1 draws it grey and dashed with a hatched band
+labelled "not a SEM" precisely so the two kinds of uncertainty cannot be read as
+the same thing.
+
+### Input-structure conditions
+
+One initialized model, three inputs, evaluated in the same run:
+
+| Condition | Construction |
+|---|---|
+| real | the fixed corpus evaluation windows |
+| shuffled | the **exact same multiset** of evaluated token IDs, globally permuted and reshaped |
+| gaussian | synthetic vectors supplied at the embedding boundary, bypassing token lookup |
+
+The shuffle preserves the position count, the token IDs, their counts, the
+marginal token distribution, the tokenizer, the embedding table, the window
+shapes, and the positional layout. It destroys local ordering and sequential
+correlation, and nothing else. The permutation and the standardized Gaussian bank
+are drawn from dedicated seeds and are **fixed across initializations**, so the
+controls never vary with the weights.
+
+Gaussian vectors are scale-matched per initialization: a standardized bank `Z` is
+drawn once, then `G = mu + sigma * Z` using the realized entry-wise mean and
+standard deviation of *that* initialization's **eligible** embedding rows.
+Structural rows are excluded because real input never looks them up. The measured
+`mu` and `sigma` are persisted per initialization.
+
+**What each contrast can identify:**
+
+| Contrast | Identifies |
+|---|---|
+| real vs shuffled | approximately **sequential ordering**, with everything else held fixed |
+| shuffled vs gaussian | what **discrete token identity** adds once ordering is gone: repeated lookup vectors and unigram structure |
+| real vs gaussian | the broadest contrast, structured tokens against unstructured continuous input |
+
+**real vs gaussian must never be described on its own as a causal test of input
+correlation.** It removes far more than temporal structure.
+
+### R = 1 and common random numbers
+
+The active protocol takes **one** nucleus draw per initialization and position.
+Greedy and nucleus then produce exactly `D` assignments each, so both are
+summarised at the same sample size and neither needs rescaling to be compared
+with the other or with the null.
+
+Consequences, all documented rather than papered over:
+
+- **Within-initialization stochastic variance is not estimable.** It is reported
+  as `not estimated (R=1)` with `None` values, never as a zero that would read as
+  an observed absence of noise.
+- The nucleus SEM across initializations describes the combined
+  **"random initialization + one fixed stochastic sampling realization"**
+  procedure, not initialization variability alone.
+- `R = 1` SEMs are **not** comparable with the historical `R = 4` values in §7.4
+  without noting the protocol change.
+
+Sampling uniforms are drawn from a dedicated seed and indexed by **position
+alone**, so the same position draws the same uniform in every input condition and
+every initialization. That conditions the input comparison on one fixed
+stochastic realization instead of letting sampling noise drift between
+conditions, and it makes the result independent of `forward_batch_size`.
+
+Multi-replicate support and the per-replicate zero-frequency correction (§4)
+remain fully available for historical configurations.
+
+### Paired input-condition measures
+
+Ranked profiles discard token identity, so figure 4 alone cannot say whether two
+conditions prefer *different* tokens. These paired measures answer that, computed
+**within** an initialization and only then averaged:
+
+- `tv_real_vs_shuffled`, `tv_real_vs_gaussian`, `tv_shuffled_vs_gaussian` —
+  same-token total variation between conditions. These are **not** distances to
+  the corpus and are named so they cannot be confused with `TV(corpus, guesses)`.
+- paired differences in effective support, entropy, zero-frequency fraction, and
+  the top1–top2 gap, e.g.
+  `ΔN_eff^{real−shuffle} = N_eff(q_s^real) − N_eff(q_s^shuffle)`.
+
+Pairing matters: the initialization contributes to both terms, so differencing
+first removes it. Comparing two independent mean±SEM intervals instead would
+discard that and inflate the apparent uncertainty.
+
+### Figure 4
+
+`figure4_input_structure_profiles.svg`, two panels (greedy, nucleus), three
+ranked condition profiles each with initialization SEM, using the same ranking
+convention as figure 1 — each condition ranked independently within an
+initialization, then aggregated rank by rank. **Token identity is discarded
+here too**; the paired measures above are what preserve it.
+
+Figures 0–3 keep their roles unchanged and describe the **real** condition only.
+The uniform null is added to figure 1 alone: it is exchangeable across token
+identities, so it belongs with the ranked/concentration comparison and would be
+meaningless on the identity-preserving figures 2 and 3.
+
+---
+
+## 6. The figures
 
 | Figure | Question | Token identity |
 |---|---|---|
@@ -242,13 +380,13 @@ it.
 
 ---
 
-## 6. Observations so far
+## 7. Observations so far
 
 Everything below is **validation and pilot observation**, not a final result.
 Sample sizes were chosen to exercise the machinery, not to support a scientific
 claim.
 
-### 6.1 Character baseline
+### 7.1 Character baseline
 
 Tiny tracked fixture, character tokenizer. `N`=256, `I`=3, `R`=2.
 
@@ -273,7 +411,7 @@ Tiny tracked fixture, character tokenizer. `N`=256, `I`=3, `R`=2.
 Sampling adequacy is good here: with 256 positions over a 39-token vocabulary,
 the selected targets track the split closely.
 
-### 6.2 Realistic subword tokenizer
+### 7.2 Realistic subword tokenizer
 
 `mistralai/Mistral-7B-v0.1`, tokenizer artifacts only, loaded offline from cache
 after a single acquisition. Cache footprint ≈ 2.3 MB; no model weight files
@@ -291,9 +429,9 @@ The gap between 6,181 observed and 768.94 effective is the point: the corpus
 touches about a fifth of the vocabulary, but its mass behaves like roughly 769
 equally likely tokens.
 
-### 6.3 Subword smoke validation — `N`=512
+### 7.3 Subword smoke validation — `N`=512
 
-Deliberately small; **validation only**. `I`=2, `R`=2.
+Deliberately small; **validation only**. `I`=2, **`R`=2 (historical protocol)**.
 
 | Quantity | Value |
 |---|---|
@@ -312,9 +450,13 @@ Deliberately small; **validation only**. `I`=2, `R`=2.
 TV(split, selected) = 0.55 is far too large for any model comparison built on
 these positions to be trusted. That is exactly what figure 0 exists to reveal.
 
-### 6.4 Subword pilot — `N`=8192
+### 7.4 Subword pilot — `N`=8192
 
-`I`=4, `R`=4. **Pilot, not the serious experiment.**
+`I`=4, **`R`=4 (historical protocol)**. **Pilot, not the serious experiment.**
+
+These values were measured under `R = 4` and are kept exactly as observed. Do not
+restate them as though they used `R = 1`, and do not compare their nucleus SEMs
+naively with future `R = 1` runs.
 
 | Quantity | Value |
 |---|---|
@@ -347,7 +489,7 @@ Observations, stated as observations:
 
 ---
 
-## 7. Reproducing
+## 8. Reproducing
 
 Character baseline:
 
@@ -378,8 +520,11 @@ Read a record with `notebooks/initialization_distribution.ipynb`.
 
 ---
 
-## 8. Open items before the serious experiment
+## 9. Open items before the serious experiment
 
+0. **Review and accept the null-model integration** (uniform output null,
+   input-structure conditions, `R = 1`) before anything below is decided on top
+   of it.
 1. **Pin the tokenizer revision.** Currently `revision: null`. The tokenizer now
    determines the vocabulary, the token stream, and therefore every distribution
    being compared, so an unpinned revision undermines reproducibility more than
