@@ -17,57 +17,34 @@ The project avoids treating models as black-box imports. Model components are im
 
 ## Current phase
 
-The repository is currently in **Phase 6: Experiment Persistence and Checkpointing**.
+**Phase 6 (Experiment Persistence and Checkpointing) is complete.**
 
-Phase 6 builds directly on the Phase 5 initialization analysis, which remains available unchanged. The analysis can now optionally record a complete, reproducible experiment run instead of printing only.
+Current work is a **pre-Phase-7 research extension**: an initialization-distribution
+experiment measuring how a randomly initialized model's token guesses compare with the
+corpus token distribution. **Phase 7 (training) has not started.**
 
-Previous phases added:
+Earlier phases established the package structure, a shared model interface and registry,
+an explicit LLaMA-style decoder-only model, a character tokenizer with train/validation
+splitting and causal LM batching, inference utilities, initialization-time output and
+gradient diagnostics, a config-driven multi-dataset layer with local-first resolution, and
+structured experiment runs with metrics, array artifacts, and checkpoints.
 
-- a modular package structure
-- a shared model interface
-- a model registry
-- utility functions for seeding, device selection, and parameter counting
-- a LLaMA-style decoder-only model scaffold
-- a LLaMA model sanity-check script
-- a small local text corpus
-- a deterministic character-level tokenizer
-- train/validation token splitting
-- causal language-model batch creation
-- a data-to-model compatibility script
-- inference utilities for prompt encoding, logits inspection, top-k predictions, greedy decoding, sampling, and short generation
+The model remains **untrained** throughout. None of this measures language quality.
 
-Phase 5 added:
+### The initialization-distribution experiment
 
-- output-distribution statistics for the untrained model
-- entropy and probability-concentration summaries
-- top-k prediction examples at selected positions
-- empirical token-frequency computation from the tiny corpus
-- comparison between average model probabilities and empirical token frequencies
-- largest positive and negative probability-frequency gaps
-- top-1 predicted-token frequency summaries
-- simple KL and Jensen-Shannon divergence summaries
-- an optional per-layer squared L2 gradient-norm diagnostic
-- a log-linear gradient trend fit across model depth
-- lightweight JSON/CSV saving for gradient-norm results
-- runnable analysis scripts and tests
+At random initialization, how do the distributions of the model's **selected token
+guesses** compare with the empirical token distribution of the corpus — in overall
+concentration and token by token — and how stable is that across independent
+initializations?
 
-The model is still untrained. Phase 5 does **not** measure language quality. It establishes reproducible baseline signals for how the randomly initialized model behaves before any optimization.
+Everything except the model-initialization seed is held fixed: corpus, tokenizer,
+vocabulary, analysis split, and the evaluation positions themselves. Two policies read the
+same logits — greedy `argmax`, and temperature/top-p nucleus sampling with its own
+sampling seed and replicates averaged within an initialization.
 
-Phase 6 adds:
-
-- structured experiment runs created under an output root
-- collision-safe run identifiers, so an existing run is never silently overwritten
-- immutable run metadata recording phase, seed, tags, device, model, dataset, Git commit, and environment
-- YAML snapshots of the model, data, and experiment configs actually used
-- append-only scalar metric logging in JSON Lines format
-- array-valued diagnostics stored as compressed NumPy archives and referenced from the metric records
-- model checkpoint saving and loading, including an initialized step-zero checkpoint
-- latest-checkpoint discovery through a lightweight pointer file
-- checkpoint restoration that defaults to CPU device mapping
-- optional structured persistence for the initialization analysis through `--persist-run`
-- an experiment-tracking smoke-test script
-
-Phase 6 stores results; it does not train. Optimizer, scheduler, and training-loop work begins in Phase 7.
+[`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) is the authoritative scientific
+document: every definition, every measure, and the validated baseline and pilot history.
 
 ## Repository structure
 
@@ -99,6 +76,9 @@ IGB_LLMs/
     check_experiment_tracking.py
     prepare_dataset.py
     run_initialization_distribution_experiment.py
+
+  docs/
+    EXPERIMENT_LOG.md
 
   notebooks/
     initialization_distribution.ipynb
@@ -141,6 +121,7 @@ IGB_LLMs/
         checkpoints.py
         config.py
         metrics.py
+        naming.py
         run.py
         serialization.py
 
@@ -185,6 +166,7 @@ IGB_LLMs/
     test_analysis_records.py
     test_analysis_aggregation.py
     test_analysis_figures.py
+    test_experiment_naming.py
 
   pyproject.toml
   README.md
@@ -197,6 +179,7 @@ IGB_LLMs/
 | `configs/` | YAML files controlling model size, data source, batching, seed, device, experiment persistence, and experiment protocols. |
 | `data/` | Local raw/downloaded datasets for smoke tests, inference checks, and initialization analysis.. See [`data/README.md`](data/README.md) for dataset-source details, config usage, and data-pipeline commands. |
 | `scripts/` | Runnable entry points for sanity checks, inference, initialization analysis, and experiment-tracking checks. See [`scripts/README.md`](scripts/README.md) for the script-by-script guide, options, and expected outputs. |
+| `docs/` | The scientific experiment log. See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md). |
 | `notebooks/` | Readable scientific logs that load a persisted experiment record and explain it. Computation lives in the package, not in cells. See [`notebooks/README.md`](notebooks/README.md). |
 | `src/` | Reusable Python package code. See [`src/README.md`](src/README.md) for source-module navigation and extension guidance. |
 | `tests/` | Lightweight tests covering imports, model shapes, data pipeline, inference, evaluation, gradient norms, experiment persistence, and the persisted-analysis workflow. See [`tests/README.md`](tests/README.md) for detailed test-suite guidance. |
@@ -1024,6 +1007,35 @@ setting is recorded with the results.
 
 Both read the **same** logits, so they describe one model state rather than two draws.
 
+### Tokenizers
+
+| | Character | Pretrained subword |
+|---|---|---|
+| vocabulary | derived from the corpus (39–147 observed) | Hugging Face, 32,000 for Mistral |
+| dependency | none | `transformers`, optional `[tokenizers]` extra |
+| artifacts | none | cached in `<data_root>/tokenizers/`, outside the repository |
+
+Both sit behind one small interface, selected by `tokenizer.type` in the data config.
+Character is the default, so existing configs are unaffected.
+
+Tokenizer loading tries the local cache first, so a cached tokenizer works fully offline;
+acquisition requires explicit permission and is announced before any network use. **Only
+tokenizer files are ever fetched** — no model weights, enforced by a test.
+
+### Support nomenclature
+
+Four quantities that a 32k vocabulary makes genuinely different:
+
+| Quantity | Meaning |
+|---|---|
+| `V` full | tokens the tokenizer defines |
+| `V` eligible | tokens a model may be scored on, after excluding structural IDs |
+| `V` corpus-observed | tokens that actually occur in the analysis split |
+| effective support `exp(H)` | entropy-equivalent number of equally likely active tokens |
+
+Only the first three are counts. Structural tokens are excluded from the predictive
+support, never renumbered.
+
 ### Two empirical references
 
 | Distribution | Role |
@@ -1040,8 +1052,40 @@ Both read the **same** logits, so they describe one model state rather than two 
 | `figure2_token_wise_mismatch` | same-token `\|q - p\|` ranked after differencing, typical vs. persistent |
 | `figure3_token_identity_scatter` | corpus fraction vs. mean guess fraction, per token, with the identity line |
 
-Written under `outputs/initialization_distribution/<run_id>/figures/` as PNG and SVG.
+One **SVG** per figure — no companion PNG. Dense curves are rasterized inside the SVG, so
+a 32k-token figure stays small while text and axes remain vector.
+
 `outputs/` is ignored by Git, so results never enter the repository.
+
+### Run directories
+
+Run directories carry their own identity, so a listing is readable without opening
+`metadata.json`:
+
+```text
+<timestamp>__<dataset>__<tokenizer>__<model>__N<positions>-I<inits>-R<replicates>__<code>
+```
+
+```text
+20260812-140112__tiny-local-text__char-39__llama-tiny-256__N256-I3-R2__ef0cd1b9
+20260812-140112__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N8192-I4-R4__9bb2a015
+```
+
+Every component is derived from resolved runtime metadata. Only the axes worth scanning
+for are included; temperature, top-p, seeds, block size, and revisions stay in
+`metadata.json` and the config snapshots. The trailing code keeps two runs in the same
+second distinct.
+
+Each run holds:
+
+```text
+<run>/
+  analyses/   complete per-token record (.npz) + scalar summary (.json)
+  figures/    four SVGs
+  config/     verbatim model/data/experiment snapshots
+  metrics/    JSONL scalar metrics
+  metadata.json
+```
 
 ### Realistic subword tokenizer
 
