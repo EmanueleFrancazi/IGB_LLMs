@@ -251,7 +251,9 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             if args.forward_batch_size is not None
             else runtime.get("forward_batch_size", 32)
         ),
-        "common_random_numbers": bool(sampling.get("common_random_numbers", True)),
+        # Absent from a historical config means the historical per-initialization
+        # stream. The current protocol selects the new behaviour explicitly.
+        "common_random_numbers": bool(sampling.get("common_random_numbers", False)),
         "uniform_null_enabled": bool(null.get("enabled", True)) and not args.no_uniform_null,
         "uniform_null_seed": int(null.get("seed", 20260812)),
         "uniform_null_replicates": int(null.get("replicates", DEFAULT_NULL_REPLICATES)),
@@ -368,15 +370,25 @@ def main() -> None:
         common_random_numbers=protocol["common_random_numbers"],
     )
     sampling.validate()
-    if protocol["input_structure_enabled"] and sampling.num_replicates != 1:
-        # Fail rather than silently reinterpreting the request: the paired
-        # comparison is defined at one stochastic realization per position.
-        raise ValueError(
-            "The input-structure comparison requires exactly one nucleus replicate "
-            f"(R=1), but the protocol asks for R={sampling.num_replicates}. Set "
-            "sampling.num_replicates to 1, or disable the comparison with "
-            "--no-input-structure."
-        )
+    if protocol["input_structure_enabled"]:
+        # Fail rather than silently reinterpreting the request. The paired
+        # comparison is defined at one stochastic realization per position, held
+        # fixed across conditions; overriding either half would quietly change
+        # what was measured.
+        if sampling.num_replicates != 1:
+            raise ValueError(
+                "The input-structure comparison requires exactly one nucleus replicate "
+                f"(R=1), but the protocol asks for R={sampling.num_replicates}. Set "
+                "sampling.num_replicates to 1, or disable the comparison with "
+                "--no-input-structure."
+            )
+        if not sampling.common_random_numbers:
+            raise ValueError(
+                "The input-structure comparison requires common random numbers, so every "
+                "input condition sees the same sampling draws, but the protocol has "
+                "sampling.common_random_numbers disabled. Set it to true, or disable the "
+                "comparison with --no-input-structure."
+            )
 
     print("Initialization-distribution experiment")
     print(f"Dataset: {resolved.name} ({resolved.source}, via {resolved.route})")

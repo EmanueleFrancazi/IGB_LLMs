@@ -50,7 +50,13 @@ def _model(vocab_size: int = VOCAB_SIZE, dim: int = 32) -> LlamaForCausalLM:
 
 
 def _settings(**overrides) -> NucleusSamplingSettings:
-    fields = {"temperature": 0.6, "top_p": 0.9, "seed": 555, "num_replicates": 1}
+    fields = {
+        "temperature": 0.6,
+        "top_p": 0.9,
+        "seed": 555,
+        "num_replicates": 1,
+        "common_random_numbers": True,
+    }
     fields.update(overrides)
     return NucleusSamplingSettings(**fields)
 
@@ -419,3 +425,189 @@ def test_the_canonical_condition_order_is_stable() -> None:
     """Records, figures, and console output all rely on it."""
 
     assert INPUT_CONDITIONS == ("real", "shuffled", "gaussian")
+
+
+# -- protocol resolution and backward compatibility -----------------------
+#
+# The generic defaults on NucleusSamplingSettings are backward-compatible, not
+# the current protocol. A configuration written before the null-model
+# integration omits both new fields, and must keep meaning exactly what it meant
+# then. The protocol is selected by the shipped experiment config naming its
+# values explicitly.
+
+import argparse  # noqa: E402
+import importlib.util  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import yaml  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _experiment_script():
+    """Import the experiment script the way the other script tests do."""
+
+    path = REPO_ROOT / "scripts" / "run_initialization_distribution_experiment.py"
+    spec = importlib.util.spec_from_file_location("initialization_distribution_script", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _args(**overrides) -> argparse.Namespace:
+    fields = {
+        "num_initializations": None,
+        "num_windows": None,
+        "block_size": None,
+        "num_replicates": None,
+        "split": None,
+        "forward_batch_size": None,
+        "no_uniform_null": False,
+        "no_input_structure": False,
+    }
+    fields.update(overrides)
+    return argparse.Namespace(**fields)
+
+
+def test_the_generic_defaults_are_the_historical_ones() -> None:
+    """A config predating this integration must not change meaning.
+
+    Before the null-model work the class default was 8 replicates and the
+    sampling stream was mixed with the model seed. Both are preserved, so
+    inheriting a default can never silently select the new protocol.
+    """
+
+    settings = NucleusSamplingSettings()
+
+    assert settings.num_replicates == 8
+    assert settings.common_random_numbers is False
+
+
+def test_a_minimal_config_resolves_to_the_historical_protocol() -> None:
+    """An experiment config that omits both new fields keeps its old behaviour."""
+
+    protocol = _experiment_script()._resolve_protocol({"sampling": {"seed": 7}}, _args())
+
+    assert protocol["num_replicates"] == 8
+    assert protocol["common_random_numbers"] is False
+
+
+def test_an_empty_config_resolves_to_the_historical_protocol() -> None:
+    """Including a config with no sampling section at all."""
+
+    protocol = _experiment_script()._resolve_protocol({}, _args())
+
+    assert protocol["num_replicates"] == 8
+    assert protocol["common_random_numbers"] is False
+
+
+def test_the_shipped_experiment_config_selects_the_new_protocol() -> None:
+    """The protocol is chosen explicitly by configuration, not by a default."""
+
+    config = yaml.safe_load(
+        (REPO_ROOT / "configs" / "experiment" / "initialization_distribution.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert config["sampling"]["num_replicates"] == 1
+    assert config["sampling"]["common_random_numbers"] is True
+
+    protocol = _experiment_script()._resolve_protocol(config, _args())
+    assert protocol["num_replicates"] == 1
+    assert protocol["common_random_numbers"] is True
+
+
+def test_an_explicit_historical_protocol_still_works() -> None:
+    """R>1 with a per-initialization stream remains fully supported."""
+
+    settings = NucleusSamplingSettings(seed=555, num_replicates=4, common_random_numbers=False)
+
+    first = sampling_uniforms(settings, model_seed=1000, num_positions=32)
+    second = sampling_uniforms(settings, model_seed=2000, num_positions=32)
+
+    assert first.shape == (4, 32)
+    assert not torch.equal(first, second)
+
+
+def test_the_historical_seeding_rule_is_unchanged() -> None:
+    """Reproducing a pre-integration stream must give the pre-integration draws.
+
+    The rule was ``(seed + model_seed) * 1_000_003 + replicate``; this pins it so
+    a future refactor cannot quietly renumber historical runs.
+    """
+
+    settings = NucleusSamplingSettings(seed=555, num_replicates=2, common_random_numbers=False)
+
+    produced = sampling_uniforms(settings, model_seed=1000, num_positions=8)
+
+    for replicate in range(2):
+        generator = torch.Generator()
+        generator.manual_seed((555 + 1000) * 1_000_003 + replicate)
+        assert torch.equal(produced[replicate], torch.rand(8, generator=generator))
+
+
+def test_common_random_numbers_ignore_the_model_seed() -> None:
+    """The new protocol's defining property, selected explicitly."""
+
+    settings = NucleusSamplingSettings(seed=555, num_replicates=1, common_random_numbers=True)
+
+    assert torch.equal(
+        sampling_uniforms(settings, model_seed=1000, num_positions=32),
+        sampling_uniforms(settings, model_seed=9999, num_positions=32),
+    )
+
+
+def test_input_structure_requires_one_replicate() -> None:
+    """Failing beats silently reinterpreting which protocol ran."""
+
+    config = {
+        "sampling": {"num_replicates": 4, "common_random_numbers": True},
+        "input_structure": {"enabled": True},
+    }
+
+    protocol = _experiment_script()._resolve_protocol(config, _args())
+
+    assert protocol["input_structure_enabled"] is True
+    assert protocol["num_replicates"] == 4  # resolution does not override the request
+
+
+def test_input_structure_requires_common_random_numbers() -> None:
+    """Both halves of the protocol are required, not just R=1."""
+
+    config = {
+        "sampling": {"num_replicates": 1, "common_random_numbers": False},
+        "input_structure": {"enabled": True},
+    }
+
+    protocol = _experiment_script()._resolve_protocol(config, _args())
+
+    assert protocol["input_structure_enabled"] is True
+    assert protocol["common_random_numbers"] is False
+
+
+def test_forward_batch_size_invariance_holds_under_the_new_protocol() -> None:
+    """The streaming guarantee must survive the default change."""
+
+    seed_everything(11)
+    model = _model()
+    positions = build_evaluation_positions(TOKENS, block_size=8, num_windows=6)
+    settings = NucleusSamplingSettings(seed=555, num_replicates=1, common_random_numbers=True)
+
+    results = [
+        measure_initialization(
+            model,
+            positions,
+            model_seed=11,
+            vocab_size=VOCAB_SIZE,
+            sampling=settings,
+            forward_batch_size=size,
+        )
+        for size in (1, 4, 6)
+    ]
+
+    for other in results[1:]:
+        assert torch.equal(results[0].nucleus_counts, other.nucleus_counts)
+        assert torch.equal(results[0].greedy_counts, other.greedy_counts)

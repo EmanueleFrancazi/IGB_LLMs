@@ -65,25 +65,34 @@ class NucleusSamplingSettings:
     data rather than hard-coded inside the analysis so every persisted result
     records the policy that produced it.
 
-    ``num_replicates`` defaults to **1**, the current protocol: greedy and
-    nucleus each produce exactly one token per evaluated position, so both
-    policies are summarised over the same ``D`` assignments and no rescaling is
-    needed to compare them. Values above 1 remain fully supported for historical
-    configurations, where the per-replicate zero-frequency correction applies.
+    **These generic defaults are backward-compatible, not the current protocol.**
+    They reproduce what a configuration written before the null-model
+    integration meant, so a config that omits either field keeps its historical
+    behaviour: ``num_replicates = 8``, and a sampling stream mixed with the model
+    seed. A scientific protocol is selected by the experiment configuration
+    naming its values explicitly, never by inheriting a class default -- see
+    ``configs/experiment/initialization_distribution.yaml``, which sets
+    ``num_replicates: 1`` and ``common_random_numbers: true``.
+
+    ``num_replicates`` is how many stochastic draws each position gets. At 1,
+    greedy and nucleus each produce exactly ``D`` assignments, so both are
+    summarised at the same sample size. Above 1 the per-replicate zero-frequency
+    correction applies.
 
     ``common_random_numbers`` makes the sampling draws depend on the position
     alone, so every input condition *and* every model initialization sees the
     same underlying uniforms. That is what conditions the input-structure
     comparison on one fixed stochastic realization instead of letting sampling
-    noise move between conditions. Setting it false restores the historical
-    behaviour, where each initialization got its own stream.
+    noise move between conditions. False -- the generic default -- gives each
+    initialization its own stream, which is what every run before this
+    integration did.
     """
 
     temperature: float = 0.6
     top_p: float = 0.9
     seed: int = 20240601
-    num_replicates: int = 1
-    common_random_numbers: bool = True
+    num_replicates: int = 8
+    common_random_numbers: bool = False
 
     def validate(self) -> None:
         if self.temperature <= 0:

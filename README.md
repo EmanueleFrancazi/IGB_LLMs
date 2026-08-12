@@ -1065,8 +1065,10 @@ Two reference families sit alongside the model measurements:
   windows, the same token multiset with its ordering destroyed, and Gaussian vectors at the
   embedding boundary.
 
-The current protocol takes **one nucleus draw per initialization and position** (`R = 1`),
-so greedy and nucleus summarise the same `D` assignments. Within-initialization stochastic
+The current protocol — selected explicitly in
+`configs/experiment/initialization_distribution.yaml`, not inherited from a library
+default — takes **one nucleus draw per initialization and position** (`R = 1`), so greedy
+and nucleus summarise the same `D` assignments. Within-initialization stochastic
 variance is therefore not estimable and is reported as such rather than as zero.
 
 See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) for the definitions and what each

@@ -303,6 +303,13 @@ correlation.** It removes far more than temporal structure.
 
 ### R = 1 and common random numbers
 
+**Selected explicitly by `configs/experiment/initialization_distribution.yaml`**,
+which sets `num_replicates: 1` and `common_random_numbers: true`. The library
+defaults are deliberately the *historical* ones (8 replicates, a
+per-initialization sampling stream), so a configuration written before this
+integration keeps its original meaning rather than silently acquiring a new
+protocol.
+
 The active protocol takes **one** nucleus draw per initialization and position.
 Greedy and nucleus then produce exactly `D` assignments each, so both are
 summarised at the same sample size and neither needs rescaling to be compared
@@ -326,7 +333,8 @@ stochastic realization instead of letting sampling noise drift between
 conditions, and it makes the result independent of `forward_batch_size`.
 
 Multi-replicate support and the per-replicate zero-frequency correction (§4)
-remain fully available for historical configurations.
+remain fully available for historical configurations, and remain what a config
+omitting these fields resolves to.
 
 ### Paired input-condition measures
 
