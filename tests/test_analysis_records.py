@@ -176,3 +176,94 @@ def test_loading_an_incomplete_record_directory_fails_clearly(tmp_path) -> None:
 
     with pytest.raises(FileNotFoundError, match="arrays are missing"):
         load_record(tmp_path)
+
+
+# --- Eligible predictive support (record version 2) ----------------------
+
+
+def test_eligible_token_ids_default_to_the_whole_vocabulary() -> None:
+    """A vocabulary without structural tokens needs no extra bookkeeping."""
+
+    record = _record()
+
+    assert record.eligible_token_ids.tolist() == list(range(VOCAB_SIZE))
+    assert record.eligible_vocab_size == VOCAB_SIZE
+    assert record.special_token_ids.tolist() == []
+
+
+def test_excluded_ids_keep_their_canonical_positions() -> None:
+    """Exclusion removes tokens from the support, never renumbers the rest."""
+
+    record = _record(
+        corpus_counts=np.array([0, 40, 30, 20, 10]),
+        eligible_token_ids=np.array([1, 2, 3, 4]),
+    )
+
+    assert record.vocab_size == 5
+    assert record.eligible_vocab_size == 4
+    assert record.special_token_ids.tolist() == [0]
+    assert record.eligible_mask.tolist() == [False, True, True, True, True]
+
+
+def test_corpus_mass_on_an_excluded_token_is_rejected() -> None:
+    """Structural tokens in the corpus mean the encoding policy was wrong."""
+
+    with pytest.raises(ValueError, match="Excluded token IDs carry corpus counts"):
+        _record(
+            corpus_counts=np.array([5, 40, 30, 20, 10]),
+            eligible_token_ids=np.array([1, 2, 3, 4]),
+        )
+
+
+def test_corpus_observed_support_counts_only_tokens_that_occur() -> None:
+    """Distinct from both the full vocabulary and the eligible support."""
+
+    record = _record(
+        corpus_counts=np.array([0, 40, 30, 0, 0]),
+        eligible_token_ids=np.array([1, 2, 3, 4]),
+    )
+
+    assert record.corpus_observed_support == 2
+
+
+def test_eligible_support_round_trips(tmp_path) -> None:
+    """The support must survive persistence, or later analysis silently widens."""
+
+    record = _record(
+        corpus_counts=np.array([0, 40, 30, 20, 10]),
+        eligible_token_ids=np.array([1, 2, 3, 4]),
+    )
+    record.save(tmp_path)
+
+    reloaded = load_record(tmp_path)
+
+    assert reloaded.eligible_token_ids.tolist() == [1, 2, 3, 4]
+    assert reloaded.eligible_vocab_size == 4
+
+
+def test_a_version_one_record_loads_with_a_full_support(tmp_path) -> None:
+    """Older records predate exclusion, so every token was eligible.
+
+    Defaulting reproduces their original meaning exactly, which is cheaper and
+    less error-prone than a migration for a format with no structural tokens.
+    """
+
+    record = _record()
+    record.save(tmp_path)
+    archive = tmp_path / "initialization_distribution.npz"
+    arrays = {key: value for key, value in np.load(archive).items()}
+    del arrays["eligible_token_ids"]
+    np.savez_compressed(archive, **arrays)
+
+    reloaded = load_record(tmp_path)
+
+    assert reloaded.eligible_token_ids.tolist() == list(range(VOCAB_SIZE))
+
+
+def test_out_of_range_eligible_ids_are_rejected() -> None:
+    """A malformed support must not silently shrink or widen the comparison."""
+
+    with pytest.raises(ValueError, match="outside the vocabulary"):
+        _record(eligible_token_ids=np.array([0, 1, VOCAB_SIZE]))
+    with pytest.raises(ValueError, match="distinct"):
+        _record(eligible_token_ids=np.array([0, 0, 1]))

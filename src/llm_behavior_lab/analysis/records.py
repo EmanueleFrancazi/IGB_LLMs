@@ -33,8 +33,10 @@ __all__ = [
     "load_record",
 ]
 
-#: Bumped only when the array set or its meaning changes incompatibly.
-RECORD_VERSION = 1
+#: Version 2 added ``eligible_token_ids``. A version 1 record loads unchanged:
+#: it predates special-token exclusion, so every token was eligible, which is
+#: exactly the default applied when the array is absent.
+RECORD_VERSION = 2
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -45,6 +47,9 @@ _ARRAY_NAMES = (
     "mean_predicted_probabilities",
     "model_seeds",
 )
+
+#: Present from version 2 onward; defaulted when loading an older record.
+_OPTIONAL_ARRAY_NAMES = ("eligible_token_ids",)
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -98,7 +103,14 @@ class InitializationExperimentRecord:
     ``nucleus_counts``              ``[S,R,V]``sampled guesses, per replicate
     ``mean_predicted_probabilities````[S,V]``  mean predictive mass, *not* guesses
     ``model_seeds``                 ``[S]``    initialization seed per row
+    ``eligible_token_ids``          ``[E]``    canonical IDs forming the
+                                               predictive support
     ==============================  =========  ====================================
+
+    Three vocabulary sizes must not be confused, and the record keeps all three
+    recoverable: the **full** vocabulary ``V``, the **eligible** predictive
+    support ``E`` after removing structural tokens, and the **corpus-observed**
+    support, the eligible tokens that actually occur.
     """
 
     token_ids: np.ndarray
@@ -108,6 +120,7 @@ class InitializationExperimentRecord:
     nucleus_counts: np.ndarray
     mean_predicted_probabilities: np.ndarray
     model_seeds: np.ndarray
+    eligible_token_ids: np.ndarray
     metadata: dict[str, Any]
 
     def __post_init__(self) -> None:
@@ -144,6 +157,36 @@ class InitializationExperimentRecord:
         if recorded is None:
             return ()
         return tuple(str(token) for token in recorded)
+
+    @property
+    def eligible_vocab_size(self) -> int:
+        """Size of the predictive support, after excluding structural tokens."""
+
+        return int(self.eligible_token_ids.shape[0])
+
+    @property
+    def eligible_mask(self) -> np.ndarray:
+        """Boolean ``[V]`` mask selecting the predictive support."""
+
+        mask = np.zeros(self.vocab_size, dtype=bool)
+        mask[self.eligible_token_ids] = True
+        return mask
+
+    @property
+    def special_token_ids(self) -> np.ndarray:
+        """Canonical IDs excluded from the predictive support."""
+
+        return np.flatnonzero(~self.eligible_mask)
+
+    @property
+    def corpus_observed_support(self) -> int:
+        """Eligible tokens that actually occur in the analysis split.
+
+        Distinct from both the full vocabulary and the eligible support: a 32k
+        subword vocabulary will contain many tokens a modest corpus never uses.
+        """
+
+        return int((self.corpus_counts[self.eligible_mask] > 0).sum())
 
     # -- distributions ---------------------------------------------------
 
@@ -229,6 +272,22 @@ class InitializationExperimentRecord:
         if len(set(self.model_seeds.tolist())) != num_inits:
             raise ValueError("model_seeds must be distinct; repeats are not independent.")
 
+        if self.eligible_token_ids.ndim != 1 or self.eligible_token_ids.shape[0] == 0:
+            raise ValueError("eligible_token_ids must be a non-empty one-dimensional array.")
+        if self.eligible_token_ids.shape[0] > vocab_size:
+            raise ValueError("eligible_token_ids cannot exceed the vocabulary size.")
+        if int(self.eligible_token_ids.min()) < 0 or int(self.eligible_token_ids.max()) >= vocab_size:
+            raise ValueError("eligible_token_ids contain values outside the vocabulary.")
+        if len(set(self.eligible_token_ids.tolist())) != self.eligible_token_ids.shape[0]:
+            raise ValueError("eligible_token_ids must be distinct.")
+        excluded = np.setdiff1d(np.arange(vocab_size), self.eligible_token_ids)
+        if excluded.size and int(self.corpus_counts[excluded].sum()) != 0:
+            raise ValueError(
+                "Excluded token IDs carry corpus counts, so the empirical distribution "
+                "and the predictive support disagree. Corpus encoding must not emit "
+                "structural tokens."
+            )
+
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
             raise ValueError("metadata['tokens'] must have one entry per valid token ID.")
@@ -241,7 +300,9 @@ class InitializationExperimentRecord:
         """
 
         directory = Path(directory)
-        arrays = {field: getattr(self, field) for field in _ARRAY_NAMES}
+        arrays = {
+            field: getattr(self, field) for field in _ARRAY_NAMES + _OPTIONAL_ARRAY_NAMES
+        }
         _atomic_write_bytes(
             directory / f"{name}.npz",
             lambda path: np.savez_compressed(path, **arrays),
@@ -268,10 +329,14 @@ class InitializationExperimentRecord:
         missing = sorted(set(_ARRAY_NAMES) - set(arrays))
         if missing:
             raise ValueError("Record is missing array(s): " + ", ".join(missing))
-        return cls(
-            **{name: np.asarray(arrays[name]) for name in _ARRAY_NAMES},
-            metadata=dict(metadata),
-        )
+        loaded = {name: np.asarray(arrays[name]) for name in _ARRAY_NAMES}
+        if "eligible_token_ids" in arrays:
+            eligible = np.asarray(arrays["eligible_token_ids"])
+        else:
+            # Version 1 predates special-token exclusion: every token was
+            # eligible, so defaulting preserves the original meaning exactly.
+            eligible = np.arange(loaded["token_ids"].shape[0])
+        return cls(**loaded, eligible_token_ids=eligible, metadata=dict(metadata))
 
     @classmethod
     def build(
@@ -284,10 +349,21 @@ class InitializationExperimentRecord:
         mean_predicted_probabilities: np.ndarray,
         model_seeds: Sequence[int] | np.ndarray,
         metadata: Mapping[str, Any],
+        eligible_token_ids: Sequence[int] | np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
-        """Assemble a record, deriving the canonical ``token_ids`` axis."""
+        """Assemble a record, deriving the canonical ``token_ids`` axis.
+
+        ``eligible_token_ids`` defaults to the whole vocabulary, which is the
+        correct answer for a character tokenizer and for any vocabulary without
+        structural tokens.
+        """
 
         corpus = np.asarray(corpus_counts)
+        eligible = (
+            np.arange(corpus.shape[0])
+            if eligible_token_ids is None
+            else np.asarray(eligible_token_ids)
+        )
         return cls(
             token_ids=np.arange(corpus.shape[0]),
             corpus_counts=corpus,
@@ -296,6 +372,7 @@ class InitializationExperimentRecord:
             nucleus_counts=np.asarray(nucleus_counts),
             mean_predicted_probabilities=np.asarray(mean_predicted_probabilities),
             model_seeds=np.asarray(model_seeds),
+            eligible_token_ids=eligible,
             metadata=dict(metadata),
         )
 

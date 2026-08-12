@@ -29,7 +29,11 @@ import numpy as np
 __all__ = [
     "MeanWithError",
     "PolicySummary",
+    "ZeroFrequency",
+    "corpus_observed_zero_guess_counts",
     "effective_support",
+    "effective_supports",
+    "eligible_view",
     "js_divergence",
     "mean_with_sem",
     "persistent_absolute_gaps",
@@ -39,6 +43,9 @@ __all__ = [
     "shannon_entropy",
     "summarize_policy",
     "token_wise_absolute_gaps",
+    "policy_zero_frequency",
+    "pooled_nucleus_zero_frequency",
+    "support_summary",
     "top_two_gap",
     "total_variation_distance",
     "within_initialization_sampling_spread",
@@ -46,6 +53,19 @@ __all__ = [
 ]
 
 _EPS = 1e-12
+
+
+def eligible_view(record: Any, array: np.ndarray) -> np.ndarray:
+    """Restrict a token-indexed array to the predictive support.
+
+    Structural tokens carry no corpus mass and can never be guessed, so leaving
+    them in would pad every ranked profile with a tail of zeros and inflate the
+    apparent vocabulary. Restricting keeps the statistics on the support the
+    model is actually scored over. Canonical IDs are untouched; this is a view
+    for computing, not a renumbering.
+    """
+
+    return np.asarray(array)[..., record.eligible_mask]
 
 
 @dataclass(frozen=True)
@@ -244,19 +264,174 @@ def within_initialization_sampling_spread(record: Any) -> dict[str, float]:
 
 
 @dataclass(frozen=True)
+class ZeroFrequency:
+    """How much of the eligible vocabulary a policy never selected.
+
+    Comparable across policies only when both are measured over the **same
+    number of draws**, which is what :func:`policy_zero_frequency` guarantees.
+    """
+
+    counts: np.ndarray
+    fractions: np.ndarray
+    draws_per_measurement: int
+    eligible_vocab_size: int
+
+
+def _zero_counts(counts: np.ndarray) -> np.ndarray:
+    """Count zero entries along the last axis."""
+
+    return (np.asarray(counts) == 0).sum(axis=-1)
+
+
+def policy_zero_frequency(record: Any, policy: str) -> ZeroFrequency:
+    """Zero-frequency support for one policy, measured at ``N`` draws.
+
+    Greedy makes exactly one selection per evaluation position, so it has ``N``
+    draws. A single nucleus replicate also has ``N`` draws, but the ``R``
+    replicates *pooled* have ``R*N``, and more draws mean more chances to reach
+    a rare token. Pooling therefore flatters nucleus coverage and makes the two
+    policies incomparable -- badly so at a 32k vocabulary, where zero-frequency
+    counts are dominated by how many draws were available.
+
+    The nucleus value returned here is the **per-replicate** one: each replicate
+    is scored on its own ``N`` draws and the counts are averaged within the
+    initialization. Both policies are then measured at the same sample size.
+    :func:`pooled_nucleus_zero_frequency` keeps the pooled figure available as a
+    separately named coverage diagnostic.
+
+    Returns:
+        One :class:`ZeroFrequency` with per-initialization counts and fractions.
+    """
+
+    eligible_size = record.eligible_vocab_size
+    draws = int(record.metadata.get("num_positions", 0))
+
+    if policy == "greedy":
+        counts = _zero_counts(eligible_view(record, record.greedy_counts)).astype(np.float64)
+    elif policy == "nucleus":
+        # [S, R] -> mean over replicates -> [S]. Averaging counts, not counting
+        # zeros of an average, is the whole correction.
+        per_replicate = _zero_counts(eligible_view(record, record.nucleus_counts))
+        counts = per_replicate.astype(np.float64).mean(axis=1)
+    else:
+        raise ValueError(f"Unknown policy {policy!r}; expected 'greedy' or 'nucleus'.")
+
+    return ZeroFrequency(
+        counts=counts,
+        fractions=counts / eligible_size,
+        draws_per_measurement=draws,
+        eligible_vocab_size=eligible_size,
+    )
+
+
+def pooled_nucleus_zero_frequency(record: Any) -> ZeroFrequency:
+    """Eligible tokens never selected by **any** nucleus replicate.
+
+    A coverage diagnostic over ``R*N`` pooled draws. Useful for asking what the
+    policy can reach given more attempts, and **not** comparable with the greedy
+    figure, which has ``N``. Never display the two side by side; use
+    :func:`policy_zero_frequency` for the headline comparison.
+    """
+
+    pooled = eligible_view(record, record.nucleus_counts).sum(axis=1)
+    counts = _zero_counts(pooled).astype(np.float64)
+    return ZeroFrequency(
+        counts=counts,
+        fractions=counts / record.eligible_vocab_size,
+        draws_per_measurement=int(record.metadata.get("num_positions", 0))
+        * record.num_replicates,
+        eligible_vocab_size=record.eligible_vocab_size,
+    )
+
+
+def corpus_observed_zero_guess_counts(record: Any, policy: str) -> np.ndarray:
+    """Eligible tokens that occur in the corpus but were never guessed.
+
+    A secondary diagnostic. The headline zero-frequency statistic is taken over
+    the whole eligible support, because it describes the breadth of the model's
+    guess distribution; this one asks the narrower question of how much of the
+    text the model never proposes. With a 32k vocabulary the two differ a lot,
+    since most of the vocabulary never appears in a modest corpus.
+    """
+
+    observed = eligible_view(record, record.corpus_counts) > 0
+    if policy == "greedy":
+        guessed = eligible_view(record, record.greedy_counts) > 0
+    elif policy == "nucleus":
+        guessed = eligible_view(record, record.nucleus_counts).sum(axis=1) > 0
+    else:
+        raise ValueError(f"Unknown policy {policy!r}; expected 'greedy' or 'nucleus'.")
+    return (observed[None, :] & ~guessed).sum(axis=1).astype(np.float64)
+
+
+def effective_supports(record: Any, policy: str) -> np.ndarray:
+    """Per-initialization effective support ``exp(H(q))`` of the guess frequencies."""
+
+    guesses = eligible_view(record, record.policy_fractions(policy))
+    return np.array([effective_support(row) for row in guesses])
+
+
+def support_summary(record: Any) -> dict[str, Any]:
+    """The vocabulary sizes and effective supports, kept distinct.
+
+    Four different questions, four different numbers:
+
+    * ``vocab_size`` -- how many tokens the tokenizer defines;
+    * ``eligible_vocab_size`` -- how many a model may be scored on;
+    * ``corpus_observed_support`` -- how many actually occur in the split;
+    * ``corpus_effective_support`` -- how broadly the corpus mass is spread.
+
+    The last is not a count of anything. ``exp(H)`` is the size of a uniform
+    distribution with the same entropy, so it can be far below the observed
+    support when a few tokens dominate.
+    """
+
+    corpus = eligible_view(record, record.corpus_fractions)
+    selected = eligible_view(record, record.selected_target_fractions)
+    return {
+        "vocab_size": record.vocab_size,
+        "eligible_vocab_size": record.eligible_vocab_size,
+        "excluded_special_token_ids": record.special_token_ids.tolist(),
+        "corpus_observed_support": record.corpus_observed_support,
+        "corpus_effective_support": effective_support(corpus),
+        "selected_effective_support": effective_support(selected),
+        "selected_observed_support": int(
+            (eligible_view(record, record.selected_target_counts) > 0).sum()
+        ),
+    }
+
+
+@dataclass(frozen=True)
 class PolicySummary:
-    """Scalar summary of one guessing policy across initializations."""
+    """Scalar summary of one guessing policy across initializations.
+
+    Every scalar is computed per initialization and only then averaged, so each
+    reported error is the spread across initializations.
+
+    ``zero_frequency_*`` is always the per-replicate comparable figure for
+    nucleus, measured at the same draw count as greedy. The pooled figure lives
+    in ``pooled_zero_frequency_count_mean`` under a name that cannot be mistaken
+    for it.
+    """
 
     policy: str
     num_initializations: int
     num_positions: int
+    eligible_vocab_size: int
     total_variation_mean: float
     total_variation_sem: float
     js_divergence_mean: float
     entropy_mean: float
     effective_support_mean: float
-    zero_guess_tokens_mean: float
-    zero_guess_tokens_sem: float
+    effective_support_sem: float
+    zero_frequency_count_mean: float
+    zero_frequency_count_sem: float
+    zero_frequency_fraction_mean: float
+    zero_frequency_fraction_sem: float
+    zero_frequency_draws: int
+    pooled_zero_frequency_count_mean: float | None
+    pooled_zero_frequency_draws: int | None
+    corpus_observed_zero_guess_mean: float
     top_two_gap_mean: float
     top_two_gap_sem: float
     persistent_gap_max: float
@@ -279,38 +454,57 @@ def _mean_sem(values: np.ndarray) -> tuple[float, float]:
 def summarize_policy(record: Any, policy: str) -> PolicySummary:
     """Compute the scalar summary for one guessing policy.
 
-    Each scalar is computed per initialization first and only then averaged, so
-    the reported error is the spread across initializations.
+    All statistics are taken over the eligible predictive support, so structural
+    tokens neither pad the vocabulary nor count as tokens the model failed to
+    guess.
     """
 
-    guesses = record.policy_fractions(policy)
-    corpus = record.corpus_fractions
+    guesses = eligible_view(record, record.policy_fractions(policy))
+    corpus = eligible_view(record, record.corpus_fractions)
 
     tv = np.array([total_variation_distance(corpus, row) for row in guesses])
     js = np.array([js_divergence(corpus, row) for row in guesses])
     entropy = np.array([shannon_entropy(row) for row in guesses])
-    support = np.array([effective_support(row) for row in guesses])
-    zeros = zero_guess_counts(guesses).astype(np.float64)
+    support = effective_supports(record, policy)
     gaps = np.array([top_two_gap(row) for row in guesses])
+
+    zero = policy_zero_frequency(record, policy)
+    pooled = pooled_nucleus_zero_frequency(record) if policy == "nucleus" else None
 
     typical_gap_max = ranked_profiles(token_wise_absolute_gaps(guesses, corpus))[:, 0]
     persistent = persistent_absolute_gaps(guesses, corpus)
 
     tv_mean, tv_sem = _mean_sem(tv)
-    zero_mean, zero_sem = _mean_sem(zeros)
+    support_mean, support_sem = _mean_sem(support)
+    zero_count_mean, zero_count_sem = _mean_sem(zero.counts)
+    zero_fraction_mean, zero_fraction_sem = _mean_sem(zero.fractions)
     gap_mean, gap_sem = _mean_sem(gaps)
 
     return PolicySummary(
         policy=policy,
         num_initializations=record.num_initializations,
         num_positions=int(record.metadata.get("num_positions", 0)),
+        eligible_vocab_size=record.eligible_vocab_size,
         total_variation_mean=tv_mean,
         total_variation_sem=tv_sem,
         js_divergence_mean=float(js.mean()),
         entropy_mean=float(entropy.mean()),
-        effective_support_mean=float(support.mean()),
-        zero_guess_tokens_mean=zero_mean,
-        zero_guess_tokens_sem=zero_sem,
+        effective_support_mean=support_mean,
+        effective_support_sem=support_sem,
+        zero_frequency_count_mean=zero_count_mean,
+        zero_frequency_count_sem=zero_count_sem,
+        zero_frequency_fraction_mean=zero_fraction_mean,
+        zero_frequency_fraction_sem=zero_fraction_sem,
+        zero_frequency_draws=zero.draws_per_measurement,
+        pooled_zero_frequency_count_mean=(
+            None if pooled is None else float(pooled.counts.mean())
+        ),
+        pooled_zero_frequency_draws=(
+            None if pooled is None else pooled.draws_per_measurement
+        ),
+        corpus_observed_zero_guess_mean=float(
+            corpus_observed_zero_guess_counts(record, policy).mean()
+        ),
         top_two_gap_mean=gap_mean,
         top_two_gap_sem=gap_sem,
         persistent_gap_max=float(persistent.max()),
@@ -321,24 +515,32 @@ def summarize_policy(record: Any, policy: str) -> PolicySummary:
 def sampling_adequacy(record: Any) -> dict[str, Any]:
     """Judge whether the analyzed positions represent the whole split.
 
-    This is a statement about the *corpus sample*, not about the model. A large
-    distance here means the evaluation-position count is too small (or too
-    unevenly placed) for any model comparison built on it to be trusted, and no
-    number of extra initializations repairs that.
+    A statement about the *corpus sample*, not about the model. A large distance
+    here means the evaluation-position count is too small (or too unevenly
+    placed) for any model comparison built on it to be trusted, and no number of
+    extra initializations repairs that.
+
+    Changing the tokenizer invalidates any previous verdict: a subword
+    vocabulary changes the token count, the support, and the frequency
+    structure all at once, so adequacy has to be re-established from scratch.
     """
 
-    corpus = record.corpus_fractions
-    selected = record.selected_target_fractions
-    represented = int((record.selected_target_counts > 0).sum())
+    corpus = eligible_view(record, record.corpus_fractions)
+    selected = eligible_view(record, record.selected_target_fractions)
+    selected_counts = eligible_view(record, record.selected_target_counts)
+    represented = int((selected_counts > 0).sum())
+    summary = support_summary(record)
     return {
         "total_variation_distance": total_variation_distance(corpus, selected),
         "js_divergence": js_divergence(corpus, selected),
-        "num_positions": int(record.selected_target_counts.sum()),
-        "vocab_size": record.vocab_size,
-        "corpus_tokens": int(record.corpus_counts.sum()),
+        "num_positions": int(selected_counts.sum()),
+        "vocab_size": summary["vocab_size"],
+        "eligible_vocab_size": summary["eligible_vocab_size"],
+        "corpus_observed_support": summary["corpus_observed_support"],
+        "corpus_effective_support": summary["corpus_effective_support"],
+        "selected_effective_support": summary["selected_effective_support"],
+        "corpus_tokens": int(eligible_view(record, record.corpus_counts).sum()),
         "tokens_represented_in_selection": represented,
-        "fraction_of_vocabulary_represented": represented / record.vocab_size,
-        "corpus_mass_covered_by_selection": float(
-            corpus[record.selected_target_counts > 0].sum()
-        ),
+        "fraction_of_vocabulary_represented": represented / summary["eligible_vocab_size"],
+        "corpus_mass_covered_by_selection": float(corpus[selected_counts > 0].sum()),
     }
