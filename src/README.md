@@ -77,15 +77,29 @@ The package currently contains:
 src/llm_behavior_lab/
   __init__.py
 
+  analysis/
+    __init__.py
+    aggregation.py
+    figures.py
+    records.py
+
   data/
     __init__.py
+    cli.py
+    config.py
     dataloader.py
+    errors.py
+    huggingface.py
+    prepared.py
+    resolver.py
     text_dataset.py
     tokenizer.py
 
   evaluation/
     __init__.py
     gradient_norms.py
+    guessing.py
+    init_distribution.py
     output_stats.py
     token_frequency.py
     untrained_analysis.py
@@ -523,10 +537,35 @@ Current files:
 src/llm_behavior_lab/evaluation/
   __init__.py
   gradient_norms.py
+  guessing.py
+  init_distribution.py
   output_stats.py
   token_frequency.py
   untrained_analysis.py
 ```
+
+### Guessing policies and the initialization experiment
+
+`guessing.py` turns logits into the token a policy actually **selects**: `greedy_guess_ids`
+takes the argmax, and `nucleus_guess_ids` applies temperature scaling followed by top-p
+truncation, following the reference LLaMA rule (a token is dropped when the cumulative mass
+*strictly before* it exceeds `top_p`, so the most probable token always survives).
+
+`init_distribution.py` runs that comparison across initializations. It chooses evaluation
+positions deterministically with `deterministic_window_starts`, so the same positions are
+reused for every seed and no observed difference can come from looking at different text;
+computes the logits once per initialization; and derives both policies from those same
+logits, replicating the stochastic one so sampling noise can be averaged out within an
+initialization.
+
+Two quantities that are easy to confuse are kept under separate names everywhere:
+
+| Quantity | Meaning |
+|---|---|
+| `mean_predicted_probabilities` | mean predictive mass per token, averaged over positions |
+| guess counts / fractions | how often a policy actually **selected** each token |
+
+They differ sharply at initialization and are never interchangeable.
 
 ### Main responsibilities
 
@@ -589,6 +628,117 @@ save_gradient_norm_result
 ### Scripts using this package
 
 - `scripts/analyze_untrained_model.py`
+
+---
+
+## `llm_behavior_lab.analysis`
+
+The `analysis` package is the **read side** of the project: experiments write records, and
+everything here consumes them.
+
+Current files:
+
+```text
+src/llm_behavior_lab/analysis/
+  __init__.py
+  aggregation.py
+  figures.py
+  records.py
+```
+
+### NumPy-only by design
+
+`records` and `aggregation` depend on NumPy alone, so a finished experiment can be
+re-analyzed without PyTorch and without a GPU. Analysis is revisited far more often than it
+is produced, and the people revisiting it should not need the training stack installed.
+
+`figures` additionally needs `matplotlib` and is therefore **not** imported by
+`analysis/__init__.py`. Install it with `python3 -m pip install -e ".[analysis]"` and import
+the module explicitly.
+
+### Separation of concerns
+
+| Module | Owns | Never does |
+|---|---|---|
+| `records.py` | the persisted format and its validation | compute statistics |
+| `aggregation.py` | every statistic | read or write files |
+| `figures.py` | drawing and file naming | compute a statistic of its own |
+
+A figure can only draw what `aggregation` already returns, so a plot can never disagree
+with the numbers printed beside it. Add a new measure to `aggregation` with a test, then
+use it from a figure.
+
+### The initialization-distribution record
+
+One experiment writes one directory holding `initialization_distribution.npz` (all
+per-token vectors) and `initialization_distribution.json` (the protocol). With `S`
+initializations, `R` sampling replicates, and `V` valid tokens:
+
+| Array | Shape | Meaning |
+|---|---|---|
+| `token_ids` | `[V]` | canonical alignment key; position in every array **is** the token ID |
+| `corpus_counts` | `[V]` | token counts over the whole analysis split |
+| `selected_target_counts` | `[V]` | next-token targets at the analyzed positions only |
+| `greedy_counts` | `[S, V]` | argmax guesses per initialization |
+| `nucleus_counts` | `[S, R, V]` | sampled guesses, per replicate |
+| `mean_predicted_probabilities` | `[S, V]` | mean predictive mass — *not* guesses |
+| `model_seeds` | `[S]` | initialization seed for each row |
+
+Complete vectors are stored rather than the top-N summaries the console analysis prints,
+because a truncated summary cannot answer a question nobody asked yet.
+
+### Distributions the experiment defines
+
+| Symbol | Name | Definition |
+|---|---|---|
+| `p` | whole-split empirical | token counts over the **entire analysis split**, normalized. Validation tokens are excluded when the split is `train`. |
+| `p_selected` | selected-position empirical | next-token targets at exactly the analyzed positions, normalized. A **sampling-adequacy diagnostic**, not a model reference. |
+| `q_greedy[s]` | greedy guess fractions | how often each token was the argmax, for initialization `s` |
+| `q_nucleus[s]` | nucleus guess fractions | as above for the stochastic policy, averaged over replicates within `s` |
+
+### Measures
+
+| Measure | Definition | Reads as |
+|---|---|---|
+| ranked profile | a distribution sorted descending | concentration, token identity discarded |
+| token-wise gap | `\|q[s,i] - p[i]\|`, differenced **before** ranking | mismatch, token identity preserved |
+| persistent gap | `\|E_s[q[s,i]] - p[i]\|` | mismatch that survives averaging over initializations |
+| total variation | `0.5 * sum_i \|p_i - q_i\|`, in `[0, 1]` | overall disagreement |
+| Jensen–Shannon | bounded by `ln 2` | overall disagreement, divergence-flavoured |
+| entropy / effective support | `H(p)` in nats, `exp(H)` in tokens | how many tokens are really in play |
+| zero-guess count | valid tokens never selected | breadth, **strongly** dependent on position count |
+| top-1/top-2 gap | `p_(1) - p_(2)` | how far the leading token leads |
+
+Ranking before differencing would answer a much weaker question — a distribution with the
+corpus frequencies assigned to the *wrong* tokens has an identical ranked profile — so the
+two orderings live in separate functions rather than behind a flag.
+
+### Which variability is which
+
+Three kinds are deliberately not mixed:
+
+1. **Selected-position representativeness** — whether the analyzed positions stand in for
+   the split. Reported by `sampling_adequacy` and figure 0. More initializations cannot
+   repair a bad position set.
+2. **Model-initialization variability** — the SEM shown on every band, computed across
+   independent initializations with `s / sqrt(N)`.
+3. **Stochastic-sampling variability** — replicate-to-replicate noise inside one
+   initialization. Averaged out before initializations are compared, and reported on its own
+   by `within_initialization_sampling_spread`.
+
+The fixed whole-split empirical distribution never carries an initialization SEM: it is one
+distribution, not a sample.
+
+### What the experiment does not measure
+
+Model quality. The model is randomly initialized and has learned nothing. Results describe
+the interaction between an untrained architecture, its initialization scheme, and the
+corpus it is compared against.
+
+### Scripts using this package
+
+- `scripts/run_initialization_distribution_experiment.py`
+- `notebooks/initialization_distribution.ipynb`
 
 ---
 

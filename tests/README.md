@@ -88,6 +88,11 @@ tests/
 | `test_dataset_cli.py` | Shared dataset options and policy construction | Unit tests | `data/cli.py` |
 | `test_dataset_tracking.py` | Dataset contents cannot enter Git | Repository tests | `.gitignore` |
 | `test_migrated_workflows.py` | Migrated scripts still behave as before | End-to-end integration tests | `scripts/*.py` |
+| `test_guessing.py` | Greedy argmax, nucleus truncation rule, sampling reproducibility, support restriction | Unit tests | `evaluation/guessing.py` |
+| `test_init_distribution.py` | Deterministic evaluation positions, seed separation, per-initialization measurement | Unit tests | `evaluation/init_distribution.py` |
+| `test_analysis_records.py` | Record round trip, token alignment, validation | Filesystem/unit tests | `analysis/records.py` |
+| `test_analysis_aggregation.py` | Ranked profiles, same-token gaps, SEM, scalar measures | Unit tests | `analysis/aggregation.py` |
+| `test_analysis_figures.py` | Headless figure generation and deterministic filenames | Filesystem tests | `analysis/figures.py` |
 
 ---
 

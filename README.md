@@ -83,6 +83,7 @@ IGB_LLMs/
     experiment/
       phase6_smoke.yaml
       untrained_baseline.yaml
+      initialization_distribution.yaml
 
   data/
     raw/
@@ -95,10 +96,20 @@ IGB_LLMs/
     analyze_untrained_model.py
     check_experiment_tracking.py
     prepare_dataset.py
+    run_initialization_distribution_experiment.py
+
+  notebooks/
+    initialization_distribution.ipynb
 
   src/
     llm_behavior_lab/
       __init__.py
+
+      analysis/
+        __init__.py
+        aggregation.py
+        figures.py
+        records.py
 
       data/
         __init__.py
@@ -172,9 +183,10 @@ IGB_LLMs/
 
 | Path | Purpose |
 |---|---|
-| `configs/` | YAML files controlling model size, data source, batching, seed, device, and experiment persistence. |
+| `configs/` | YAML files controlling model size, data source, batching, seed, device, experiment persistence, and experiment protocols. |
 | `data/` | Local raw/downloaded datasets for smoke tests, inference checks, and initialization analysis.. See [`data/README.md`](data/README.md) for dataset-source details, config usage, and data-pipeline commands. |
 | `scripts/` | Runnable entry points for sanity checks, inference, initialization analysis, and experiment-tracking checks. See [`scripts/README.md`](scripts/README.md) for the script-by-script guide, options, and expected outputs. |
+| `notebooks/` | Readable scientific logs that load a persisted experiment record and explain it. Computation lives in the package, not in cells. See [`notebooks/README.md`](notebooks/README.md). |
 | `src/` | Reusable Python package code. See [`src/README.md`](src/README.md) for source-module navigation and extension guidance. |
 | `tests/` | Lightweight tests covering imports, model shapes, data pipeline, inference, evaluation, gradient norms, experiment persistence, and the persisted-analysis workflow. See [`tests/README.md`](tests/README.md) for detailed test-suite guidance. |
 
@@ -355,6 +367,7 @@ The `experiment` package implements Phase 6 local persistence. See [`src/README.
 | `scripts/analyze_untrained_model.py` | Analyze initialization-time output behavior, optionally gradient stability, and optionally persist a structured run. | `data.*`, `models.registry`, `evaluation.output_stats`, `evaluation.token_frequency`, `evaluation.untrained_analysis`, `evaluation.gradient_norms`, `experiment.run`, `experiment.config` |
 | `scripts/check_experiment_tracking.py` | Create a run, log metrics and arrays, save a checkpoint, rediscover it, and restore it into a second model. | `experiment.run`, `experiment.config`, `experiment.metrics`, `experiment.arrays`, `experiment.checkpoints`, `models.registry` |
 | `scripts/prepare_dataset.py` | Stage a dataset ahead of time, or report what is missing without obtaining it. | `data.config`, `data.resolver`, `data.cli` |
+| `scripts/run_initialization_distribution_experiment.py` | Measure greedy and nucleus token guesses across several random initializations on fixed evaluation positions. | `data.*`, `models.registry`, `evaluation.guessing`, `evaluation.init_distribution`, `analysis.records`, `analysis.aggregation`, `analysis.figures`, `experiment.run` |
 
 ## Current analysis capabilities
 
@@ -951,6 +964,79 @@ python3 scripts/check_experiment_tracking.py \
   --output-dir /tmp/llm_behavior_lab_runs \
   --run-id smoke_run
 ```
+
+## Run the initialization-distribution experiment
+
+Measures how a randomly initialized model's **selected token guesses** compare with the
+corpus token distribution, and how much that comparison moves when only the initialization
+changes.
+
+> The model is untrained. Nothing this experiment reports is a statement about model
+> quality.
+
+Smoke check on the tracked fixture — fast, fully offline, and **not** scientifically
+meaningful (595 characters, 39 tokens):
+
+```bash
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/tiny_text.yaml \
+  --num-initializations 3 --num-windows 16 --block-size 16 --num-replicates 2
+```
+
+First meaningful experiment, once WikiText-2 has been prepared:
+
+```bash
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/wikitext2.yaml --offline
+```
+
+Figures need the optional extra:
+
+```bash
+python3 -m pip install -e ".[analysis]"
+```
+
+### What is held fixed
+
+Everything except the model-initialization seed: corpus, tokenizer, vocabulary, split, and
+the evaluation positions themselves. Positions are chosen deterministically *before* any
+model exists, so no difference between initializations can come from looking at different
+text. The protocol lives in `configs/experiment/initialization_distribution.yaml` and every
+setting is recorded with the results.
+
+### Two guessing policies, one forward pass
+
+| Policy | Rule | Randomness |
+|---|---|---|
+| greedy | `argmax(logits)` | none beyond the initialization |
+| nucleus | temperature `0.6`, top-p `0.9`, following the reference LLaMA rule | its own seed, replicated and averaged within an initialization |
+
+Both read the **same** logits, so they describe one model state rather than two draws.
+
+### Two empirical references
+
+| Distribution | Role |
+|---|---|
+| whole analysis split | the primary reference the guesses are compared against |
+| selected positions only | a **sampling-adequacy diagnostic** — are the analyzed positions representative of the split at all? |
+
+### Figures
+
+| File | Shows |
+|---|---|
+| `figure0_sampling_adequacy` | ranked split frequencies vs. ranked selected-position targets, with TV and JS |
+| `figure1_ranked_frequency_profiles` | ranked concentration of corpus vs. both policies, with initialization SEM |
+| `figure2_token_wise_mismatch` | same-token `\|q - p\|` ranked after differencing, typical vs. persistent |
+| `figure3_token_identity_scatter` | corpus fraction vs. mean guess fraction, per token, with the identity line |
+
+Written under `outputs/initialization_distribution/<run_id>/figures/` as PNG and SVG.
+`outputs/` is ignored by Git, so results never enter the repository.
+
+Read the results with `notebooks/initialization_distribution.ipynb`, and see
+[`src/README.md`](src/README.md) for the precise definition of every distribution and
+measure.
+
+---
 
 ## Experiment run outputs
 

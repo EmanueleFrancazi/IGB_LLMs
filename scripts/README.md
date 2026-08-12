@@ -50,6 +50,7 @@ scripts/
   analyze_untrained_model.py
   check_experiment_tracking.py
   prepare_dataset.py
+  run_initialization_distribution_experiment.py
 ```
 
 | Script | Type | Phase / feature | Purpose |
@@ -60,6 +61,7 @@ scripts/
 | `analyze_untrained_model.py` | Analysis script | Phase 5 + Phase 6 integration | Computes initialization metrics and optionally persists a structured run. |
 | `check_experiment_tracking.py` | Smoke test | Phase 6 persistence | Creates a run, logs metrics/arrays, saves a checkpoint, restores it, and verifies parameter equality. |
 | `prepare_dataset.py` | Utility | Dataset resolution | Stages a dataset ahead of time, or reports what is missing without obtaining it. |
+| `run_initialization_distribution_experiment.py` | Experiment | Initialization distributions | Measures greedy and nucleus token guesses across several random initializations on fixed evaluation positions, then writes a record and figures. |
 
 ---
 
@@ -726,8 +728,9 @@ The script writes a complete run under `outputs/<experiment-name>/<run-id>/`. `o
 
 ## Dataset options shared by data-consuming scripts
 
-`check_data_pipeline.py`, `run_inference.py`, `analyze_untrained_model.py`, and
-`prepare_dataset.py` all accept the same dataset-resolution options:
+`check_data_pipeline.py`, `run_inference.py`, `analyze_untrained_model.py`,
+`prepare_dataset.py`, and `run_initialization_distribution_experiment.py` all accept the
+same dataset-resolution options:
 
 | Option | Meaning |
 |---|---|
