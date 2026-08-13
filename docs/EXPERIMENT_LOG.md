@@ -557,6 +557,58 @@ sums. `G_i`, `n_i` and `q_i` are derived from them by
 `analysis/gradients.py`, so a later re-aggregation never requires recomputing a
 gradient.
 
+### Figure 8
+
+`figure8_gradient_vs_initial_guess_bias.svg`: one marker per token with
+`n_i > 0`, at `x = G_i` and `y = q_i`, coloured by `p_i`.
+
+Three scale decisions are made from the observed distributions rather than by
+habit, and all three are consequences of what the data actually looks like.
+
+The **y axis is symmetric-log with its linear region ending at one guess**,
+`1/D`. The overwhelming majority of tokens are never greedily guessed, and
+`q_i = 0` is a measured outcome rather than missing data. A plain logarithmic
+axis would delete exactly the tokens the figure exists to display. Because `q_i`
+is a multiple of `1/D`, the only attainable value below the threshold is zero, so
+the linear region is precisely the gap between "never guessed" and "guessed
+once"; a reference line marks it.
+
+The **x axis follows the observed dynamic range** of `G_i`: logarithmic once it
+spans at least a decade, linear otherwise, since a log axis over a half-decade
+spreads noise and hides structure. The choice is printed in the axis label.
+
+The **colour is logarithmic** over positive `p_i`, using a perceptually uniform
+map. Corpus frequency is heavy-tailed; a linear map would collapse everything but
+the few most common tokens into one shade. Nothing is clipped — the normalization
+spans the real minimum and maximum.
+
+Every plotted token necessarily has `p_i > 0`, because an evaluation target is a
+position in the split. The figure still guards the case and states any omission
+rather than silently losing a marker.
+
+### Correlations
+
+Reported beside the figure, over the same tokens it plots:
+
+* Spearman `rho(G_i, q_i)` — the primary quantity;
+* Spearman `rho(G_i, p_i)`;
+* Spearman `rho(q_i, p_i)`.
+
+Rank correlation is tie-corrected with average ranks. That is not a refinement:
+nearly all tokens share the single tie at `q_i = 0`, and ordinal ranking would
+impose an arbitrary order inside that block and report a coefficient partly
+manufactured by the sort. A constant input yields NaN, not zero, because the
+coefficient is undefined rather than absent.
+
+Tokens with `q_i = 0` are **included**. Dropping them would bias the primary
+coefficient toward the tokens the model already favours.
+
+The primary coefficient is deliberately **unweighted**, although `G_i` is a mean
+over `n_i` positions and is far noisier for a token seen once than for one seen a
+hundred times. Weighting answers a different question and would need its own
+justification, so the imprecision is reported instead — as a stratification by
+`n_i` band and a sensitivity sweep over `n_i >= k` — and left visible.
+
 ---
 
 ## 6. The figures

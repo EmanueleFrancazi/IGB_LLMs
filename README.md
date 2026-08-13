@@ -1133,6 +1133,22 @@ This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
 differentiates the *window-averaged* loss with respect to block activations. See
 [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) §5d for the exact definition.
 
+A run carrying gradient data also gets `figure8_gradient_vs_initial_guess_bias.svg`:
+one marker per token with `n_i > 0`, at `x = G_i` and `y = q_i`, coloured by corpus
+frequency. Runs without gradient data produce exactly the figures they did before.
+
+Figures and statistics can be regenerated from a finished record alone — no model,
+no GPU, and nothing recomputed:
+
+```bash
+python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure8
+python3 scripts/render_record_figures.py outputs/<run>/analyses --stats-only
+```
+
+The second form prints the distributions of `G_i`, `q_i`, `p_i` and `n_i` and the
+three Spearman correlations without drawing anything. Neither form imports PyTorch,
+which a test asserts.
+
 See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) for the definitions and what each
 contrast can and cannot identify.
 

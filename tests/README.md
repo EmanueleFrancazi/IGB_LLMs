@@ -96,6 +96,7 @@ tests/
 | `test_temperature_sweep.py` | Multi-temperature sampling, shared sort, canonical equality, config validation, transition metrics | Unit tests | `evaluation/guessing.py`, `analysis/transition.py` |
 | `test_position_gradients.py` | Single-position loss semantics, eligible-support softmax, analytic outer-product check, independent full-parameter reference, model immutability, window isolation, runner flags | Unit tests | `evaluation/position_gradients.py`, experiment script |
 | `test_gradient_aggregation.py` | Optional gradient-array persistence and validation, `G_i`/`n_i`/`q_i` aggregation, subset versus full-run scoping | Unit tests | `analysis/records.py`, `analysis/gradients.py` |
+| `test_gradient_figure.py` | Tie-corrected Spearman, distribution reporting, figure 8 axis and colour normalization, retention of zero-guess tokens, record-only rendering | Unit and filesystem tests | `analysis/gradients.py`, `analysis/figures.py`, `scripts/render_record_figures.py` |
 | `test_experiment_naming.py` | Run-directory naming grammar, slug safety, and tokenizer provenance reporting | Unit tests | `experiment/naming.py`, experiment script |
 | `test_tokenizers.py` | Tokenizer interface, character implementation, pretrained adapter, special-token exclusion, offline load, absence of any model-loading path | Unit tests with fakes | `data/tokenizer.py`, `data/pretrained_tokenizer.py` |
 
