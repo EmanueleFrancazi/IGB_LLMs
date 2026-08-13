@@ -56,6 +56,14 @@ from llm_behavior_lab.analysis.gradients import (
     spearman_rho,
     token_gradient_norms,
 )
+from llm_behavior_lab.analysis.predictive import (
+    PROBABILITY_QUANTILES,
+    REPORTED_RANKS,
+    max_probability_summary,
+    predictive_probability_summary,
+    ranked_probability_profile,
+    target_probability_summary,
+)
 from llm_behavior_lab.analysis.nulls import (
     DEFAULT_NULL_REPLICATES,
     UniformNullSummary,
@@ -88,6 +96,12 @@ __all__ = [
     "InitializationExperimentRecord",
     "TokenGradientSummary",
     "UniformNullSummary",
+    "PROBABILITY_QUANTILES",
+    "REPORTED_RANKS",
+    "max_probability_summary",
+    "predictive_probability_summary",
+    "ranked_probability_profile",
+    "target_probability_summary",
     "gradient_guess_correlations",
     "gradient_guess_table",
     "gradient_observable_summary",

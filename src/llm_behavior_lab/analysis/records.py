@@ -35,11 +35,12 @@ __all__ = [
 
 #: Version 2 added ``eligible_token_ids``. Version 3 added the optional
 #: input-condition counts and the uniform-null profile. Version 5 added the
-#: optional per-position gradient arrays. Older records load unchanged: version 1
+#: optional per-position gradient arrays. Version 6 added the optional raw
+#: predictive-probability diagnostics. Older records load unchanged: version 1
 #: predates special-token exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 5
+RECORD_VERSION = 6
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -82,6 +83,20 @@ _GRADIENT_ARRAY_NAMES = (
     "gradient_position_target_ids",
     "gradient_position_greedy_ids",
     "gradient_position_norms",
+)
+
+#: Version 6 additions: sufficient statistics of the **raw ``T = 1`` predictive
+#: distribution**, before any sampling policy. ``[I, K]`` for the ranked profile
+#: and ``[I, D]`` for the three per-position vectors. Present or absent together.
+#:
+#: The full ``[I, D, K]`` probability tensor is deliberately never stored -- at
+#: 12 initializations, 32768 positions and 31997 eligible tokens it would be
+#: about 50 GiB, against roughly 12 MB for these statistics.
+_PROBABILITY_ARRAY_NAMES = (
+    "predictive_ranked_probabilities",
+    "predictive_max_probabilities",
+    "predictive_target_probabilities",
+    "predictive_target_losses",
 )
 
 
@@ -195,6 +210,15 @@ class InitializationExperimentRecord:
     gradient_position_greedy_ids: np.ndarray | None = None
     #: ``[D_g]`` exact ``|| grad_theta ell_d ||_2`` over all trainable parameters.
     gradient_position_norms: np.ndarray | None = None
+    #: ``[I, K]`` mean probability at each *within-position* rank. Ranked first,
+    #: averaged second -- not the ranking of an aggregate distribution.
+    predictive_ranked_probabilities: np.ndarray | None = None
+    #: ``[I, D]`` probability of the greedy token at each evaluated position.
+    predictive_max_probabilities: np.ndarray | None = None
+    #: ``[I, D]`` probability assigned to the true next token.
+    predictive_target_probabilities: np.ndarray | None = None
+    #: ``[I, D]`` single-position cross-entropy ``-log p_target``.
+    predictive_target_losses: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -322,6 +346,29 @@ class InitializationExperimentRecord:
         """Whether a multi-temperature nucleus sweep was recorded."""
 
         return bool(self.sweep_counts_by_condition) and bool(self.sweep_temperatures)
+
+    @property
+    def has_predictive_probability_analysis(self) -> bool:
+        """Whether raw ``T = 1`` predictive-probability statistics were recorded."""
+
+        return self.predictive_ranked_probabilities is not None
+
+    @property
+    def predictive_probability_protocol(self) -> dict[str, Any]:
+        """What the recorded probabilities are, empty when none were recorded.
+
+        Carries the facts a reader needs to avoid mistaking these for the
+        nucleus distribution: raw logits, eligible support, ``T = 1``, before
+        top-p, before any sampling decision.
+        """
+
+        return dict(self.metadata.get("analysis", {}).get("predictive_probabilities", {}))
+
+    @property
+    def uniform_probability(self) -> float:
+        """``1 / K``: the probability each token gets under an exact uniform."""
+
+        return 1.0 / float(self.eligible_vocab_size)
 
     @property
     def has_position_gradients(self) -> bool:
@@ -509,6 +556,7 @@ class InitializationExperimentRecord:
                 raise ValueError(f"uniform_null[{key!r}] must be one-dimensional.")
 
         self._validate_position_gradients(vocab_size, num_inits)
+        self._validate_predictive_probabilities(num_inits)
 
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
@@ -574,6 +622,86 @@ class InitializationExperimentRecord:
                 f"{num_inits} recorded initializations."
             )
 
+    def _validate_predictive_probabilities(self, num_inits: int) -> None:
+        """Check the optional raw-predictive-probability statistics.
+
+        The invariants are the ones that make the ranked profile meaningful: it
+        must be a genuine descending ranking of a probability vector, and its
+        first rank must agree with the separately stored greedy-token
+        probability. A profile that failed either would look plausible on a plot
+        while describing something else.
+        """
+
+        present = {
+            name: getattr(self, name)
+            for name in _PROBABILITY_ARRAY_NAMES
+            if getattr(self, name) is not None
+        }
+        if not present:
+            return
+        missing = sorted(set(_PROBABILITY_ARRAY_NAMES) - set(present))
+        if missing:
+            raise ValueError(
+                "Predictive-probability arrays are all-or-nothing; missing: "
+                + ", ".join(missing)
+            )
+
+        profile = self.predictive_ranked_probabilities
+        if profile.ndim != 2 or profile.shape[0] != num_inits:
+            raise ValueError(
+                "predictive_ranked_probabilities must have shape "
+                f"[initializations, eligible_vocab]; got {profile.shape}."
+            )
+        if profile.shape[1] != self.eligible_vocab_size:
+            raise ValueError(
+                f"predictive_ranked_probabilities spans {profile.shape[1]} ranks but the "
+                f"eligible support has {self.eligible_vocab_size} tokens."
+            )
+
+        per_position = {
+            name: array
+            for name, array in present.items()
+            if name != "predictive_ranked_probabilities"
+        }
+        num_positions = self.predictive_max_probabilities.shape[1]
+        for name, array in per_position.items():
+            if array.ndim != 2 or array.shape != (num_inits, num_positions):
+                raise ValueError(
+                    f"{name} must have shape [initializations, positions] "
+                    f"({num_inits}, {num_positions}); got {array.shape}."
+                )
+
+        if not np.all(np.isfinite(profile)):
+            raise ValueError("predictive_ranked_probabilities must all be finite.")
+        if np.any(profile < 0.0):
+            raise ValueError("predictive_ranked_probabilities must be non-negative.")
+        # Ranked, so non-increasing by construction. A tiny negative tolerance
+        # absorbs float64 noise without admitting a genuinely unsorted profile.
+        if np.any(np.diff(profile, axis=1) > 1e-12):
+            raise ValueError(
+                "predictive_ranked_probabilities must be non-increasing with rank; "
+                "the profile is ranked within each position before averaging."
+            )
+        totals = profile.sum(axis=1)
+        if not np.allclose(totals, 1.0, rtol=0.0, atol=1e-6):
+            raise ValueError(
+                "Each ranked predictive profile must sum to 1 over the eligible "
+                f"support; got totals in [{totals.min():.9f}, {totals.max():.9f}]."
+            )
+
+        for name in ("predictive_max_probabilities", "predictive_target_probabilities"):
+            array = getattr(self, name)
+            if np.any(array < 0.0) or np.any(array > 1.0):
+                raise ValueError(f"{name} must lie in [0, 1].")
+        rank_one = profile[:, 0]
+        observed = self.predictive_max_probabilities.mean(axis=1)
+        if not np.allclose(rank_one, observed, rtol=1e-6, atol=1e-9):
+            raise ValueError(
+                "Rank 1 of each ranked profile must equal the mean stored maximum "
+                "probability for that initialization; the two disagree, so the "
+                "profile and the per-position statistics describe different data."
+            )
+
     def save(self, directory: str | Path, *, name: str = "initialization_distribution") -> Path:
         """Write the record as ``<name>.npz`` plus ``<name>.json``.
 
@@ -595,10 +723,10 @@ class InitializationExperimentRecord:
             arrays[f"{_SWEEP_COUNTS_PREFIX}{condition}"] = values
         for condition, values in self.sweep_agreement_by_condition.items():
             arrays[f"{_SWEEP_AGREEMENT_PREFIX}{condition}"] = values
-        for gradient_name in _GRADIENT_ARRAY_NAMES:
-            values = getattr(self, gradient_name)
+        for optional_name in _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES:
+            values = getattr(self, optional_name)
             if values is not None:
-                arrays[gradient_name] = values
+                arrays[optional_name] = values
         _atomic_write_bytes(
             directory / f"{name}.npz",
             lambda path: np.savez_compressed(path, **arrays),
@@ -639,9 +767,9 @@ class InitializationExperimentRecord:
                 if key.startswith(prefix)
             }
 
-        gradients = {
+        optional = {
             name: np.asarray(arrays[name])
-            for name in _GRADIENT_ARRAY_NAMES
+            for name in _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES
             if name in arrays
         }
 
@@ -654,7 +782,7 @@ class InitializationExperimentRecord:
             uniform_null=collect(_NULL_PREFIX),
             sweep_counts_by_condition=collect(_SWEEP_COUNTS_PREFIX),
             sweep_agreement_by_condition=collect(_SWEEP_AGREEMENT_PREFIX),
-            **gradients,
+            **optional,
         )
 
     @classmethod
@@ -678,6 +806,10 @@ class InitializationExperimentRecord:
         gradient_position_target_ids: Sequence[int] | np.ndarray | None = None,
         gradient_position_greedy_ids: Sequence[int] | np.ndarray | None = None,
         gradient_position_norms: Sequence[float] | np.ndarray | None = None,
+        predictive_ranked_probabilities: np.ndarray | None = None,
+        predictive_max_probabilities: np.ndarray | None = None,
+        predictive_target_probabilities: np.ndarray | None = None,
+        predictive_target_losses: np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -724,6 +856,16 @@ class InitializationExperimentRecord:
                 gradient_position_greedy_ids, np.int64
             ),
             gradient_position_norms=_optional_array(gradient_position_norms, np.float64),
+            predictive_ranked_probabilities=_optional_array(
+                predictive_ranked_probabilities, np.float64
+            ),
+            predictive_max_probabilities=_optional_array(
+                predictive_max_probabilities, np.float64
+            ),
+            predictive_target_probabilities=_optional_array(
+                predictive_target_probabilities, np.float64
+            ),
+            predictive_target_losses=_optional_array(predictive_target_losses, np.float64),
         )
 
 
