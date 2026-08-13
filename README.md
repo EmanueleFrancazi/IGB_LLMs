@@ -77,6 +77,7 @@ IGB_LLMs/
     prepare_dataset.py
     run_initialization_distribution_experiment.py
     benchmark_position_gradients.py
+    render_record_figures.py
 
   docs/
     EXPERIMENT_LOG.md
@@ -92,7 +93,9 @@ IGB_LLMs/
         __init__.py
         aggregation.py
         figures.py
+        gradients.py
         nulls.py
+        predictive.py
         records.py
         transition.py
 
@@ -116,6 +119,7 @@ IGB_LLMs/
         init_distribution.py
         input_conditions.py
         output_stats.py
+        position_gradients.py
         token_frequency.py
         untrained_analysis.py
 
@@ -1131,17 +1135,38 @@ extrapolation.
 
 This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
 differentiates the *window-averaged* loss with respect to block activations. See
-[`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) §5d for the exact definition.
+[`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) §5e for the exact definition.
 
-A run carrying gradient data also gets `figure8_gradient_vs_initial_guess_bias.svg`:
+A run carrying gradient data also gets `figure10_gradient_vs_initial_guess_bias.svg`:
 one marker per token with `n_i > 0`, at `x = G_i` and `y = q_i`, coloured by corpus
 frequency. Runs without gradient data produce exactly the figures they did before.
 
 Figures and statistics can be regenerated from a finished record alone — no model,
 no GPU, and nothing recomputed:
 
+Every run also records the **raw predictive distribution** the model produces before
+any sampling policy touches it: logits restricted to the eligible support, softmax at
+`T = 1`, no top-p truncation, no greedy or nucleus decision. Two figures come from it.
+
+`figure8_ranked_predictive_probabilities.svg` ranks the probabilities **within each
+position** and only then averages at equal rank, against a uniform `1/K` reference. This
+is not figure 1, which ranks guess frequencies accumulated *across* positions: a model
+can be flat at every individual position and still produce a peaked aggregate.
+
+`figure9_max_predictive_probability_distribution.svg` shows the distribution of the
+probability carried by the greedy-selected token, as an ECDF with one curve per
+initialization over the pooled curve. Greedy always takes the top-ranked token; whether
+that token carries much mass is a separate question, and this is the figure that answers
+it.
+
+Only sufficient statistics are stored — a ranked `[I, K]` profile and three `[I, D]`
+per-position vectors, about 12 MB — never the full `[I, D, K]` probability tensor, which
+would be roughly 50 GiB.
+
 ```bash
 python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure8
+python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure9
+python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure10
 python3 scripts/render_record_figures.py outputs/<run>/analyses --stats-only
 ```
 

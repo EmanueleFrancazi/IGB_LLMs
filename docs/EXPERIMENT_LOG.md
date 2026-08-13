@@ -471,7 +471,86 @@ is the exception.
 
 ---
 
-## 5d. Gradient magnitude versus guessing bias
+## 5d. The raw predictive distribution, before any sampling policy
+
+At every evaluation position the model emits logits. Restrict them to the
+eligible support, apply softmax at temperature 1, and the result is the
+probability vector these diagnostics describe:
+
+```
+p[d, i] = softmax(z[d] restricted to the eligible support)[i]
+```
+
+This vector is **upstream of every sampling decision**: no temperature scaling,
+no top-p truncation, no greedy or nucleus selection. It is emphatically *not* the
+nucleus distribution, which is the same logits at `T = 0.6` after top-p
+truncation and renormalization.
+
+### Four quantities that must not be confused
+
+| Quantity | Question | Figure |
+|---|---|---|
+| ranked **guess frequencies** across positions | how concentrated is the aggregate distribution of what the model picks? | 1 |
+| ranked **probabilities within** each position | how concentrated is one individual next-token prediction? | 8 |
+| distribution of the largest per-position probability | how much mass does the greedy winner actually carry? | 9 |
+| gradient magnitude vs. marginal greedy guess fraction | do the favoured tokens pull hardest? | 10 |
+
+The first two are the pair most easily conflated, and they are independent. A
+model can be nearly flat at every single position and still produce a sharply
+peaked aggregate, or the reverse. Neither implies the other.
+
+### Statistic A — ranked predictive probability profile
+
+For each position, rank the eligible probabilities descending, then average at
+**fixed rank** across positions:
+
+```
+Pbar_s(r) = mean_d p_s[d,(r)]        for each initialization s
+```
+
+The order of operations is the statistic. Ranking first and averaging second
+describes the shape of a typical single predictive vector; averaging first and
+ranking afterwards describes the aggregate, which is figure 1's question.
+
+Invariants, all enforced by record validation: non-increasing in rank, finite and
+non-negative, summing to 1 over the eligible support, and rank 1 equal to the
+mean of the stored per-position maxima.
+
+### Statistic B — maximum predictive probability
+
+`p_max[d] = max_i p[d,i]`, stored per position and per initialization. It is
+gathered at the greedy token rather than taken as an independent maximum, so
+"the probability of the token greedy selects" is true by construction and cannot
+drift from the greedy counts through a tie broken differently. Softmax is
+monotone, so it is also exactly the maximum.
+
+This separates two statements that sound alike: greedy *always* selects the
+top-ranked token, but the top-ranked token need not carry much probability.
+
+### Also persisted — target probability and loss
+
+`p_target[d] = p[d, y_d]` and `loss[d] = -log p_target[d]`, per position and
+initialization. `p_max` is confidence in the model's preferred token;
+`p_target` is the mass on the actual next token. They are persisted now because
+the probability vectors were already in hand, and their scientific reading
+belongs with the gradient analysis.
+
+### Storage
+
+Only sufficient statistics. The full `[I, D, K]` probability tensor is never
+written — at 12 initializations, 32768 positions and 31997 eligible tokens that
+would be about 50 GiB, against roughly 12 MB for the four arrays actually kept:
+`[I, K]` for the ranked profile and `[I, D]` for the three per-position vectors.
+
+The diagnostics are computed inside the existing forward loop, from the same
+softmax already used for the mean predicted mass, and only for the real input
+condition. They do not touch any RNG stream, and switching them on leaves the
+greedy counts, nucleus counts, sweep counts and sampling draws bit-for-bit
+unchanged — which is asserted by test with the sweep both enabled and disabled.
+
+---
+
+## 5e. Gradient magnitude versus guessing bias
 
 An optional additional measurement, disabled by default, asking whether the
 tokens a randomly initialized model *prefers to guess* are also the tokens whose
@@ -557,9 +636,9 @@ sums. `G_i`, `n_i` and `q_i` are derived from them by
 `analysis/gradients.py`, so a later re-aggregation never requires recomputing a
 gradient.
 
-### Figure 8
+### Figure 10
 
-`figure8_gradient_vs_initial_guess_bias.svg`: one marker per token with
+`figure10_gradient_vs_initial_guess_bias.svg`: one marker per token with
 `n_i > 0`, at `x = G_i` and `y = q_i`, coloured by `p_i`.
 
 Three scale decisions are made from the observed distributions rather than by
