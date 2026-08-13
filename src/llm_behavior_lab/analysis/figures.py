@@ -63,7 +63,9 @@ __all__ = [
     "plot_ranked_frequency_profiles",
     "plot_sampling_adequacy",
     "plot_input_structure_profiles",
-    "plot_temperature_transition",
+    "plot_temperature_ranked_distances",
+    "plot_temperature_ranked_profiles",
+    "plot_temperature_support_and_agreement",
     "plot_token_identity_scatter",
     "plot_token_wise_mismatch",
     "save_figure",
@@ -688,130 +690,206 @@ def plot_input_structure_profiles(record: Any, directory: str | Path) -> list[Pa
 
 
 
-def plot_temperature_transition(record: Any, directory: str | Path) -> list[Path]:
-    """Figure 5 -- where each temperature sits between greedy and the null.
-
-    Greedy is the ``T = 0`` anchor and the finite-``D`` uniform categorical null
-    is the high-temperature reference. Panel A shows the ranked real-input
-    profiles moving between them; panel B tracks that movement as two ranked
-    distances; panel C adds concentration and identity diagnostics, including
-    the same curves for every input condition so a difference in *rate* between
-    conditions is visible without six more ranked curves.
-
-    Panels A and B discard token identity -- both distances compare
-    independently ranked profiles. Greedy agreement in panel C is the one
-    identity-preserving quantity here.
-
-    Nothing in the layout presumes a sharp critical temperature.
-    """
+def _sweep_context(record: Any):
+    """Shared setup for the three temperature figures."""
 
     from llm_behavior_lab.analysis.transition import sweep_summary
 
     if not record.has_temperature_sweep:
         raise ValueError(
             "This record carries no temperature sweep; run the experiment with "
-            "temperature_sweep enabled to produce figure 5."
+            "temperature_sweep enabled to produce the temperature figures."
         )
-
     summary = sweep_summary(record)
-    temperatures = summary["temperatures"]
-    real = summary["conditions"]["real"]["metrics"]
+    return summary, list(summary["temperatures"])
+
+
+def _temperature_colours(count: int) -> list:
+    """Perceptually ordered colours so the sweep reads as a progression.
+
+    Sequential and colour-blind safe; deliberately not a rainbow, where hue
+    ordering carries no perceptual ordering.
+    """
+
+    from matplotlib import cm
+
+    return [cm.viridis(value) for value in np.linspace(0.05, 0.92, count)]
+
+
+def plot_temperature_ranked_profiles(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 5 -- ranked guess profiles from the greedy anchor to the null.
+
+    Each curve is ``mean_s( sort(q_s) )``: **rank within each initialization,
+    then average corresponding ranks**, the same convention as figure 1. Token
+    identity is discarded, so rank ``r`` is generally a different token on every
+    curve.
+
+    Greedy is the ``T = 0`` anchor and the finite-``D`` uniform categorical null
+    is the high-temperature reference; the sweep curves sit between them.
+    """
+
+    _summary, temperatures = _sweep_context(record)
     ranks = np.arange(1, record.eligible_vocab_size + 1)
     style = _profile_kwargs(_is_large(record))
 
-    figure = _new_figure(width=13.0, height=5.0)
-    panels = figure.subplots(1, 3)
+    figure = _new_figure(width=9.0, height=6.0)
+    axes = figure.subplots()
 
-    # -- Panel A: ranked profiles from greedy to the null -----------------
-    axes = panels[0]
-    # Same convention as figure 1: rank within each initialization, then average
-    # corresponding ranks. Averaging by token identity first would flatten these
-    # curves, most severely at high temperature.
     greedy = ranked_profile_with_error(eligible_view(record, record.greedy_fractions))
     axes.plot(
-        ranks,
-        _positive(greedy.mean),
-        color="#000000",
-        linewidth=2.0,
-        label="greedy (T=0)",
-        **style,
+        ranks, _positive(greedy.mean), color="#000000", linewidth=2.4,
+        label="greedy  (T = 0 anchor)", zorder=5, **style,
     )
-    colours = ["#3b4cc0", "#6f8fe8", "#9bb0ec", "#e8896f", "#d1503a", "#8b0000"]
     sweep = eligible_view(record, _sweep_fractions(record, "real"))
-    for index, temperature in enumerate(temperatures):
+    for index, (temperature, colour) in enumerate(
+        zip(temperatures, _temperature_colours(len(temperatures)))
+    ):
         profile = ranked_profile_with_error(sweep[:, index, :])
         axes.plot(
-            ranks,
-            _positive(profile.mean),
-            color=colours[index % len(colours)],
-            linewidth=1.3,
-            label=f"T={temperature:g}",
-            **style,
+            ranks, _positive(profile.mean), color=colour, linewidth=1.5,
+            label=f"T = {temperature:g}", zorder=3, **style,
         )
     if record.has_uniform_null:
         axes.plot(
-            ranks,
-            # Already stored on the eligible support, exactly as figure 1 uses it.
-            _positive(ranked_profile(record.uniform_null["ranked_mean"])),
-            color=NULL_STYLE["color"],
-            linewidth=1.6,
-            linestyle="--",
-            label="uniform D-draw null",
-            **style,
+            ranks, _positive(record.uniform_null["ranked_mean"]),
+            color=NULL_STYLE["color"], linewidth=2.2, linestyle="--",
+            label="uniform D-draw null", zorder=4, **style,
         )
+
     _configure_rank_axis(axes, record, "frequency rank")
-    axes.set_ylabel("selected-guess fraction")
-    axes.set_title("A. ranked profiles, real input")
-    axes.legend(loc="upper right", fontsize=6.5, frameon=True, ncol=2)
+    axes.set_ylabel("mean ranked selected-guess fraction")
+    axes.set_title("Ranked guess concentration across temperature (real input)")
+    legend = axes.legend(
+        loc="upper right", fontsize=8.5, frameon=True, title="increasing temperature",
+    )
+    legend.get_title().set_fontsize(8)
+    axes.text(
+        0.01, 0.01,
+        "ranked within each initialization, then averaged rank by rank\n"
+        f"{record.num_initializations} initializations, "
+        f"N = {_format_count(record.metadata.get('num_positions', 0))}",
+        transform=axes.transAxes, fontsize=7.5, va="bottom", ha="left", bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure5_temperature_ranked_profiles")
 
-    # -- Panel B: ranked distances to each anchor -------------------------
-    axes = panels[1]
-    for name, colour, label in (
-        ("tv_rank_to_greedy", "#000000", "ranked TV to greedy (T=0)"),
-        ("tv_rank_to_uniform", NULL_STYLE["color"], "ranked TV to uniform null"),
+
+def plot_temperature_ranked_distances(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 6 -- ranked-profile distance to each anchor, against temperature.
+
+    Both curves are total variation between **independently ranked** profiles:
+    the sample against greedy, and the sample against the uniform null. Ranking
+    first discards token identity, so these are *shape* distances and must not
+    be read as the same-token total variation of figure 2.
+
+    Their crossing is the readable signature of the transition: departure from
+    the greedy regime and approach toward the finite-``D`` null.
+    """
+
+    summary, temperatures = _sweep_context(record)
+    metrics = summary["conditions"]["real"]["metrics"]
+
+    figure = _new_figure(width=8.0, height=5.5)
+    axes = figure.subplots()
+    for name, colour, marker, label in (
+        ("tv_rank_to_greedy", "#000000", "o", "distance from greedy (T = 0)"),
+        ("tv_rank_to_uniform", NULL_STYLE["color"], "s", "distance from uniform D-draw null"),
     ):
-        mean = np.array(real[name]["mean"])
-        sem = np.array(real[name]["sem"])
         axes.errorbar(
-            temperatures, mean, yerr=sem, color=colour, marker="o", markersize=4,
-            linewidth=1.4, capsize=2, label=label,
+            temperatures, np.array(metrics[name]["mean"]), yerr=np.array(metrics[name]["sem"]),
+            color=colour, marker=marker, markersize=5, linewidth=1.8, capsize=3, label=label,
         )
-    axes.set_xlabel("temperature")
-    axes.set_ylabel("ranked-profile total variation")
-    axes.set_title("B. shape distance to each anchor")
-    axes.grid(True, alpha=0.25)
-    axes.legend(loc="best", fontsize=7, frameon=True)
 
-    # -- Panel C: concentration and identity, across conditions -----------
-    axes = panels[2]
+    axes.set_xlabel("nucleus temperature  T")
+    axes.set_ylabel("ranked-profile total variation")
+    axes.set_title(
+        "Departure from greedy and approach toward the uniform null\n"
+        "(ranked-profile distance; token identity discarded)",
+        fontsize=11,
+    )
+    axes.grid(True, alpha=0.25)
+    axes.legend(loc="center right", fontsize=9, frameon=True)
+    axes.text(
+        0.01, 0.01,
+        f"error bars: SEM across {summary['conditions']['real']['num_initializations']} "
+        f"initializations | top_p = {summary.get('top_p')} fixed",
+        transform=axes.transAxes, fontsize=7.5, va="bottom", ha="left", bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure6_temperature_ranked_distances")
+
+
+def plot_temperature_support_and_agreement(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 7 -- normalized effective support, and agreement with greedy.
+
+    Two different quantities on two axes, deliberately not conflated:
+
+    * **left** -- ``N_eff(T) / N_eff(null)`` per input condition. 1.0 means the
+      guess distribution is as broad as pure chance at the same draw count;
+    * **right** -- the fraction of positions where the sampled token *is* the
+      greedy argmax. That one preserves token identity, unlike everything on the
+      left axis.
+
+    Real and shuffled input often track each other almost exactly. They are
+    drawn with different line styles, markers, and widths, and in an order that
+    keeps the earlier curve visible, so near-perfect overlap reads as overlap
+    rather than as a missing curve.
+    """
+
+    summary, temperatures = _sweep_context(record)
+
+    figure = _new_figure(width=8.5, height=5.5)
+    axes = figure.subplots()
+    # Widest and drawn first, so a later coincident curve sits visibly on top.
+    widths = {"real": 3.4, "shuffled": 2.0, "gaussian": 1.6}
+    dashes = {"real": (None, None), "shuffled": (5, 2), "gaussian": (1, 1.5)}
+    markers = {"real": "o", "shuffled": "^", "gaussian": "D"}
     for condition in summary["conditions"]:
         metrics = summary["conditions"][condition]["metrics"]
-        axes.errorbar(
+        line = axes.errorbar(
             temperatures,
-            metrics["effective_support_over_null"]["mean"],
-            yerr=metrics["effective_support_over_null"]["sem"],
+            np.array(metrics["effective_support_over_null"]["mean"]),
+            yerr=np.array(metrics["effective_support_over_null"]["sem"]),
             color=CONDITION_STYLES[condition]["color"],
-            marker="o", markersize=3.5, linewidth=1.3, capsize=2,
-            label=f"{condition}: N_eff / N_eff(null)",
+            marker=markers[condition], markersize=5,
+            markerfacecolor="none" if condition != "real" else None,
+            linewidth=widths[condition], capsize=2, alpha=0.9,
+            label=f"{condition}:  N_eff / N_eff(null)",
         )
-    axes.axhline(1.0, color=NULL_STYLE["color"], linestyle=":", linewidth=1.0)
-    axes.plot(
-        temperatures,
-        real["agreement_with_greedy"]["mean"],
-        color="#000000", marker="s", markersize=3.5, linewidth=1.3, linestyle="--",
-        label="real: agreement with greedy",
-    )
-    axes.set_xlabel("temperature")
-    axes.set_ylabel("ratio / fraction")
-    axes.set_title("C. concentration vs. null, and greedy agreement")
-    axes.grid(True, alpha=0.25)
-    axes.legend(loc="best", fontsize=6.5, frameon=True)
+        if dashes[condition][0] is not None:
+            line[0].set_dashes(dashes[condition])
 
-    figure.suptitle(
-        f"Temperature transition at fixed top_p = {summary.get('top_p')} "
-        f"(R=1, {summary['conditions']['real']['num_initializations']} initializations)"
+    axes.axhline(1.0, color=NULL_STYLE["color"], linestyle=":", linewidth=1.2)
+    axes.annotate(
+        "N_eff / N_eff(null) = 1  (as broad as the null)",
+        xy=(temperatures[0], 1.0), xytext=(4, 4), textcoords="offset points",
+        fontsize=7.5, color=NULL_STYLE["color"],
     )
-    return save_figure(figure, directory, "figure5_temperature_transition")
+    axes.set_xlabel("nucleus temperature  T")
+    axes.set_ylabel("effective support relative to the uniform null  (left axis)")
+    axes.grid(True, alpha=0.25)
+
+    agreement = axes.twinx()
+    agreement.plot(
+        temperatures,
+        np.array(summary["conditions"]["real"]["metrics"]["agreement_with_greedy"]["mean"]),
+        color="#b8860b", marker="s", markersize=5, linewidth=1.8, linestyle="-.",
+        label="real:  fraction of positions matching greedy argmax",
+    )
+    agreement.set_ylabel(
+        "fraction of positions matching greedy argmax  (right axis)", color="#b8860b"
+    )
+    agreement.tick_params(axis="y", labelcolor="#b8860b")
+    agreement.set_ylim(-0.02, 1.02)
+
+    handles, labels = axes.get_legend_handles_labels()
+    extra_handles, extra_labels = agreement.get_legend_handles_labels()
+    axes.legend(
+        handles + extra_handles, labels + extra_labels,
+        loc="center left", fontsize=8, frameon=True,
+    )
+    axes.set_title(
+        "Guess breadth relative to the null, and identity agreement with greedy", fontsize=11
+    )
+    return save_figure(figure, directory, "figure7_temperature_support_and_greedy_agreement")
 
 
 def _sweep_fractions(record: Any, condition: str) -> np.ndarray:
@@ -832,5 +910,7 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     if record.has_input_structure:
         written.extend(plot_input_structure_profiles(record, directory))
     if record.has_temperature_sweep:
-        written.extend(plot_temperature_transition(record, directory))
+        written.extend(plot_temperature_ranked_profiles(record, directory))
+        written.extend(plot_temperature_ranked_distances(record, directory))
+        written.extend(plot_temperature_support_and_agreement(record, directory))
     return written

@@ -450,17 +450,24 @@ separate the two effects and is deliberately left outside this integration.
 
 ### Figure 5
 
-`figure5_temperature_transition.svg`, three panels:
+Three standalone figures:
 
-* **A** — ranked real-input profiles for greedy, every sweep temperature, and the
-  uniform null, on the usual log axes;
-* **B** — the two ranked distances against temperature, with initialization SEM;
-* **C** — `N_eff(T)/N_eff(null)` for each input condition plus greedy agreement,
-  which is where a difference in transition *rate* between real, shuffled, and
-  Gaussian input becomes visible without six more ranked curves.
+* `figure5_temperature_ranked_profiles.svg` — ranked real-input profiles for
+  greedy, every sweep temperature, and the uniform null, on the usual log axes.
+  Curves use `mean_s(sort(q_s))`: **rank within each initialization, then average
+  corresponding ranks**, the same convention as figure 1;
+* `figure6_temperature_ranked_distances.svg` — the two **ranked-profile** total
+  variations against temperature with initialization SEM. Ranked-profile
+  distances discard token identity and must not be read as the same-token TV of
+  figure 2;
+* `figure7_temperature_support_and_greedy_agreement.svg` — `N_eff(T)/N_eff(null)`
+  per input condition on the left axis, and the fraction of positions matching
+  the greedy argmax on a separate right axis. Real and shuffled often coincide
+  almost exactly and are drawn with distinct widths, dashes, and markers so
+  overlap reads as overlap.
 
-Panels A and B discard token identity; the agreement curve in panel C is the
-exception.
+Figures 5 and 6 discard token identity; the greedy-agreement curve in figure 7
+is the exception.
 
 ---
 

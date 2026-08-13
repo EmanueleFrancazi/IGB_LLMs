@@ -1058,7 +1058,9 @@ support, never renumbered.
 | `figure2_token_wise_mismatch` | same-token `\|q - p\|` ranked after differencing, typical vs. persistent |
 | `figure3_token_identity_scatter` | corpus fraction vs. mean guess fraction, per token, with the identity line |
 | `figure4_input_structure_profiles` | ranked guess concentration under real, shuffled, and Gaussian input, one panel per policy |
-| `figure5_temperature_transition` | where each sweep temperature sits between the greedy anchor and the uniform null |
+| `figure5_temperature_ranked_profiles` | ranked guess profiles from the greedy anchor through each temperature to the null |
+| `figure6_temperature_ranked_distances` | ranked-profile distance to greedy and to the null, against temperature |
+| `figure7_temperature_support_and_greedy_agreement` | effective support relative to the null per input condition, plus agreement with greedy |
 
 ### Null comparisons
 

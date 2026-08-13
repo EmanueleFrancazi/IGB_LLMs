@@ -418,6 +418,67 @@ def test_figure_four_requires_input_conditions() -> None:
         plot_input_structure_profiles(_record(), pytest.importorskip("tempfile").mkdtemp())
 
 
+def test_a_sweep_run_writes_the_three_temperature_figures(tmp_path) -> None:
+    """The former three-panel figure is now three standalone SVGs."""
+
+    from llm_behavior_lab.analysis.figures import (
+        plot_temperature_ranked_distances,
+        plot_temperature_ranked_profiles,
+        plot_temperature_support_and_agreement,
+    )
+    from llm_behavior_lab.analysis.nulls import simulate_uniform_null
+
+    base = _record_with_extras()
+    eligible = base.eligible_token_ids
+    temperatures = [0.12, 0.6, 1.2]
+    rng = np.random.default_rng(31)
+    sweeps = {c: np.zeros((base.num_initializations, len(temperatures), base.vocab_size), dtype=np.int64)
+              for c in ("real", "shuffled", "gaussian")}
+    agreement = {c: np.zeros((base.num_initializations, len(temperatures))) for c in sweeps}
+    for condition in sweeps:
+        for s_ in range(base.num_initializations):
+            for t_ in range(len(temperatures)):
+                sweeps[condition][s_, t_, eligible] = rng.multinomial(
+                    64, rng.dirichlet(np.ones(eligible.size))
+                )
+    null = simulate_uniform_null(
+        eligible_vocab_size=eligible.size, num_draws=64, num_replicates=8, seed=3
+    )
+    metadata = dict(base.metadata)
+    metadata["analysis"] = {"sampling": {"temperature": 0.6, "top_p": 0.9},
+                            "temperature_sweep": {"enabled": True, "temperatures": temperatures}}
+    record = InitializationExperimentRecord.build(
+        corpus_counts=base.corpus_counts, selected_target_counts=base.selected_target_counts,
+        greedy_counts=base.greedy_counts, nucleus_counts=base.nucleus_counts,
+        mean_predicted_probabilities=base.mean_predicted_probabilities,
+        model_seeds=base.model_seeds, eligible_token_ids=eligible,
+        condition_greedy_counts=base.condition_greedy_counts,
+        condition_nucleus_counts=base.condition_nucleus_counts,
+        uniform_null={"ranked_mean": null.ranked_mean, "ranked_low": null.ranked_low,
+                      "ranked_high": null.ranked_high},
+        sweep_counts_by_condition=sweeps, sweep_agreement_by_condition=agreement,
+        metadata=metadata,
+    )
+
+    written = generate_all_figures(record, tmp_path)
+
+    assert sorted(path.name for path in written) == [
+        "figure0_sampling_adequacy.svg",
+        "figure1_ranked_frequency_profiles.svg",
+        "figure2_token_wise_mismatch.svg",
+        "figure3_token_identity_scatter.svg",
+        "figure4_input_structure_profiles.svg",
+        "figure5_temperature_ranked_profiles.svg",
+        "figure6_temperature_ranked_distances.svg",
+        "figure7_temperature_support_and_greedy_agreement.svg",
+    ]
+    assert list(tmp_path.glob("*.png")) == []
+    # Each renders standalone too.
+    for plot in (plot_temperature_ranked_profiles, plot_temperature_ranked_distances,
+                 plot_temperature_support_and_agreement):
+        assert plot(record, tmp_path)[0].stat().st_size > 0
+
+
 def test_a_full_run_writes_exactly_five_svgs(tmp_path) -> None:
     """The expected artifact set for the current protocol."""
 
