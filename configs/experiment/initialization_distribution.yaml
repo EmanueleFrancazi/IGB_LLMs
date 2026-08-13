@@ -103,6 +103,29 @@ uniform_null:
   # 65 MB of transient storage.
   replicates: 256
 
+temperature_sweep:
+  # Optional extra analysis: the same logits sampled at several temperatures, to
+  # map the crossover from the greedy regime toward the finite-D uniform
+  # categorical null. Greedy is the T=0 anchor and is always computed by argmax,
+  # never by a zero-temperature softmax, so only positive values belong here.
+  #
+  # This does NOT reinterpret the canonical policy. Figures 0-4 continue to use
+  # sampling.temperature; the sweep is additional and appears only in figure 5.
+  #
+  # top_p stays fixed at the canonical value, so this measures the transition
+  # under a fixed nucleus threshold rather than pure softmax temperature:
+  # raising T flattens the profile and therefore widens the 0.9 nucleus itself.
+  #
+  # A config omitting this block runs exactly as before.
+  enabled: true
+  temperatures:
+    - 0.12
+    - 0.24
+    - 0.36
+    - 0.48
+    - 0.60
+    - 1.20
+
 input_structure:
   # Three inputs through one initialized model: real windows, the same token
   # multiset with ordering destroyed, and Gaussian vectors at the embedding

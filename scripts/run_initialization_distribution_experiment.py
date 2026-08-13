@@ -28,6 +28,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 
@@ -173,6 +174,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--temperatures",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="T",
+        help=(
+            "Override the nucleus temperature sweep, e.g. --temperatures 0.12 0.6 1.2. "
+            "All values must be positive; greedy is the T=0 anchor and is always computed "
+            "by argmax. Does not affect the canonical sampling.temperature."
+        ),
+    )
+    parser.add_argument(
+        "--no-temperature-sweep",
+        action="store_true",
+        help="Skip the multi-temperature nucleus sweep.",
+    )
+    parser.add_argument(
         "--no-uniform-null",
         action="store_true",
         help="Skip the uniform categorical output null.",
@@ -189,6 +207,33 @@ def parse_args() -> argparse.Namespace:
     )
     add_dataset_arguments(parser)
     return parser.parse_args()
+
+
+def _resolve_temperatures(values: Any) -> tuple[float, ...]:
+    """Validate and normalize the sweep temperatures.
+
+    Duplicates are collapsed and the user's order is preserved, so a config or
+    command line reads back exactly as written. Zero and negative values are
+    rejected: greedy is the T=0 anchor and is computed by argmax, never by a
+    zero-temperature softmax, which is undefined.
+    """
+
+    resolved: list[float] = []
+    for value in values or ():
+        try:
+            temperature = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"temperature_sweep.temperatures contains a non-numeric entry {value!r}."
+            ) from error
+        if not temperature > 0.0:
+            raise ValueError(
+                f"temperature_sweep.temperatures must be strictly positive; got {temperature}. "
+                "Greedy is the T=0 anchor and is computed by argmax."
+            )
+        if temperature not in resolved:
+            resolved.append(temperature)
+    return tuple(resolved)
 
 
 def _describe_tokenizer_line(description: dict[str, Any]) -> str:
@@ -223,6 +268,7 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
     sampling = experiment_config.get("sampling", {})
     runtime = experiment_config.get("runtime", {})
     null = experiment_config.get("uniform_null", {})
+    sweep = experiment_config.get("temperature_sweep", {})
     structure = experiment_config.get("input_structure", {})
 
     return {
@@ -259,6 +305,13 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         "uniform_null_replicates": int(null.get("replicates", DEFAULT_NULL_REPLICATES)),
         "input_structure_enabled": bool(structure.get("enabled", True))
         and not args.no_input_structure,
+        "temperature_sweep_enabled": (
+            (bool(sweep.get("enabled", False)) or args.temperatures is not None)
+            and not args.no_temperature_sweep
+        ),
+        "sweep_temperatures": _resolve_temperatures(
+            args.temperatures if args.temperatures is not None else sweep.get("temperatures", ())
+        ),
         "shuffle_seed": int(structure.get("shuffle_seed", 60001)),
         "gaussian_seed": int(structure.get("gaussian_seed", 60002)),
     }
@@ -431,6 +484,20 @@ def main() -> None:
             f"(shuffle seed {protocol['shuffle_seed']}, Gaussian seed {protocol['gaussian_seed']})"
         )
 
+    sweep_temperatures = (
+        protocol["sweep_temperatures"] if protocol["temperature_sweep_enabled"] else ()
+    )
+    if sweep_temperatures:
+        print(
+            "Temperature sweep:\n"
+            f"  T = {', '.join(f'{value:g}' for value in sweep_temperatures)}\n"
+            f"  top_p = {sampling.top_p} (fixed)\n"
+            f"  R = {sampling.num_replicates}\n"
+            f"  common random numbers: {'yes' if sampling.common_random_numbers else 'no'}\n"
+            "  greedy is the T=0 anchor; the same logits and the same uniforms serve "
+            "every temperature"
+        )
+
     started = time.perf_counter()
     for index in range(protocol["num_initializations"]):
         model_seed = protocol["base_seed"] + index * protocol["seed_stride"]
@@ -449,6 +516,7 @@ def main() -> None:
                 eligible_token_ids=eligible_token_ids,
                 forward_batch_size=protocol["forward_batch_size"],
                 device=device,
+                sweep_temperatures=sweep_temperatures,
                 **condition_inputs,
             )
 
@@ -519,6 +587,14 @@ def main() -> None:
             "shuffle_seed": protocol["shuffle_seed"] if protocol["input_structure_enabled"] else None,
             "gaussian_seed": protocol["gaussian_seed"] if protocol["input_structure_enabled"] else None,
             "gaussian_embedding_moments": embedding_moment_log,
+            "temperature_sweep": {
+                "enabled": bool(sweep_temperatures),
+                "temperatures": list(sweep_temperatures),
+                "canonical_temperature": sampling.temperature,
+                "top_p": sampling.top_p,
+                "shares_logits_with_canonical": True,
+                "shares_uniforms_with_canonical": True,
+            },
             "vocab_size": tokenizer.vocab_size,
             "eligible_vocab_size": len(eligible_token_ids),
             "excluded_special_token_ids": sorted(special_token_ids),
@@ -567,6 +643,15 @@ def main() -> None:
         record_metadata["uniform_null"] = null_summary.as_dict()
     record_metadata["experiment_name"] = run.experiment_name
 
+    def sweep_arrays(attribute: str) -> dict[str, Any]:
+        if not sweep_temperatures:
+            return {}
+        collected = {"real": np.stack([getattr(m, attribute).numpy() for m in measurements])}
+        for name, items in condition_measurements.items():
+            if items:
+                collected[name] = np.stack([getattr(m, attribute).numpy() for m in items])
+        return collected
+
     record = InitializationExperimentRecord.build(
         corpus_counts=corpus_counts.cpu().numpy(),
         selected_target_counts=selected_counts.cpu().numpy(),
@@ -586,6 +671,8 @@ def main() -> None:
             for name, items in condition_measurements.items()
             if items
         },
+        sweep_counts_by_condition=sweep_arrays("sweep_counts"),
+        sweep_agreement_by_condition=sweep_arrays("sweep_agreement"),
         uniform_null=(
             {}
             if null_summary is None
@@ -734,6 +821,34 @@ def main() -> None:
                     f"    delta {pair}: N_eff {support['mean']:+,.2f} ± {support['sem']:,.2f}, "
                     f"zero-frac {zero['mean']:+.4f} ± {zero['sem']:.4f}"
                 )
+
+    if sweep_temperatures:
+        from llm_behavior_lab.analysis import sweep_summary
+
+        summary = sweep_summary(record)
+        print("\nTemperature transition (real input, mean across initializations):")
+        print(
+            f"  {'T':>6} {'N_eff':>10} {'/null':>7} {'zero%':>7} {'TV(corp)':>9} "
+            f"{'TVrk_greedy':>12} {'TVrk_unif':>10} {'agree':>7}"
+        )
+        metrics = summary["conditions"]["real"]["metrics"]
+        for index, temperature in enumerate(sweep_temperatures):
+            print(
+                f"  {temperature:>6g} {metrics['effective_support']['mean'][index]:>10,.1f}"
+                f" {metrics['effective_support_over_null']['mean'][index]:>7.3f}"
+                f" {metrics['zero_frequency_fraction']['mean'][index]:>6.1%}"
+                f" {metrics['tv_to_corpus']['mean'][index]:>9.4f}"
+                f" {metrics['tv_rank_to_greedy']['mean'][index]:>12.4f}"
+                f" {metrics['tv_rank_to_uniform']['mean'][index]:>10.4f}"
+                f" {metrics['agreement_with_greedy']['mean'][index]:>7.3f}"
+            )
+        others = [name for name in summary["conditions"] if name != "real"]
+        if others:
+            print("  N_eff / N_eff(null) by input condition:")
+            for name in ("real", *others):
+                ratios = summary["conditions"][name]["metrics"]["effective_support_over_null"]["mean"]
+                print(f"    {name:<9} " + "  ".join(f"{value:.3f}" for value in ratios))
+        run.save_analysis_json("temperature_sweep_summary.json", summary)
 
     figure_paths: list[Path] = []
     if not args.no_figures:

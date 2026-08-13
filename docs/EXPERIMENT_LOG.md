@@ -368,6 +368,102 @@ meaningless on the identity-preserving figures 2 and 3.
 
 ---
 
+## 5c. The temperature sweep
+
+Optional additional analysis. The canonical policy remains the scalar
+`sampling.temperature`, and figures 0-4 are unchanged; the sweep appears only in
+figure 5.
+
+### Definition
+
+For a set of **strictly positive** temperatures, the same logits are sampled
+once per temperature at the same fixed `top_p`. Greedy is the `T = 0` anchor and
+is computed by `argmax`, never by a zero-temperature softmax, which is
+undefined. The question is:
+
+> As temperature increases at fixed `top_p = 0.9`, how does the selected-guess
+> distribution move from the greedy concentration profile toward the finite-`D`
+> uniform categorical null?
+
+Nothing here presumes a sharp critical temperature. The transition is whatever
+the measurements show, and monotonicity is an empirical question rather than a
+property finite stochastic samples under top-p truncation are guaranteed to have.
+
+The documented first sweep is `T = 0.12, 0.24, 0.36, 0.48, 0.60, 1.20`, with
+`T = 0` as the greedy anchor.
+
+### One forward pass, one sort, one draw
+
+Temperature is a positive scale, so it cannot reorder logits: `x_i > x_j` implies
+`x_i/T > x_j/T`. That gives three reuses, all of them load-bearing:
+
+* **the forward pass** — the model runs once per initialization and input
+  condition, exactly as before. Every temperature is derived from the batch of
+  logits already in hand, before it is discarded. Streaming and the flat-memory
+  guarantee are untouched;
+* **the sort** — one `argsort` serves the whole sweep. Probabilities are computed
+  in the original order and *gathered* by that permutation, which moves floats
+  without arithmetic. Recomputing the softmax on reordered logits would not be
+  safe: the denominator is a sum, and summation order can change the last ulp;
+* **the uniforms** — common random numbers now extend to temperature. Position
+  `d` draws the same uniform at every temperature, in every input condition, and
+  in every initialization, so a difference between temperatures cannot be
+  sampling noise.
+
+### Exact equality at the canonical temperature
+
+When the sweep contains the canonical temperature, its count vector is
+**bit-for-bit identical** to the canonical nucleus counts. Both paths share one
+implementation -- the single-temperature entry point delegates to the sweep when
+uniforms are supplied -- so the equality holds by construction rather than by
+numerical coincidence. It is pinned by a regression test at both the sampler and
+the streamed-measurement level.
+
+### Transition metrics
+
+Per temperature and per input condition, alongside the usual concentration
+statistics:
+
+| Metric | Meaning |
+|---|---|
+| `tv_rank_to_greedy` | total variation between the **independently ranked** profiles of the sample and greedy. Shape only. |
+| `tv_rank_to_uniform` | the same against the ranked uniform-null mean profile. Shape only. |
+| `agreement_with_greedy` | fraction of positions where the sampled token **equals** the argmax token from the same logits. The one identity-preserving diagnostic. |
+| `effective_support_over_null` | `N_eff(T) / N_eff(null)`; 1.0 means as broad as pure chance at the same draw count. |
+
+The two ranked distances discard token identity before comparing, and are named
+`rank` so they can never be mistaken for the same-token distances of §4. Greedy
+agreement is accumulated during streaming, so it costs no extra memory.
+
+The uniform null remains a **finite-`D` ranked occupancy reference**, not a
+latent model distribution. Normalizing by it says "how concentrated is this next
+to what pure chance would produce at the same draw count", nothing more.
+
+### Fixed top-p
+
+`top_p = 0.9` is held fixed and no top-p sweep is part of this work. The result
+is therefore **not** a pure softmax-temperature experiment: raising `T` flattens
+the probability profile and so changes how many ranked tokens fall inside the
+0.9 nucleus. On random logits over 64 tokens the nucleus grows from about 1.9
+tokens at `T = 0.12` to about 43.9 at `T = 1.2`. A `top_p = 1` control would
+separate the two effects and is deliberately left outside this integration.
+
+### Figure 5
+
+`figure5_temperature_transition.svg`, three panels:
+
+* **A** — ranked real-input profiles for greedy, every sweep temperature, and the
+  uniform null, on the usual log axes;
+* **B** — the two ranked distances against temperature, with initialization SEM;
+* **C** — `N_eff(T)/N_eff(null)` for each input condition plus greedy agreement,
+  which is where a difference in transition *rate* between real, shuffled, and
+  Gaussian input becomes visible without six more ranked curves.
+
+Panels A and B discard token identity; the agreement curve in panel C is the
+exception.
+
+---
+
 ## 6. The figures
 
 | Figure | Question | Token identity |

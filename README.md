@@ -91,7 +91,9 @@ IGB_LLMs/
         __init__.py
         aggregation.py
         figures.py
+        nulls.py
         records.py
+        transition.py
 
       data/
         __init__.py
@@ -111,6 +113,7 @@ IGB_LLMs/
         gradient_norms.py
         guessing.py
         init_distribution.py
+        input_conditions.py
         output_stats.py
         token_frequency.py
         untrained_analysis.py
@@ -167,6 +170,9 @@ IGB_LLMs/
     test_analysis_aggregation.py
     test_analysis_figures.py
     test_experiment_naming.py
+    test_input_conditions.py
+    test_uniform_null.py
+    test_temperature_sweep.py
 
   pyproject.toml
   README.md
@@ -1052,6 +1058,7 @@ support, never renumbered.
 | `figure2_token_wise_mismatch` | same-token `\|q - p\|` ranked after differencing, typical vs. persistent |
 | `figure3_token_identity_scatter` | corpus fraction vs. mean guess fraction, per token, with the identity line |
 | `figure4_input_structure_profiles` | ranked guess concentration under real, shuffled, and Gaussian input, one panel per policy |
+| `figure5_temperature_transition` | where each sweep temperature sits between the greedy anchor and the uniform null |
 
 ### Null comparisons
 
@@ -1070,6 +1077,24 @@ The current protocol — selected explicitly in
 default — takes **one nucleus draw per initialization and position** (`R = 1`), so greedy
 and nucleus summarise the same `D` assignments. Within-initialization stochastic
 variance is therefore not estimable and is reported as such rather than as zero.
+
+An optional **multi-temperature nucleus sweep** samples the *same* logits at several
+temperatures, mapping the crossover from the greedy regime toward the uniform null. Greedy
+is the `T = 0` anchor and is always computed by `argmax`, never by a zero-temperature
+softmax, so only positive temperatures are swept. `top_p` stays fixed, which means the
+sweep measures the transition **under a fixed nucleus threshold** rather than pure softmax
+temperature — raising `T` flattens the profile and so widens the 0.9 nucleus itself.
+
+```bash
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml --offline \
+  --temperatures 0.12 0.24 0.36 0.48 0.60 1.20
+```
+
+The sweep is additional analysis: figures 0–4 continue to use the canonical
+`sampling.temperature`, and a config without a `temperature_sweep` block runs exactly as
+before.
 
 See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) for the definitions and what each
 contrast can and cannot identify.

@@ -93,6 +93,7 @@ tests/
 | `test_analysis_records.py` | Record round trip, token alignment, validation | Filesystem/unit tests | `analysis/records.py` |
 | `test_analysis_aggregation.py` | Ranked profiles, same-token gaps, SEM, scalar measures | Unit tests | `analysis/aggregation.py` |
 | `test_analysis_figures.py` | Headless figure generation, deterministic filenames, 32k-vocabulary rendering, token-label escaping | Filesystem tests | `analysis/figures.py` |
+| `test_temperature_sweep.py` | Multi-temperature sampling, shared sort, canonical equality, config validation, transition metrics | Unit tests | `evaluation/guessing.py`, `analysis/transition.py` |
 | `test_experiment_naming.py` | Run-directory naming grammar, slug safety, and tokenizer provenance reporting | Unit tests | `experiment/naming.py`, experiment script |
 | `test_tokenizers.py` | Tokenizer interface, character implementation, pretrained adapter, special-token exclusion, offline load, absence of any model-loading path | Unit tests with fakes | `data/tokenizer.py`, `data/pretrained_tokenizer.py` |
 
