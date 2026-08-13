@@ -1,4 +1,4 @@
-"""Tests for figure 8 and the statistics printed beside it.
+"""Tests for figure 10 and the statistics printed beside it.
 
 Two properties matter more than the drawing itself and are pinned hardest here.
 
@@ -239,10 +239,10 @@ def test_the_primary_correlation_matches_a_direct_computation() -> None:
 # -- the figure --------------------------------------------------------------
 
 
-def test_figure_eight_is_written_as_svg(tmp_path) -> None:
+def test_figure_ten_is_written_as_svg(tmp_path) -> None:
     written = plot_gradient_vs_guess_bias(_record(), tmp_path)
 
-    assert [path.name for path in written] == ["figure8_gradient_vs_initial_guess_bias.svg"]
+    assert [path.name for path in written] == ["figure10_gradient_vs_initial_guess_bias.svg"]
     assert written[0].is_file() and written[0].stat().st_size > 0
     assert "svg" in written[0].read_text(encoding="utf-8")[:2000].lower()
 
@@ -398,10 +398,10 @@ def test_the_figure_set_includes_figure_eight_only_with_gradient_data(tmp_path) 
     names_with = {path.name for path in with_gradients}
     names_without = {path.name for path in without}
 
-    assert "figure8_gradient_vs_initial_guess_bias.svg" in names_with
-    assert "figure8_gradient_vs_initial_guess_bias.svg" not in names_without
+    assert "figure10_gradient_vs_initial_guess_bias.svg" in names_with
+    assert "figure10_gradient_vs_initial_guess_bias.svg" not in names_without
     # Runs without gradient data are otherwise completely unchanged.
-    assert names_with - {"figure8_gradient_vs_initial_guess_bias.svg"} == names_without
+    assert names_with - {"figure10_gradient_vs_initial_guess_bias.svg"} == names_without
 
 
 def test_a_record_without_gradients_refuses_to_draw_figure_eight(tmp_path) -> None:
@@ -438,7 +438,7 @@ def test_the_renderer_selects_real_figure_functions() -> None:
     from llm_behavior_lab.analysis import figures as figure_module
 
     module = _render_script()
-    assert "figure8" in module.FIGURES
+    assert "figure10" in module.FIGURES
     for name, function_name in module.FIGURES.items():
         assert callable(getattr(figure_module, function_name)), name
 

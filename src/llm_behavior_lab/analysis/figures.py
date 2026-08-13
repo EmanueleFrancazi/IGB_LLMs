@@ -61,6 +61,8 @@ __all__ = [
     "escape_token_label",
     "generate_all_figures",
     "plot_gradient_vs_guess_bias",
+    "plot_max_predictive_probability",
+    "plot_ranked_predictive_probabilities",
     "plot_ranked_frequency_profiles",
     "plot_sampling_adequacy",
     "plot_input_structure_profiles",
@@ -900,6 +902,261 @@ def _sweep_fractions(record: Any, condition: str) -> np.ndarray:
     return counts / counts.sum(axis=-1, keepdims=True)
 
 
+def _probability_scale(values: np.ndarray, requested: str) -> bool:
+    """Whether to use a logarithmic probability axis.
+
+    ``auto`` follows the observed dynamic range: logarithmic once the values
+    span at least a decade, linear otherwise, because a logarithmic axis over a
+    fraction of a decade magnifies noise and flattens real structure. Whichever
+    is used is written into the axis label, so a reader never has to infer it.
+    """
+
+    if requested == "log":
+        return True
+    if requested == "linear":
+        return False
+    positive = values[values > 0]
+    return positive.size > 0 and float(positive.max() / positive.min()) >= 10.0
+
+
+def plot_ranked_predictive_probabilities(
+    record: Any,
+    directory: str | Path,
+    *,
+    y_scale: str = "auto",
+) -> list[Path]:
+    """Figure 8 -- how concentrated is one individual next-token prediction?
+
+    Each position's raw ``T = 1`` probabilities over the eligible support are
+    ranked **within that position**, and only then averaged at equal rank across
+    positions. The curve is that mean profile, averaged again over
+    initializations, against a uniform ``1/K`` reference.
+
+    **This is not figure 1.** Figure 1 ranks token guess *frequencies accumulated
+    across positions*, describing the aggregate distribution of what the model
+    picks. This figure ranks *probabilities within each single prediction*,
+    describing the shape of one predictive vector. A model can be nearly flat at
+    every individual position and still produce a sharply peaked aggregate, or
+    the reverse, so neither figure implies the other.
+
+    The distribution shown is upstream of both sampling policies: no temperature
+    scaling, no top-p truncation, no greedy or nucleus decision.
+    """
+
+    from llm_behavior_lab.analysis.predictive import (
+        predictive_probability_summary,
+        ranked_probability_profile,
+    )
+
+    if not record.has_predictive_probability_analysis:
+        raise ValueError(
+            "This record carries no raw predictive-probability analysis, so "
+            "figure 8 has nothing to draw."
+        )
+    if y_scale not in ("auto", "log", "linear"):
+        raise ValueError(f"y_scale must be 'auto', 'log', or 'linear'; got {y_scale!r}.")
+
+    profile = ranked_probability_profile(record)
+    summary = predictive_probability_summary(record)
+    ranks = profile["ranks"]
+    mean = profile["mean"]
+    uniform = record.uniform_probability
+    large = _is_large(record)
+
+    figure = _new_figure(width=8.0, height=5.5)
+    axes = figure.subplots()
+
+    # Two nested bands rather than twelve curves: the full spread across
+    # initializations, and the much narrower uncertainty on their mean.
+    if profile["profiles"].shape[0] > 1:
+        axes.fill_between(
+            ranks,
+            _positive(profile["low"]),
+            _positive(profile["high"]),
+            color="#1f77b4",
+            alpha=0.15,
+            linewidth=0,
+            rasterized=large,
+            label="initialization min-max",
+        )
+        axes.fill_between(
+            ranks,
+            _positive(mean - profile["sem"]),
+            _positive(mean + profile["sem"]),
+            color="#1f77b4",
+            alpha=0.35,
+            linewidth=0,
+            rasterized=large,
+            label="mean ± SEM across initializations",
+        )
+    axes.plot(
+        ranks,
+        _positive(mean),
+        color="#1f77b4",
+        linewidth=1.4,
+        label="mean ranked predictive probability",
+        **_profile_kwargs(large),
+    )
+    axes.axhline(
+        uniform,
+        color=NULL_STYLE["color"],
+        linestyle="--",
+        linewidth=1.1,
+        label=f"uniform categorical 1/K = {uniform:.3g}",
+    )
+
+    if _probability_scale(mean, y_scale):
+        axes.set_yscale("log")
+        scale_note = "log scale"
+    else:
+        scale_note = "linear scale"
+    if large:
+        axes.set_xscale("log")
+    axes.set_xlabel("within-position probability rank  r  (ranked inside each position)")
+    axes.set_ylabel(f"mean predictive probability  Pbar(r)  [{scale_note}]")
+    # Padded: on a linear axis matplotlib puts a shared "1e-5" exponent above the
+    # y axis, exactly where an unpadded title sits.
+    axes.set_title(
+        "Ranked predictive probabilities within a single prediction (raw, T = 1)",
+        pad=14,
+    )
+    axes.grid(True, which="both", alpha=0.25)
+    axes.legend(loc="upper right", fontsize=8, frameon=True)
+
+    axes.text(
+        0.02,
+        0.05,
+        "\n".join(
+            [
+                f"D = {_format_count(summary['num_positions'])} positions,"
+                f"  I = {summary['num_initializations']} initializations",
+                f"eligible K = {_format_count(summary['eligible_vocab_size'])}",
+                f"mean rank-1 probability = {mean[0]:.4g}",
+                f"uniform 1/K = {uniform:.4g}"
+                f"   (rank 1 is {summary['rank1_over_uniform']:.1f}x uniform)",
+            ]
+        ),
+        transform=axes.transAxes,
+        fontsize=7.5,
+        va="bottom",
+        ha="left",
+        bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure8_ranked_predictive_probabilities")
+
+
+def plot_max_predictive_probability(
+    record: Any,
+    directory: str | Path,
+    *,
+    x_scale: str = "auto",
+) -> list[Path]:
+    """Figure 9 -- how much probability does the greedy-winning token actually get?
+
+    Greedy decoding always selects the top-ranked token. That says nothing about
+    how much mass the token carries, and this figure separates the two: it shows
+    the empirical distribution of ``p_max[d]``, the probability of the selected
+    token, over the evaluated positions.
+
+    Drawn as an ECDF rather than a histogram. The question is "how large is
+    ``p_max`` at a typical position", which is a quantile question, and an ECDF
+    answers it without a bin width to choose.
+
+    The values are **not silently pooled**. Each initialization contributes its
+    own curve, and the pooled curve is drawn over them, because ``I * D`` values
+    are not one independent sample: every position within an initialization
+    shares one set of weights.
+    """
+
+    from llm_behavior_lab.analysis.predictive import (
+        max_probability_summary,
+        predictive_probability_summary,
+    )
+
+    if not record.has_predictive_probability_analysis:
+        raise ValueError(
+            "This record carries no raw predictive-probability analysis, so "
+            "figure 9 has nothing to draw."
+        )
+    if x_scale not in ("auto", "log", "linear"):
+        raise ValueError(f"x_scale must be 'auto', 'log', or 'linear'; got {x_scale!r}.")
+
+    values = np.asarray(record.predictive_max_probabilities, dtype=np.float64)
+    summary = predictive_probability_summary(record)
+    maximum = max_probability_summary(record)
+    uniform = record.uniform_probability
+
+    figure = _new_figure(width=8.0, height=5.5)
+    axes = figure.subplots()
+
+    # Evaluated on a fixed quantile grid: exact where it matters and a few
+    # hundred vertices per curve instead of tens of thousands.
+    levels = np.linspace(0.0, 1.0, 501)
+    for index in range(values.shape[0]):
+        axes.plot(
+            np.quantile(values[index], levels),
+            levels,
+            color="#1f77b4",
+            alpha=0.35,
+            linewidth=0.8,
+            label="per initialization" if index == 0 else None,
+        )
+    axes.plot(
+        np.quantile(values.reshape(-1), levels),
+        levels,
+        color="#08306b",
+        linewidth=1.8,
+        label="pooled over all initializations",
+    )
+    axes.axvline(
+        uniform,
+        color=NULL_STYLE["color"],
+        linestyle="--",
+        linewidth=1.1,
+        label=f"uniform 1/K = {uniform:.3g}",
+    )
+    median = maximum["pooled"]["p50"]
+    axes.axvline(median, color="#d62728", linestyle=":", linewidth=1.1, label=f"median = {median:.3g}")
+
+    if _probability_scale(values.reshape(-1), x_scale):
+        axes.set_xscale("log")
+        scale_note = "log scale"
+    else:
+        scale_note = "linear scale"
+    axes.set_xlabel(
+        f"probability of the greedy-selected token  p_max(d)  [{scale_note}]"
+    )
+    axes.set_ylabel("empirical CDF over evaluation positions")
+    axes.set_title("How much probability does the greedy winner carry? (raw, T = 1)")
+    axes.set_ylim(0.0, 1.0)
+    axes.grid(True, which="both", alpha=0.25)
+    axes.legend(loc="lower right", fontsize=8, frameon=True)
+
+    pooled = maximum["pooled"]
+    axes.text(
+        0.02,
+        0.97,
+        "\n".join(
+            [
+                f"D = {_format_count(summary['num_positions'])},"
+                f"  I = {summary['num_initializations']},"
+                f"  K = {_format_count(summary['eligible_vocab_size'])}",
+                f"mean {pooled['mean']:.4g}   median {pooled['p50']:.4g}"
+                f"   max {pooled['p100']:.4g}",
+                f"p05 {pooled['p05']:.3g}  p25 {pooled['p25']:.3g}"
+                f"  p75 {pooled['p75']:.3g}  p95 {pooled['p95']:.3g}",
+                f"median / uniform = {maximum['median_over_uniform']:.1f}x",
+            ]
+        ),
+        transform=axes.transAxes,
+        fontsize=7.5,
+        va="top",
+        ha="left",
+        bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure9_max_predictive_probability_distribution")
+
+
 def plot_gradient_vs_guess_bias(
     record: Any,
     directory: str | Path,
@@ -907,7 +1164,7 @@ def plot_gradient_vs_guess_bias(
     x_scale: str = "auto",
     num_labels: int = 4,
 ) -> list[Path]:
-    """Figure 8 -- does the model pull hardest on the tokens it likes to guess?
+    """Figure 10 -- does the model pull hardest on the tokens it likes to guess?
 
     One marker per token with ``n_i > 0``: its exact mean full-parameter gradient
     norm ``G_i`` against the fraction ``q_i`` of the *same* evaluation positions
@@ -1071,7 +1328,7 @@ def plot_gradient_vs_guess_bias(
         ha="left",
         bbox=_ANNOTATION_BOX,
     )
-    return save_figure(figure, directory, "figure8_gradient_vs_initial_guess_bias")
+    return save_figure(figure, directory, "figure10_gradient_vs_initial_guess_bias")
 
 
 def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
@@ -1088,6 +1345,9 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
         written.extend(plot_temperature_ranked_profiles(record, directory))
         written.extend(plot_temperature_ranked_distances(record, directory))
         written.extend(plot_temperature_support_and_agreement(record, directory))
+    if record.has_predictive_probability_analysis:
+        written.extend(plot_ranked_predictive_probabilities(record, directory))
+        written.extend(plot_max_predictive_probability(record, directory))
     if record.has_position_gradients:
         written.extend(plot_gradient_vs_guess_bias(record, directory))
     return written

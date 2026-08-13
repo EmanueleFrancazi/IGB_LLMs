@@ -40,6 +40,7 @@ from llm_behavior_lab.analysis import (  # noqa: E402
     gradient_guess_correlations,
     gradient_observable_summary,
     load_record,
+    predictive_probability_summary,
 )
 
 #: Selectable figures. ``all`` runs the record's full figure set.
@@ -52,7 +53,16 @@ FIGURES = {
     "figure5": "plot_temperature_ranked_profiles",
     "figure6": "plot_temperature_ranked_distances",
     "figure7": "plot_temperature_support_and_agreement",
-    "figure8": "plot_gradient_vs_guess_bias",
+    "figure8": "plot_ranked_predictive_probabilities",
+    "figure9": "plot_max_predictive_probability",
+    "figure10": "plot_gradient_vs_guess_bias",
+}
+
+#: Figures that exist only when the record carries the analysis behind them.
+CONDITIONAL_FIGURES = {
+    "figure8": "has_predictive_probability_analysis",
+    "figure9": "has_predictive_probability_analysis",
+    "figure10": "has_position_gradients",
 }
 
 
@@ -94,10 +104,13 @@ def parse_args() -> argparse.Namespace:
         help="Also write those statistics to this JSON file.",
     )
     parser.add_argument(
-        "--x-scale",
+        "--scale",
         choices=["auto", "log", "linear"],
         default="auto",
-        help="Figure 8 gradient-axis scale. 'auto' follows the observed range.",
+        help=(
+            "Probability/gradient axis scale for whichever of figures 8, 9 or 10 "
+            "is drawn. 'auto' follows the observed dynamic range."
+        ),
     )
     return parser.parse_args()
 
@@ -114,7 +127,7 @@ def _print_quantiles(title: str, summary: dict[str, Any]) -> None:
 
 
 def report_gradient_statistics(record: Any) -> dict[str, Any]:
-    """Print, and return, everything needed to choose scales for figure 8."""
+    """Print, and return, everything needed to choose scales for figure 10."""
 
     summary = gradient_observable_summary(record)
     correlations = gradient_guess_correlations(record)
@@ -175,8 +188,62 @@ def report_gradient_statistics(record: Any) -> dict[str, Any]:
     return {"distributions": summary, "correlations": correlations}
 
 
+def report_predictive_statistics(record: Any) -> dict[str, Any]:
+    """Print, and return, the raw predictive-probability diagnostics.
+
+    These describe the distribution *before* any sampling policy: raw logits,
+    eligible support, softmax at T = 1, no top-p truncation, no greedy or nucleus
+    decision. They are not the nucleus distribution and must not be read as it.
+    """
+
+    summary = predictive_probability_summary(record)
+    uniform = summary["uniform_probability"]
+
+    print("\n== Raw predictive distribution (T = 1, eligible support, pre-sampling) ==")
+    protocol = summary["protocol"]
+    if protocol:
+        print(
+            f"  temperature {protocol.get('temperature')},"
+            f" support {protocol.get('support')},"
+            f" before top-p: {protocol.get('before_top_p')},"
+            f" before sampling: {protocol.get('before_sampling')}"
+        )
+    print(
+        f"  D = {summary['num_positions']:,},  I = {summary['num_initializations']},"
+        f"  eligible K = {summary['eligible_vocab_size']:,},  uniform 1/K = {uniform:.6g}"
+    )
+
+    print("\n  Ranked profile: probabilities ranked WITHIN each position, then averaged.")
+    print("  (Distinct from figure 1, which ranks guess frequencies accumulated ACROSS positions.)")
+    print(f"  {'rank':>8} {'Pbar(r)':>14} {'x uniform':>12}")
+    for rank, value in summary["ranked_profile_at_rank"].items():
+        print(f"  {rank:>8} {value:>14.6g} {value / uniform:>12.3f}")
+    print(f"    profile dynamic range max/min = {summary['profile_dynamic_range']:.6g}")
+    print(f"    ranks with exactly zero mean probability: {summary['num_zero_ranks']:,}")
+
+    maximum = summary["max_probability"]
+    print("\n  p_max(d): probability of the token greedy selects")
+    _print_quantiles("p_max", maximum["pooled"])
+    print(
+        f"    median / uniform = {maximum['median_over_uniform']:.3f}x,"
+        f"  mean / uniform = {maximum['mean_over_uniform']:.3f}x"
+    )
+    print(
+        "    per-initialization means: "
+        + ", ".join(f"{value:.4g}" for value in maximum["per_initialization_mean"])
+    )
+
+    target = summary["target_probability"]
+    print("\n  p_target(d) and -log p_target(d): persisted for the gradient analysis")
+    _print_quantiles("p_target", target["probability"])
+    _print_quantiles("loss", target["loss"])
+    print(f"    uniform loss log(K) = {target['uniform_loss']:.6g}")
+
+    return summary
+
+
 def main() -> None:
-    """Report gradient statistics and redraw the requested figures."""
+    """Report the available statistics and redraw the requested figures."""
 
     args = parse_args()
     record = load_record(args.record_dir, name=args.name)
@@ -184,11 +251,15 @@ def main() -> None:
     print(f"Record: {args.record_dir}")
     print(f"  vocabulary {record.vocab_size:,}, initializations {record.num_initializations}")
     print(f"  temperature sweep: {record.has_temperature_sweep}")
+    print(f"  predictive probabilities: {record.has_predictive_probability_analysis}")
     print(f"  position gradients: {record.has_position_gradients}")
 
-    statistics = None
+    statistics: dict[str, Any] = {}
+    if record.has_predictive_probability_analysis:
+        statistics["predictive_probabilities"] = report_predictive_statistics(record)
     if record.has_position_gradients:
-        statistics = report_gradient_statistics(record)
+        statistics["gradients"] = report_gradient_statistics(record)
+    if statistics:
         if args.stats_json is not None:
             args.stats_json.parent.mkdir(parents=True, exist_ok=True)
             args.stats_json.write_text(
@@ -196,11 +267,6 @@ def main() -> None:
                 encoding="utf-8",
             )
             print(f"\nStatistics written: {args.stats_json}")
-    elif args.only == "figure8":
-        raise SystemExit(
-            "This record carries no per-position gradient analysis, so figure 8 "
-            "cannot be drawn from it."
-        )
 
     if args.stats_only:
         return
@@ -211,10 +277,20 @@ def main() -> None:
     if args.only == "all":
         written = figure_module.generate_all_figures(record, figures_dir)
     else:
+        required = CONDITIONAL_FIGURES.get(args.only)
+        if required is not None and not getattr(record, required):
+            raise SystemExit(
+                f"This record does not carry the analysis behind {args.only} "
+                f"({required} is false), so it cannot be drawn from it."
+            )
         function = getattr(figure_module, FIGURES[args.only])
+        # Each of the three newer figures exposes exactly one scale knob, under
+        # the name its own axis uses.
+        scale_argument = {"figure8": "y_scale", "figure9": "x_scale", "figure10": "x_scale"}
+        keyword = scale_argument.get(args.only)
         written = (
-            function(record, figures_dir, x_scale=args.x_scale)
-            if args.only == "figure8"
+            function(record, figures_dir, **{keyword: args.scale})
+            if keyword is not None
             else function(record, figures_dir)
         )
 

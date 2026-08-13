@@ -1,7 +1,7 @@
 """Token-level aggregation of per-position parameter-gradient norms.
 
 The record stores one exact gradient norm per evaluation position. This module
-turns those into the per-token quantities the eventual figure 8 relates, and it
+turns those into the per-token quantities the eventual figure 10 relates, and it
 is the only place that aggregation is defined.
 
 Let ``S`` be the set of positions the gradient analysis actually covered -- every
@@ -272,7 +272,7 @@ def _plotted_mask(record: Any) -> np.ndarray:
 
 
 def gradient_observable_summary(record: Any) -> dict[str, Any]:
-    """Describe the distributions behind figure 8, before anything is plotted.
+    """Describe the distributions behind figure 10, before anything is plotted.
 
     Axis scaling and colour normalization are chosen from these numbers rather
     than assumed, so this is deliberately a separate, printable step.
@@ -325,7 +325,7 @@ def gradient_observable_summary(record: Any) -> dict[str, Any]:
 def gradient_guess_correlations(record: Any) -> dict[str, Any]:
     """Rank correlations between ``G_i``, ``q_i`` and ``p_i``.
 
-    Computed over every token with ``n_i > 0`` -- the same set figure 8 plots.
+    Computed over every token with ``n_i > 0`` -- the same set figure 10 plots.
     Tokens that were never greedily guessed are **included**: ``q_i = 0`` is a
     measured outcome, and dropping it would bias the primary coefficient towards
     the tokens the model happens to favour.
