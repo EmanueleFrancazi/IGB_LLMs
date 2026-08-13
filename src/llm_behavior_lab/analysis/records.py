@@ -39,7 +39,7 @@ __all__ = [
 #: eligible -- exactly the default applied when that array is absent -- and the
 #: version 3 additions are optional, so their absence simply means the run did
 #: not carry those comparisons.
-RECORD_VERSION = 3
+RECORD_VERSION = 4
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -60,6 +60,12 @@ _OPTIONAL_ARRAY_NAMES = ("eligible_token_ids",)
 _CONDITION_GREEDY_PREFIX = "condition_greedy__"
 _CONDITION_NUCLEUS_PREFIX = "condition_nucleus__"
 _NULL_PREFIX = "uniform_null__"
+
+#: Version 4 additions. ``sweep_counts__<condition>`` is ``[S, T, V]`` and
+#: ``sweep_agreement__<condition>`` is ``[S, T]``; the temperatures themselves
+#: live in metadata so the arrays stay purely numeric.
+_SWEEP_COUNTS_PREFIX = "sweep_counts__"
+_SWEEP_AGREEMENT_PREFIX = "sweep_agreement__"
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -138,6 +144,11 @@ class InitializationExperimentRecord:
     condition_nucleus_counts: dict[str, np.ndarray] = field(default_factory=dict)
     #: ``ranked_mean`` / ``ranked_low`` / ``ranked_high`` over the eligible support.
     uniform_null: dict[str, np.ndarray] = field(default_factory=dict)
+    #: Input condition -> ``[S, T, V]`` nucleus counts, one row per sweep
+    #: temperature. Absent when no sweep ran.
+    sweep_counts_by_condition: dict[str, np.ndarray] = field(default_factory=dict)
+    #: Input condition -> ``[S, T]`` fraction of positions agreeing with greedy.
+    sweep_agreement_by_condition: dict[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.validate()
@@ -260,6 +271,41 @@ class InitializationExperimentRecord:
 
         return "ranked_mean" in self.uniform_null
 
+    @property
+    def has_temperature_sweep(self) -> bool:
+        """Whether a multi-temperature nucleus sweep was recorded."""
+
+        return bool(self.sweep_counts_by_condition) and bool(self.sweep_temperatures)
+
+    @property
+    def sweep_temperatures(self) -> tuple[float, ...]:
+        """Sweep temperatures, in the order they were run and persisted."""
+
+        recorded = self.metadata.get("analysis", {}).get("temperature_sweep", {})
+        return tuple(float(value) for value in recorded.get("temperatures", ()))
+
+    @property
+    def sweep_conditions(self) -> tuple[str, ...]:
+        """Input conditions the sweep covers, ``real`` first."""
+
+        extra = [c for c in ("shuffled", "gaussian") if c in self.sweep_counts_by_condition]
+        return ("real", *extra) if "real" in self.sweep_counts_by_condition else tuple(extra)
+
+    def sweep_counts(self, condition: str = "real") -> np.ndarray:
+        """``[S, T, V]`` sweep counts for one input condition."""
+
+        if condition not in self.sweep_counts_by_condition:
+            raise KeyError(
+                f"Record has no sweep counts for condition {condition!r}; "
+                f"available: {self.sweep_conditions}."
+            )
+        return self.sweep_counts_by_condition[condition]
+
+    def sweep_agreement(self, condition: str = "real") -> np.ndarray | None:
+        """``[S, T]`` greedy agreement, or ``None`` when it was not recorded."""
+
+        return self.sweep_agreement_by_condition.get(condition)
+
     def condition_counts(self, condition: str, policy: str) -> np.ndarray:
         """Raw counts for one input condition and policy.
 
@@ -375,6 +421,18 @@ class InitializationExperimentRecord:
                         f"{name}[{condition!r}] has shape {array.shape}, expected {expected}; "
                         "every condition must cover the same initializations and support."
                     )
+        for condition, array in self.sweep_counts_by_condition.items():
+            if array.ndim != 3 or array.shape[0] != num_inits or array.shape[2] != vocab_size:
+                raise ValueError(
+                    f"sweep_counts[{condition!r}] must have shape "
+                    f"[initializations, temperatures, vocab]; got {array.shape}."
+                )
+        for condition, array in self.sweep_agreement_by_condition.items():
+            if array.ndim != 2 or array.shape[0] != num_inits:
+                raise ValueError(
+                    f"sweep_agreement[{condition!r}] must have shape "
+                    f"[initializations, temperatures]; got {array.shape}."
+                )
         for key, array in self.uniform_null.items():
             if array.ndim != 1:
                 raise ValueError(f"uniform_null[{key!r}] must be one-dimensional.")
@@ -400,6 +458,10 @@ class InitializationExperimentRecord:
             arrays[f"{_CONDITION_NUCLEUS_PREFIX}{condition}"] = values
         for key, values in self.uniform_null.items():
             arrays[f"{_NULL_PREFIX}{key}"] = values
+        for condition, values in self.sweep_counts_by_condition.items():
+            arrays[f"{_SWEEP_COUNTS_PREFIX}{condition}"] = values
+        for condition, values in self.sweep_agreement_by_condition.items():
+            arrays[f"{_SWEEP_AGREEMENT_PREFIX}{condition}"] = values
         _atomic_write_bytes(
             directory / f"{name}.npz",
             lambda path: np.savez_compressed(path, **arrays),
@@ -447,6 +509,8 @@ class InitializationExperimentRecord:
             condition_greedy_counts=collect(_CONDITION_GREEDY_PREFIX),
             condition_nucleus_counts=collect(_CONDITION_NUCLEUS_PREFIX),
             uniform_null=collect(_NULL_PREFIX),
+            sweep_counts_by_condition=collect(_SWEEP_COUNTS_PREFIX),
+            sweep_agreement_by_condition=collect(_SWEEP_AGREEMENT_PREFIX),
         )
 
     @classmethod
@@ -464,6 +528,8 @@ class InitializationExperimentRecord:
         condition_greedy_counts: Mapping[str, np.ndarray] | None = None,
         condition_nucleus_counts: Mapping[str, np.ndarray] | None = None,
         uniform_null: Mapping[str, np.ndarray] | None = None,
+        sweep_counts_by_condition: Mapping[str, np.ndarray] | None = None,
+        sweep_agreement_by_condition: Mapping[str, np.ndarray] | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -495,6 +561,13 @@ class InitializationExperimentRecord:
                 key: np.asarray(value) for key, value in (condition_nucleus_counts or {}).items()
             },
             uniform_null={key: np.asarray(value) for key, value in (uniform_null or {}).items()},
+            sweep_counts_by_condition={
+                key: np.asarray(value) for key, value in (sweep_counts_by_condition or {}).items()
+            },
+            sweep_agreement_by_condition={
+                key: np.asarray(value)
+                for key, value in (sweep_agreement_by_condition or {}).items()
+            },
         )
 
 

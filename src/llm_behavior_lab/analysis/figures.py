@@ -35,6 +35,7 @@ from matplotlib.figure import Figure
 
 from llm_behavior_lab.analysis.aggregation import (
     corpus_observed_zero_guess_counts,
+    effective_support,
     paired_condition_distances,
     effective_support,
     effective_supports,
@@ -61,6 +62,7 @@ __all__ = [
     "plot_ranked_frequency_profiles",
     "plot_sampling_adequacy",
     "plot_input_structure_profiles",
+    "plot_temperature_transition",
     "plot_token_identity_scatter",
     "plot_token_wise_mismatch",
     "save_figure",
@@ -684,6 +686,136 @@ def plot_input_structure_profiles(record: Any, directory: str | Path) -> list[Pa
     return save_figure(figure, directory, "figure4_input_structure_profiles")
 
 
+
+def plot_temperature_transition(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 5 -- where each temperature sits between greedy and the null.
+
+    Greedy is the ``T = 0`` anchor and the finite-``D`` uniform categorical null
+    is the high-temperature reference. Panel A shows the ranked real-input
+    profiles moving between them; panel B tracks that movement as two ranked
+    distances; panel C adds concentration and identity diagnostics, including
+    the same curves for every input condition so a difference in *rate* between
+    conditions is visible without six more ranked curves.
+
+    Panels A and B discard token identity -- both distances compare
+    independently ranked profiles. Greedy agreement in panel C is the one
+    identity-preserving quantity here.
+
+    Nothing in the layout presumes a sharp critical temperature.
+    """
+
+    from llm_behavior_lab.analysis.transition import sweep_summary
+
+    if not record.has_temperature_sweep:
+        raise ValueError(
+            "This record carries no temperature sweep; run the experiment with "
+            "temperature_sweep enabled to produce figure 5."
+        )
+
+    summary = sweep_summary(record)
+    temperatures = summary["temperatures"]
+    real = summary["conditions"]["real"]["metrics"]
+    ranks = np.arange(1, record.eligible_vocab_size + 1)
+    style = _profile_kwargs(_is_large(record))
+
+    figure = _new_figure(width=13.0, height=5.0)
+    panels = figure.subplots(1, 3)
+
+    # -- Panel A: ranked profiles from greedy to the null -----------------
+    axes = panels[0]
+    greedy = eligible_view(record, record.greedy_fractions).mean(axis=0)
+    axes.plot(
+        ranks,
+        _positive(ranked_profile(greedy)),
+        color="#000000",
+        linewidth=2.0,
+        label="greedy (T=0)",
+        **style,
+    )
+    colours = ["#3b4cc0", "#6f8fe8", "#9bb0ec", "#e8896f", "#d1503a", "#8b0000"]
+    profiles = eligible_view(record, _sweep_fractions(record, "real")).mean(axis=0)
+    for index, temperature in enumerate(temperatures):
+        axes.plot(
+            ranks,
+            _positive(ranked_profile(profiles[index])),
+            color=colours[index % len(colours)],
+            linewidth=1.3,
+            label=f"T={temperature:g}",
+            **style,
+        )
+    if record.has_uniform_null:
+        axes.plot(
+            ranks,
+            # Already stored on the eligible support, exactly as figure 1 uses it.
+            _positive(ranked_profile(record.uniform_null["ranked_mean"])),
+            color=NULL_STYLE["color"],
+            linewidth=1.6,
+            linestyle="--",
+            label="uniform D-draw null",
+            **style,
+        )
+    _configure_rank_axis(axes, record, "frequency rank")
+    axes.set_ylabel("selected-guess fraction")
+    axes.set_title("A. ranked profiles, real input")
+    axes.legend(loc="upper right", fontsize=6.5, frameon=True, ncol=2)
+
+    # -- Panel B: ranked distances to each anchor -------------------------
+    axes = panels[1]
+    for name, colour, label in (
+        ("tv_rank_to_greedy", "#000000", "ranked TV to greedy (T=0)"),
+        ("tv_rank_to_uniform", NULL_STYLE["color"], "ranked TV to uniform null"),
+    ):
+        mean = np.array(real[name]["mean"])
+        sem = np.array(real[name]["sem"])
+        axes.errorbar(
+            temperatures, mean, yerr=sem, color=colour, marker="o", markersize=4,
+            linewidth=1.4, capsize=2, label=label,
+        )
+    axes.set_xlabel("temperature")
+    axes.set_ylabel("ranked-profile total variation")
+    axes.set_title("B. shape distance to each anchor")
+    axes.grid(True, alpha=0.25)
+    axes.legend(loc="best", fontsize=7, frameon=True)
+
+    # -- Panel C: concentration and identity, across conditions -----------
+    axes = panels[2]
+    for condition in summary["conditions"]:
+        metrics = summary["conditions"][condition]["metrics"]
+        axes.errorbar(
+            temperatures,
+            metrics["effective_support_over_null"]["mean"],
+            yerr=metrics["effective_support_over_null"]["sem"],
+            color=CONDITION_STYLES[condition]["color"],
+            marker="o", markersize=3.5, linewidth=1.3, capsize=2,
+            label=f"{condition}: N_eff / N_eff(null)",
+        )
+    axes.axhline(1.0, color=NULL_STYLE["color"], linestyle=":", linewidth=1.0)
+    axes.plot(
+        temperatures,
+        real["agreement_with_greedy"]["mean"],
+        color="#000000", marker="s", markersize=3.5, linewidth=1.3, linestyle="--",
+        label="real: agreement with greedy",
+    )
+    axes.set_xlabel("temperature")
+    axes.set_ylabel("ratio / fraction")
+    axes.set_title("C. concentration vs. null, and greedy agreement")
+    axes.grid(True, alpha=0.25)
+    axes.legend(loc="best", fontsize=6.5, frameon=True)
+
+    figure.suptitle(
+        f"Temperature transition at fixed top_p = {summary.get('top_p')} "
+        f"(R=1, {summary['conditions']['real']['num_initializations']} initializations)"
+    )
+    return save_figure(figure, directory, "figure5_temperature_transition")
+
+
+def _sweep_fractions(record: Any, condition: str) -> np.ndarray:
+    """``[S, T, V]`` sweep fractions, normalized per temperature."""
+
+    counts = record.sweep_counts(condition).astype(np.float64)
+    return counts / counts.sum(axis=-1, keepdims=True)
+
+
 def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     """Write every figure for one record and return the paths in figure order."""
 
@@ -694,4 +826,6 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     written.extend(plot_token_identity_scatter(record, directory))
     if record.has_input_structure:
         written.extend(plot_input_structure_profiles(record, directory))
+    if record.has_temperature_sweep:
+        written.extend(plot_temperature_transition(record, directory))
     return written

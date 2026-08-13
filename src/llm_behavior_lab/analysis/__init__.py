@@ -55,6 +55,13 @@ from llm_behavior_lab.analysis.nulls import (
     expected_zero_frequency_fraction,
     simulate_uniform_null,
 )
+from llm_behavior_lab.analysis.transition import (
+    TRANSITION_METRICS,
+    ranked_distance_to_greedy,
+    ranked_distance_to_uniform,
+    sweep_condition_summary,
+    sweep_summary,
+)
 from llm_behavior_lab.analysis.records import (
     RECORD_VERSION,
     InitializationExperimentRecord,
@@ -63,6 +70,11 @@ from llm_behavior_lab.analysis.records import (
 
 __all__ = [
     "CONDITION_PAIRS",
+    "TRANSITION_METRICS",
+    "ranked_distance_to_greedy",
+    "ranked_distance_to_uniform",
+    "sweep_condition_summary",
+    "sweep_summary",
     "DEFAULT_NULL_REPLICATES",
     "InitializationExperimentRecord",
     "UniformNullSummary",
