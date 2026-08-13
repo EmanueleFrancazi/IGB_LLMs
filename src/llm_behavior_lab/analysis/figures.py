@@ -36,6 +36,7 @@ from matplotlib.figure import Figure
 from llm_behavior_lab.analysis.aggregation import (
     corpus_observed_zero_guess_counts,
     effective_support,
+    ranked_profile_with_error,
     paired_condition_distances,
     effective_support,
     effective_supports,
@@ -333,7 +334,7 @@ def plot_ranked_frequency_profiles(record: Any, directory: str | Path) -> list[P
 
     for policy in ("greedy", "nucleus"):
         guesses = eligible_view(record, record.policy_fractions(policy))
-        profile = mean_with_sem(ranked_profiles(guesses))
+        profile = ranked_profile_with_error(guesses)
         colour = POLICY_STYLES[policy]["color"]
         axes.plot(
             ranks,
@@ -637,7 +638,7 @@ def plot_input_structure_profiles(record: Any, directory: str | Path) -> list[Pa
             fractions = eligible_view(
                 record, record.condition_policy_fractions(condition, policy)
             )
-            profile = mean_with_sem(ranked_profiles(fractions))
+            profile = ranked_profile_with_error(fractions)
             colour = CONDITION_STYLES[condition]["color"]
             axes.plot(
                 ranks,
@@ -723,21 +724,25 @@ def plot_temperature_transition(record: Any, directory: str | Path) -> list[Path
 
     # -- Panel A: ranked profiles from greedy to the null -----------------
     axes = panels[0]
-    greedy = eligible_view(record, record.greedy_fractions).mean(axis=0)
+    # Same convention as figure 1: rank within each initialization, then average
+    # corresponding ranks. Averaging by token identity first would flatten these
+    # curves, most severely at high temperature.
+    greedy = ranked_profile_with_error(eligible_view(record, record.greedy_fractions))
     axes.plot(
         ranks,
-        _positive(ranked_profile(greedy)),
+        _positive(greedy.mean),
         color="#000000",
         linewidth=2.0,
         label="greedy (T=0)",
         **style,
     )
     colours = ["#3b4cc0", "#6f8fe8", "#9bb0ec", "#e8896f", "#d1503a", "#8b0000"]
-    profiles = eligible_view(record, _sweep_fractions(record, "real")).mean(axis=0)
+    sweep = eligible_view(record, _sweep_fractions(record, "real"))
     for index, temperature in enumerate(temperatures):
+        profile = ranked_profile_with_error(sweep[:, index, :])
         axes.plot(
             ranks,
-            _positive(ranked_profile(profiles[index])),
+            _positive(profile.mean),
             color=colours[index % len(colours)],
             linewidth=1.3,
             label=f"T={temperature:g}",

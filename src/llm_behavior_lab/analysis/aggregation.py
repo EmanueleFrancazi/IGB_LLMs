@@ -36,6 +36,7 @@ __all__ = [
     "eligible_view",
     "js_divergence",
     "mean_with_sem",
+    "ranked_profile_with_error",
     "CONDITION_PAIRS",
     "paired_concentration_differences",
     "paired_condition_distances",
@@ -99,6 +100,32 @@ def ranked_profiles(matrix: np.ndarray) -> np.ndarray:
     if values.ndim != 2:
         raise ValueError("ranked_profiles expects a two-dimensional array.")
     return np.sort(values, axis=1)[:, ::-1]
+
+
+def ranked_profile_with_error(matrix: np.ndarray) -> MeanWithError:
+    """Mean ranked concentration profile and its SEM across realizations.
+
+    **Rank first within each independent realization, then average corresponding
+    ranks:** ``mean_s( sort(q_s) )``. Every ranked-profile curve in the figures
+    goes through this function so the convention cannot drift between them.
+
+    The reverse order, ``sort( mean_s(q_s) )``, is a *different quantity* and the
+    two do not commute. Averaging by token identity first lets fluctuations that
+    land on different tokens in different realizations cancel, which flattens the
+    profile -- badly so at high temperature, where the identity of a
+    finite-sample spike is essentially arbitrary. That quantity describes the
+    concentration of the persistent mean distribution and is legitimate, but it
+    is not the typical concentration shape, which is what a ranked profile means
+    here.
+
+    Args:
+        matrix: ``[realizations, support]`` distributions, one row each.
+
+    Returns:
+        Rank-indexed mean and SEM across realizations.
+    """
+
+    return mean_with_sem(ranked_profiles(matrix))
 
 
 def mean_with_sem(matrix: np.ndarray) -> MeanWithError:

@@ -715,3 +715,125 @@ def test_the_sweep_shares_one_sort_in_the_implementation() -> None:
     ]
 
     assert not sorts_in_loops
+
+
+# -- ranked-profile aggregation order -------------------------------------
+#
+# Figure 1 and figure 5 panel A must answer the same question. Figure 5 once
+# averaged by token identity across initializations and ranked afterwards, which
+# is a different quantity and visibly flattened the high-temperature curves.
+
+from llm_behavior_lab.analysis import ranked_profile_with_error  # noqa: E402
+from llm_behavior_lab.analysis.aggregation import ranked_profile, ranked_profiles  # noqa: E402
+
+
+def test_ranking_and_averaging_do_not_commute() -> None:
+    """The whole reason the convention has to be stated explicitly.
+
+    Two initializations place their spike on *different* tokens. Ranking first
+    preserves the spike in the profile; averaging by identity first splits it
+    across two tokens and flattens it.
+    """
+
+    guesses = np.array([[0.8, 0.2, 0.0], [0.0, 0.2, 0.8]])
+
+    rank_first = ranked_profile_with_error(guesses).mean
+    average_first = ranked_profile(guesses.mean(axis=0))
+
+    assert rank_first.tolist() == pytest.approx([0.8, 0.2, 0.0])
+    assert average_first.tolist() == pytest.approx([0.4, 0.4, 0.2])
+    assert not np.allclose(rank_first, average_first)
+
+
+def test_the_helper_ranks_within_each_realization_first() -> None:
+    """``mean_s(sort(q_s))``, the authoritative convention."""
+
+    guesses = np.array([[0.1, 0.9], [0.7, 0.3]])
+
+    profile = ranked_profile_with_error(guesses)
+
+    assert profile.mean.tolist() == pytest.approx([0.8, 0.2])
+    assert np.allclose(profile.mean, ranked_profiles(guesses).mean(axis=0))
+
+
+def test_the_helper_reports_sem_across_realizations() -> None:
+    """SEM is taken rank by rank, after ranking."""
+
+    guesses = np.array([[0.9, 0.1], [0.7, 0.3]])
+
+    profile = ranked_profile_with_error(guesses)
+
+    assert profile.num_samples == 2
+    # std(ddof=1) of [0.9, 0.7] is 0.1*sqrt(2); dividing by sqrt(2) leaves 0.1.
+    assert profile.sem.tolist() == pytest.approx([0.1, 0.1])
+
+
+def test_figure_one_and_figure_five_agree_at_the_canonical_temperature() -> None:
+    """The strongest check that the two figures now plot the same quantity.
+
+    The sweep entry at the canonical temperature holds the same counts as the
+    canonical nucleus policy, so their ranked profiles must match exactly -- mean
+    and SEM alike -- once both use rank-first aggregation.
+    """
+
+    from llm_behavior_lab.analysis import eligible_view
+
+    record = _sweep_record(num_initializations=4)
+    index = list(record.sweep_temperatures).index(CANONICAL)
+
+    # Figure 1 builds its nucleus curve from the canonical counts.
+    canonical = eligible_view(record, record.nucleus_fractions)
+    figure_one = ranked_profile_with_error(canonical)
+
+    # Figure 5 panel A builds its T=0.6 curve from the sweep counts.
+    sweep_counts = record.sweep_counts("real").astype(np.float64)
+    sweep_fractions = sweep_counts / sweep_counts.sum(axis=-1, keepdims=True)
+    figure_five = ranked_profile_with_error(eligible_view(record, sweep_fractions)[:, index, :])
+
+    assert np.array_equal(
+        record.sweep_counts("real")[:, index, :], record.nucleus_counts[:, 0, :]
+    )
+    assert np.allclose(figure_one.mean, figure_five.mean, rtol=0, atol=0)
+    assert np.allclose(figure_one.sem, figure_five.sem, rtol=0, atol=0)
+
+
+def test_the_uniform_null_profile_is_already_rank_first() -> None:
+    """The null averages ranked realizations, so re-ranking it is a no-op.
+
+    Each Monte Carlo replicate is ranked before the mean is taken, exactly the
+    convention the figures use, so the stored profile is already non-increasing.
+    """
+
+    from llm_behavior_lab.analysis import simulate_uniform_null
+
+    null = simulate_uniform_null(
+        eligible_vocab_size=64, num_draws=200, num_replicates=32, seed=5
+    )
+
+    assert np.all(np.diff(null.ranked_mean) <= 1e-15)
+    assert np.allclose(ranked_profile(null.ranked_mean), null.ranked_mean)
+
+
+def test_the_transition_metrics_were_already_rank_first() -> None:
+    """They compare per-initialization profiles, so the bug never reached them.
+
+    Recomputing a metric from per-initialization rows must reproduce what the
+    summary reports.
+    """
+
+    from llm_behavior_lab.analysis import eligible_view
+
+    record = _sweep_record(num_initializations=3)
+    summary = sweep_condition_summary(record, "real")
+
+    counts = record.sweep_counts("real").astype(np.float64)
+    fractions = eligible_view(record, counts / counts.sum(axis=-1, keepdims=True))
+    greedy = eligible_view(record, record.greedy_fractions)
+    expected = float(
+        np.mean([
+            ranked_distance_to_greedy(fractions[s, 0], greedy[s])
+            for s in range(record.num_initializations)
+        ])
+    )
+
+    assert summary["metrics"]["tv_rank_to_greedy"]["mean"][0] == pytest.approx(expected)
