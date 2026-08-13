@@ -140,6 +140,35 @@ input_structure:
   shuffle_seed: 60001
   gaussian_seed: 60002
 
+gradient_analysis:
+  # For every evaluation position d with true next token y_d, the exact L2 norm
+  # of the gradient of that single position's cross-entropy loss with respect to
+  # ALL trainable parameters:
+  #
+  #   ell_d = -log P(y_d | context_d)      softmax over the eligible support,
+  #                                        the same token universe as greedy q_i
+  #   g_d   = || grad_theta ell_d ||_2
+  #
+  # Aggregated per token as G_i = mean over the positions whose target is i. The
+  # greedy prediction at each of those same positions is stored alongside, so the
+  # guess fractions describe the same position set as the norms.
+  #
+  # Disabled by default because it is not free: the measurement costs one
+  # backward pass per evaluation position, against one forward pass per window
+  # for everything else in this file. Enable it with --gradient-analysis once the
+  # measured cost for the intended position count is known.
+  #
+  # This is NOT the per-layer diagnostic in evaluation/gradient_norms.py, which
+  # differentiates the window-averaged loss with respect to block activations.
+  enabled: false
+  # Only one initialization is measured: the observable is about a single random
+  # model's bias, and the cost scales with the number of initializations.
+  initialization_index: 0
+  # null means every evaluation window. Set an integer to measure a deterministic
+  # evenly spaced subset instead -- a scientific reduction, so choose it
+  # deliberately and record why.
+  num_windows: null
+
 runtime:
   # Windows per forward pass. Affects memory only, never the result: the
   # measurement folds each batch into per-token counters and discards it, and

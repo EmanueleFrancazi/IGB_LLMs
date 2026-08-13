@@ -25,6 +25,14 @@ from llm_behavior_lab.evaluation.init_distribution import (
     deterministic_window_starts,
     measure_initialization,
 )
+from llm_behavior_lab.evaluation.position_gradients import (
+    GRADIENT_DEFINITION,
+    PositionGradientResult,
+    compute_position_gradient_norms,
+    evenly_spaced_indices,
+    masked_evaluation_logits,
+    single_position_losses,
+)
 from llm_behavior_lab.evaluation.output_stats import (
     OutputDistributionSummary,
     entropy_from_probabilities,
@@ -54,6 +62,7 @@ from llm_behavior_lab.evaluation.untrained_analysis import (
 )
 
 __all__ = [
+    "GRADIENT_DEFINITION",
     "EvaluationPositions",
     "GradientNormResult",
     "GradientTrendFit",
@@ -61,6 +70,7 @@ __all__ = [
     "LayerGradientNorm",
     "NucleusSamplingSettings",
     "OutputDistributionSummary",
+    "PositionGradientResult",
     "TokenFrequencySummary",
     "TokenProbabilityGap",
     "TopKPositionExample",
@@ -71,10 +81,12 @@ __all__ = [
     "collect_topk_examples",
     "compute_evaluation_logits",
     "compute_per_layer_gradient_norms",
+    "compute_position_gradient_norms",
     "deterministic_window_starts",
     "empirical_token_counts",
     "empirical_token_frequencies",
     "entropy_from_probabilities",
+    "evenly_spaced_indices",
     "fit_log_gradient_trend",
     "gradient_norm_result_to_dict",
     "greedy_guess_ids",
@@ -83,10 +95,12 @@ __all__ = [
     "js_divergence",
     "kl_divergence",
     "logits_to_probabilities",
+    "masked_evaluation_logits",
     "measure_initialization",
     "nucleus_guess_ids",
     "restrict_to_support",
     "save_gradient_norm_result",
+    "single_position_losses",
     "summarize_output_distribution",
     "summarize_top1_predictions",
     "top1_probability_values",

@@ -72,6 +72,9 @@ from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     build_evaluation_positions,
     measure_initialization,
 )
+from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    compute_position_gradient_norms,
+)
 from llm_behavior_lab.experiment import ExperimentRun, experiment_settings_from_config  # noqa: E402
 from llm_behavior_lab.experiment.naming import compose_run_id  # noqa: E402
 from llm_behavior_lab.models import build_model_from_config  # noqa: E402
@@ -196,6 +199,31 @@ def parse_args() -> argparse.Namespace:
         help="Skip the uniform categorical output null.",
     )
     parser.add_argument(
+        "--gradient-analysis",
+        action="store_true",
+        help=(
+            "Measure the exact per-position parameter-gradient norm for one "
+            "initialization. Costs one backward pass per evaluation position, so "
+            "it is off unless asked for."
+        ),
+    )
+    parser.add_argument(
+        "--no-gradient-analysis",
+        action="store_true",
+        help="Skip the per-position gradient analysis even if the config enables it.",
+    )
+    parser.add_argument(
+        "--gradient-windows",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Measure gradients on a deterministic evenly spaced subset of N "
+            "evaluation windows instead of all of them. This reduces the "
+            "scientific position set; the default measures every window."
+        ),
+    )
+    parser.add_argument(
         "--no-input-structure",
         action="store_true",
         help="Skip the shuffled and Gaussian input conditions.",
@@ -270,6 +298,7 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
     null = experiment_config.get("uniform_null", {})
     sweep = experiment_config.get("temperature_sweep", {})
     structure = experiment_config.get("input_structure", {})
+    gradients = experiment_config.get("gradient_analysis", {})
 
     return {
         "num_initializations": int(
@@ -314,6 +343,17 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         ),
         "shuffle_seed": int(structure.get("shuffle_seed", 60001)),
         "gaussian_seed": int(structure.get("gaussian_seed", 60002)),
+        # A config written before this analysis existed simply does not carry it.
+        "gradient_analysis_enabled": (
+            (bool(gradients.get("enabled", False)) or args.gradient_analysis)
+            and not args.no_gradient_analysis
+        ),
+        "gradient_initialization_index": int(gradients.get("initialization_index", 0)),
+        "gradient_num_windows": (
+            args.gradient_windows
+            if args.gradient_windows is not None
+            else gradients.get("num_windows")
+        ),
     }
 
 
@@ -330,6 +370,14 @@ def main() -> None:
         raise ValueError("--num-initializations must be positive.")
     if protocol["seed_stride"] <= 0:
         raise ValueError("initialization.seed_stride must be positive.")
+    if protocol["gradient_analysis_enabled"] and not (
+        0 <= protocol["gradient_initialization_index"] < protocol["num_initializations"]
+    ):
+        raise ValueError(
+            f"gradient_analysis.initialization_index "
+            f"{protocol['gradient_initialization_index']} is outside the "
+            f"{protocol['num_initializations']} requested initializations."
+        )
 
     batching_config = data_config["batching"]
     block_size = int(protocol["block_size"] or batching_config["block_size"])
@@ -465,6 +513,7 @@ def main() -> None:
     condition_measurements: dict[str, list] = {"shuffled": [], "gaussian": []}
     embedding_moment_log: list[dict[str, Any]] = []
     parameter_count = 0
+    gradient_result = None
 
     shuffled_ids = None
     gaussian_bank = None
@@ -521,6 +570,27 @@ def main() -> None:
             )
 
         measurements.append(measure())
+        if (
+            protocol["gradient_analysis_enabled"]
+            and index == protocol["gradient_initialization_index"]
+        ):
+            # Measured on the model object that was just measured above, not on a
+            # re-seeded reconstruction of it: the observable describes *this*
+            # initialization. The call leaves every parameter, buffer, gradient,
+            # and the train/eval mode exactly as it found them.
+            gradient_result = compute_position_gradient_norms(
+                model,
+                positions,
+                vocab_size=tokenizer.vocab_size,
+                eligible_token_ids=eligible_token_ids,
+                num_windows=protocol["gradient_num_windows"],
+            )
+            rate = gradient_result.num_positions / max(gradient_result.seconds, 1e-9)
+            print(
+                f"    gradient analysis: {gradient_result.num_positions:,} positions "
+                f"over {gradient_result.parameter_count:,} parameters in "
+                f"{gradient_result.seconds:,.1f}s ({rate:,.1f} positions/s)"
+            )
         if protocol["input_structure_enabled"]:
             # Same model object, same weights, same nucleus uniforms: only the
             # input changes, so any difference is attributable to the input.
@@ -553,6 +623,21 @@ def main() -> None:
             num_draws=positions.num_positions,
             num_replicates=protocol["uniform_null_replicates"],
             seed=protocol["uniform_null_seed"],
+        )
+
+    if gradient_result is None:
+        gradient_metadata: dict[str, Any] = {"enabled": False}
+    else:
+        gradient_index = protocol["gradient_initialization_index"]
+        gradient_metadata = gradient_result.as_metadata(
+            enabled=True,
+            initialization_index=gradient_index,
+            model_seed=model_seeds[gradient_index],
+            input_condition="real",
+            guessing_policy="greedy",
+            covers_all_positions=(
+                gradient_result.num_positions == positions.num_positions
+            ),
         )
 
     settings = experiment_settings_from_config(experiment_config)
@@ -595,6 +680,7 @@ def main() -> None:
                 "shares_logits_with_canonical": True,
                 "shares_uniforms_with_canonical": True,
             },
+            "gradient_analysis": gradient_metadata,
             "vocab_size": tokenizer.vocab_size,
             "eligible_vocab_size": len(eligible_token_ids),
             "excluded_special_token_ids": sorted(special_token_ids),
@@ -673,6 +759,18 @@ def main() -> None:
         },
         sweep_counts_by_condition=sweep_arrays("sweep_counts"),
         sweep_agreement_by_condition=sweep_arrays("sweep_agreement"),
+        gradient_position_indices=(
+            None if gradient_result is None else gradient_result.position_indices.numpy()
+        ),
+        gradient_position_target_ids=(
+            None if gradient_result is None else gradient_result.target_ids.numpy()
+        ),
+        gradient_position_greedy_ids=(
+            None if gradient_result is None else gradient_result.greedy_ids.numpy()
+        ),
+        gradient_position_norms=(
+            None if gradient_result is None else gradient_result.gradient_norms.numpy()
+        ),
         uniform_null=(
             {}
             if null_summary is None
@@ -849,6 +947,34 @@ def main() -> None:
                 ratios = summary["conditions"][name]["metrics"]["effective_support_over_null"]["mean"]
                 print(f"    {name:<9} " + "  ".join(f"{value:.3f}" for value in ratios))
         run.save_analysis_json("temperature_sweep_summary.json", summary)
+
+    if gradient_result is not None:
+        from llm_behavior_lab.analysis import gradient_guess_table
+
+        table = gradient_guess_table(record)
+        measured = table["target_occurrence_count"] > 0
+        norms = table["mean_gradient_norm"][measured]
+        print(
+            f"\nPer-position parameter-gradient norms "
+            f"(initialization {gradient_metadata['initialization_index']}, "
+            f"seed {gradient_metadata['model_seed']}, real input, "
+            f"{gradient_metadata['softmax_support']} support):"
+        )
+        print(
+            f"  positions differentiated : {table['num_positions']:,}"
+            f"  ({'all' if table['covers_all_positions'] else 'SUBSET of'} "
+            f"{positions.num_positions:,})"
+        )
+        print(f"  parameters in the norm   : {gradient_metadata['parameter_count']:,}")
+        print(f"  mean single-position loss: {gradient_metadata['mean_loss']:.6f}")
+        print(
+            f"  G_i over {int(measured.sum()):,} tokens with targets: "
+            f"min {norms.min():.6g}, median {np.median(norms):.6g}, max {norms.max():.6g}"
+        )
+        print(
+            f"  measurement time         : {gradient_result.seconds:,.1f}s "
+            f"({table['num_positions'] / max(gradient_result.seconds, 1e-9):,.1f} positions/s)"
+        )
 
     figure_paths: list[Path] = []
     if not args.no_figures:
