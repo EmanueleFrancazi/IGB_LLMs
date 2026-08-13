@@ -135,11 +135,20 @@ def analyze_untrained_outputs(
     output_summary = summarize_output_distribution(logits, probabilities, top_k=top_k)
 
     empirical_counts = empirical_token_counts(empirical_token_ids, vocab_size=tokenizer.vocab_size)
+    predicted_probabilities = average_predicted_probabilities(probabilities)
+    # Device-alignment policy: corpus-derived vectors are built from a Python
+    # sequence of token IDs and therefore always land on the CPU, while anything
+    # derived from the model lives wherever the model does. This function is the
+    # one place the two meet, so they are aligned here, once, rather than inside
+    # each comparison below -- those stay strict, so a genuine mismatch between
+    # two model-derived tensors still surfaces instead of being silently moved.
+    # The empirical vector is moved to the model's device rather than the reverse
+    # because ``probabilities`` is [batch, sequence, vocab] and this one is
+    # [vocab]: aligning the small side avoids copying the large one off the GPU.
     empirical_frequencies = empirical_token_frequencies(
         empirical_token_ids,
         vocab_size=tokenizer.vocab_size,
-    )
-    predicted_probabilities = average_predicted_probabilities(probabilities)
+    ).to(predicted_probabilities.device)
 
     top1_summaries, top1_concentration = summarize_top1_predictions(
         probabilities,

@@ -246,10 +246,15 @@ def _persist_analysis_run(
 
     probabilities = logits_to_probabilities(logits, vocab_size_limit=tokenizer.vocab_size)
     mean_predicted_probabilities = average_predicted_probabilities(probabilities)
+    # Same device-alignment policy as analyze_untrained_outputs: the corpus
+    # vector is built on the CPU from token IDs, the model's probabilities live
+    # on the model's device, and the subtraction below is where they meet.
+    # Persistence is unaffected either way -- the array store already moves
+    # tensors to the CPU before saving.
     empirical_frequencies = empirical_token_frequencies(
         token_ids,
         vocab_size=tokenizer.vocab_size,
-    )
+    ).to(mean_predicted_probabilities.device)
     top1_ids = top1_token_ids(probabilities).reshape(-1).tolist()
     top1_counts = empirical_token_counts(top1_ids, vocab_size=tokenizer.vocab_size)
     probability_frequency_gaps = mean_predicted_probabilities - empirical_frequencies
