@@ -369,6 +369,8 @@ def _args(**overrides) -> argparse.Namespace:
         "num_replicates": None, "split": None, "forward_batch_size": None,
         "temperatures": None, "no_temperature_sweep": False,
         "no_uniform_null": False, "no_input_structure": False,
+        "gradient_analysis": False, "no_gradient_analysis": False,
+        "gradient_windows": None,
     }
     fields.update(overrides)
     return argparse.Namespace(**fields)
@@ -535,6 +537,18 @@ def _sweep_record(num_initializations: int = 3) -> InitializationExperimentRecor
             for position, temperature in enumerate(SWEEP):
                 sweeps[name][index, position, eligible] = rng.multinomial(draws, weights)
                 agreement[name][index, position] = max(0.0, 0.9 - 0.7 * temperature)
+
+    # The canonical temperature is NOT an independent draw. In a real run the
+    # sweep samples the same logits with the same uniforms as the canonical
+    # policy, so that slot holds bitwise exactly the canonical nucleus counts --
+    # that is the invariant the figure-one/figure-five agreement test exists to
+    # check. Drawing it independently above would make the fixture violate the
+    # very property under test, so it is overwritten here. Every other
+    # temperature stays independently synthetic.
+    canonical_index = SWEEP.index(CANONICAL)
+    sweeps["real"][:, canonical_index, :] = nucleus[:, 0, :]
+    for name, counts in condition_nucleus.items():
+        sweeps[name][:, canonical_index, :] = counts[:, 0, :]
 
     null = simulate_uniform_null(
         eligible_vocab_size=eligible.size, num_draws=draws, num_replicates=16, seed=2

@@ -458,18 +458,32 @@ def _experiment_script():
 
 
 def _args(**overrides) -> argparse.Namespace:
-    fields = {
-        "num_initializations": None,
-        "num_windows": None,
-        "block_size": None,
-        "num_replicates": None,
-        "split": None,
-        "forward_batch_size": None,
-        "no_uniform_null": False,
-        "no_input_structure": False,
-    }
-    fields.update(overrides)
-    return argparse.Namespace(**fields)
+    """Build a namespace from the script's *real* parser, then override.
+
+    Hand-listing the fields is what made this helper rot: every option added to
+    the runner turned these tests into an ``AttributeError`` that has nothing to
+    do with what they assert. Parsing an empty command line instead gives
+    exactly the interface ``_resolve_protocol`` will be handed in production,
+    with the parser's own defaults, so a new option can never silently break
+    them again -- and if a default changes, these tests see the change rather
+    than a stale copy of it.
+    """
+
+    module = _experiment_script()
+    argv = sys.argv
+    try:
+        sys.argv = ["run_initialization_distribution_experiment.py"]
+        args = module.parse_args()
+    finally:
+        sys.argv = argv
+
+    unknown = set(overrides) - set(vars(args))
+    if unknown:
+        raise AssertionError(
+            f"Override(s) {sorted(unknown)} are not options of the experiment "
+            "script's parser; the test and the interface disagree."
+        )
+    return argparse.Namespace(**{**vars(args), **overrides})
 
 
 def test_the_generic_defaults_are_the_historical_ones() -> None:
