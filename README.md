@@ -76,6 +76,7 @@ IGB_LLMs/
     check_experiment_tracking.py
     prepare_dataset.py
     run_initialization_distribution_experiment.py
+    benchmark_position_gradients.py
 
   docs/
     EXPERIMENT_LOG.md
@@ -367,7 +368,8 @@ The `experiment` package implements Phase 6 local persistence. See [`src/README.
 | `scripts/analyze_untrained_model.py` | Analyze initialization-time output behavior, optionally gradient stability, and optionally persist a structured run. | `data.*`, `models.registry`, `evaluation.output_stats`, `evaluation.token_frequency`, `evaluation.untrained_analysis`, `evaluation.gradient_norms`, `experiment.run`, `experiment.config` |
 | `scripts/check_experiment_tracking.py` | Create a run, log metrics and arrays, save a checkpoint, rediscover it, and restore it into a second model. | `experiment.run`, `experiment.config`, `experiment.metrics`, `experiment.arrays`, `experiment.checkpoints`, `models.registry` |
 | `scripts/prepare_dataset.py` | Stage a dataset ahead of time, or report what is missing without obtaining it. | `data.config`, `data.resolver`, `data.cli` |
-| `scripts/run_initialization_distribution_experiment.py` | Measure greedy and nucleus token guesses across several random initializations on fixed evaluation positions. | `data.*`, `models.registry`, `evaluation.guessing`, `evaluation.init_distribution`, `analysis.records`, `analysis.aggregation`, `analysis.figures`, `experiment.run` |
+| `scripts/run_initialization_distribution_experiment.py` | Measure greedy and nucleus token guesses across several random initializations on fixed evaluation positions, optionally with per-position parameter-gradient norms. | `data.*`, `models.registry`, `evaluation.guessing`, `evaluation.init_distribution`, `evaluation.position_gradients`, `analysis.records`, `analysis.aggregation`, `analysis.gradients`, `analysis.figures`, `experiment.run` |
+| `scripts/benchmark_position_gradients.py` | Time the exact per-position parameter-gradient measurement at several window counts. Performance only: writes no record. | `data.*`, `models.registry`, `evaluation.init_distribution`, `evaluation.position_gradients` |
 
 ## Current analysis capabilities
 
@@ -1097,6 +1099,39 @@ python3 scripts/run_initialization_distribution_experiment.py \
 The sweep is additional analysis: figures 0–4 continue to use the canonical
 `sampling.temperature`, and a config without a `temperature_sweep` block runs exactly as
 before.
+
+An optional **per-position gradient analysis** measures, for one initialization, the exact
+L2 norm of the gradient of each position's own next-token cross-entropy with respect to
+**every trainable parameter**, and aggregates it per token as `G_i`. Alongside it the
+record keeps the greedy prediction at each of those same positions, so the guess fractions
+it is compared against describe the same positions as the norms.
+
+```bash
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml --offline \
+  --gradient-analysis
+```
+
+It is **off by default**: it costs one backward pass per evaluation position, where
+everything else costs one forward pass per window. `--gradient-windows N` restricts it to a
+deterministic evenly spaced subset of windows, which reduces the scientific position set
+and should be chosen deliberately. Measure the cost before committing to a full run:
+
+```bash
+python3 scripts/benchmark_position_gradients.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml --offline \
+  --window-counts 1 2 4 8
+```
+
+The benchmark writes no record and draws no figure; it times several window counts so the
+scaling can be checked, and prints a projected full-run cost explicitly labelled as an
+extrapolation.
+
+This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
+differentiates the *window-averaged* loss with respect to block activations. See
+[`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) §5d for the exact definition.
 
 See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) for the definitions and what each
 contrast can and cannot identify.

@@ -471,6 +471,94 @@ is the exception.
 
 ---
 
+## 5d. Gradient magnitude versus guessing bias
+
+An optional additional measurement, disabled by default, asking whether the
+tokens a randomly initialized model *prefers to guess* are also the tokens whose
+true-token loss pulls hardest on its parameters.
+
+### Definition
+
+For evaluation position `d` with true next token `y_d`:
+
+```
+z_d      = model logits at position d, restricted to the tokenizer vocabulary
+z_d^elig = z_d with the structural token IDs driven to -inf
+ell_d    = -log softmax(z_d^elig)[y_d]
+g_d      = || grad_theta ell_d ||_2
+```
+
+`theta` is **every trainable parameter** of the model — embeddings, both decoder
+blocks, the final norm, and the output projection — and the norm is the exact
+global L2 norm over all of them. It is not a gradient with respect to the logits,
+not one with respect to a hidden state, not the output projection alone, and not
+the gradient of a window-averaged loss. No cheaper proxy stands in for it. The
+per-layer diagnostic in `evaluation/gradient_norms.py` is a **different**
+quantity and must not be confused with this one: it differentiates the
+window-averaged loss with respect to block activations.
+
+`ell_d` is one position's loss. The model's own `forward` returns the mean over a
+window when given targets; that mean is not what is differentiated here, and
+`mean_d(ell_d)` equalling it is asserted as a test.
+
+The softmax denominator is the **eligible predictive support** — the same token
+universe as the greedy and nucleus policies and as the empirical reference — so
+`g_d`, `q_i` and `p_i` all speak about the same set of tokens. Structural tokens
+contribute nothing to the denominator and receive exactly zero gradient.
+
+### Aggregation
+
+Let `S` be the set of positions the analysis covered. For token ID `i`:
+
+```
+n_i     = |{d in S : y_d = i}|                   target occurrences
+G_i     = mean_{d in S : y_d = i} g_d            mean gradient norm
+q_i     = |{d in S : greedy_d = i}| / |S|        greedy guess fraction
+p_i     = corpus fraction over the whole analysis split
+```
+
+`G_i` is NaN, not zero, for a token that never occurs as a target in `S`: no
+gradient was measured for it.
+
+**`q_i` and `p_i` are scoped differently, on purpose.** `q_i` is computed from
+the greedy predictions recorded *at the differentiated positions*, so it and
+`G_i` describe the same `S`; when `S` is every evaluation position it reproduces
+the run's own `greedy_counts` exactly. `p_i` deliberately stays the whole-split
+corpus fraction, because it is the empirical reference the entire experiment
+compares against rather than a property of the positions that were
+differentiated.
+
+### Scope
+
+The first implementation is narrow on purpose: one initialization
+(`initialization_index`, 0 by default), real input only, greedy only, no
+temperature sweep, no optimizer, no parameter update, no gradient clipping. The
+model is not modified in any way — parameters, buffers, existing `.grad` state,
+and train/eval mode all come out as they went in, which is asserted by test.
+
+### Cost
+
+The measurement costs one backward pass per evaluation position, against one
+forward pass per window for everything else in this protocol, so it is off unless
+requested. One forward pass per window feeds `block_size` backward passes from a
+retained graph, and nothing shaped `[positions, parameters]` is ever built: at
+`D = 32768` over 8.6M parameters that would be about 1.1 PB. Peak memory is one
+window's activations plus one gradient set.
+
+`scripts/benchmark_position_gradients.py` measures the real cost at several
+window counts before a full run is attempted.
+
+### Persistence
+
+The record stores the raw per-position values — `gradient_position_indices`,
+`gradient_position_target_ids`, `gradient_position_greedy_ids`, and
+`gradient_position_norms`, each `[D_g]` — rather than pre-aggregated per-token
+sums. `G_i`, `n_i` and `q_i` are derived from them by
+`analysis/gradients.py`, so a later re-aggregation never requires recomputing a
+gradient.
+
+---
+
 ## 6. The figures
 
 | Figure | Question | Token identity |

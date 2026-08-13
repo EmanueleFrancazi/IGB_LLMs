@@ -94,6 +94,8 @@ tests/
 | `test_analysis_aggregation.py` | Ranked profiles, same-token gaps, SEM, scalar measures | Unit tests | `analysis/aggregation.py` |
 | `test_analysis_figures.py` | Headless figure generation, deterministic filenames, 32k-vocabulary rendering, token-label escaping | Filesystem tests | `analysis/figures.py` |
 | `test_temperature_sweep.py` | Multi-temperature sampling, shared sort, canonical equality, config validation, transition metrics | Unit tests | `evaluation/guessing.py`, `analysis/transition.py` |
+| `test_position_gradients.py` | Single-position loss semantics, eligible-support softmax, analytic outer-product check, independent full-parameter reference, model immutability, window isolation, runner flags | Unit tests | `evaluation/position_gradients.py`, experiment script |
+| `test_gradient_aggregation.py` | Optional gradient-array persistence and validation, `G_i`/`n_i`/`q_i` aggregation, subset versus full-run scoping | Unit tests | `analysis/records.py`, `analysis/gradients.py` |
 | `test_experiment_naming.py` | Run-directory naming grammar, slug safety, and tokenizer provenance reporting | Unit tests | `experiment/naming.py`, experiment script |
 | `test_tokenizers.py` | Tokenizer interface, character implementation, pretrained adapter, special-token exclusion, offline load, absence of any model-loading path | Unit tests with fakes | `data/tokenizer.py`, `data/pretrained_tokenizer.py` |
 
