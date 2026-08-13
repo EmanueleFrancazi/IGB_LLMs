@@ -31,6 +31,7 @@ __all__ = [
     "guess_counts",
     "guess_fractions",
     "nucleus_guess_ids",
+    "nucleus_guess_ids_by_temperature",
     "restrict_to_support",
 ]
 
@@ -134,6 +135,113 @@ def apply_support_mask(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
     return logits.masked_fill_(~mask, float("-inf"))
 
 
+
+def _nucleus_from_sorted(
+    sorted_probabilities: torch.Tensor,
+    sorted_indices: torch.Tensor,
+    *,
+    top_p: float,
+    uniforms: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Truncate an already-sorted distribution and draw one token per row.
+
+    Shared by the single- and multi-temperature entry points so both perform
+    exactly the same operations in the same order. That is what makes a sweep
+    value at the canonical temperature *bitwise* identical to the canonical
+    result rather than merely close.
+    """
+
+    cumulative = torch.cumsum(sorted_probabilities, dim=-1)
+    # Mass strictly before each token; the leading token always keeps 0 here.
+    excluded = (cumulative - sorted_probabilities) > top_p
+    kept = sorted_probabilities.masked_fill(excluded, 0.0)
+    kept = kept / kept.sum(dim=-1, keepdim=True)
+
+    if uniforms is None:
+        positions = torch.multinomial(kept, num_samples=1, generator=generator)
+    else:
+        draws = uniforms.reshape(-1)
+        if draws.numel() != kept.shape[0]:
+            raise ValueError(
+                f"uniforms holds {draws.numel()} values but there are "
+                f"{kept.shape[0]} positions to sample."
+            )
+        kept_cumulative = torch.cumsum(kept, dim=-1).contiguous()
+        positions = torch.searchsorted(
+            kept_cumulative, draws.to(kept_cumulative.dtype).unsqueeze(-1)
+        )
+        # A draw at or just below the final cumulative value can land one past
+        # the truncated head through rounding. Clamping to the last kept rank
+        # keeps every sample inside the nucleus.
+        last_kept = (~excluded).sum(dim=-1, keepdim=True) - 1
+        positions = torch.minimum(positions, last_kept)
+
+    return torch.gather(sorted_indices, -1, positions).squeeze(-1)
+
+
+def nucleus_guess_ids_by_temperature(
+    logits: torch.Tensor,
+    *,
+    temperatures: Sequence[float],
+    top_p: float,
+    uniforms: torch.Tensor,
+) -> dict[float, torch.Tensor]:
+    """Sample once per temperature from **one** set of logits.
+
+    Temperature is a positive scale, so it cannot change the ordering of the
+    logits: ``x_i > x_j`` implies ``x_i/T > x_j/T``. The expensive sort is
+    therefore done once and reused for every temperature; only the softmax, the
+    top-p truncation, and the draw are repeated.
+
+    The permutation is taken from the logits and used to *gather* probabilities
+    that were computed in the original order. Gathering moves floats without
+    arithmetic, so the sorted values are bit-for-bit what a direct sort of those
+    probabilities would give. Recomputing the softmax on reordered logits would
+    not be safe: the denominator is a sum, and summation order can change the
+    last ulp.
+
+    The same ``uniforms`` are used at every temperature, so the stochastic draw
+    is held fixed while the distribution being sampled changes.
+
+    Args:
+        logits: ``[..., vocab]``, already restricted and support-masked.
+        temperatures: Positive temperatures. Duplicates are collapsed.
+        top_p: Nucleus mass, shared by every temperature.
+        uniforms: Pre-drawn values in ``[0, 1)``, one per position.
+
+    Returns:
+        Mapping from temperature to token IDs shaped ``logits.shape[:-1]``.
+    """
+
+    if not 0.0 < top_p <= 1.0:
+        raise ValueError("top_p must lie in (0, 1].")
+    if not temperatures:
+        raise ValueError("temperatures must not be empty.")
+    for temperature in temperatures:
+        if temperature <= 0:
+            raise ValueError(
+                f"Every sweep temperature must be positive; got {temperature}. "
+                "Greedy is the T=0 anchor and is computed by argmax, never by a "
+                "zero-temperature softmax."
+            )
+
+    original_shape = logits.shape[:-1]
+    flat_logits = logits.reshape(-1, logits.shape[-1]).float()
+    # One sort for every temperature.
+    sorted_indices = torch.argsort(flat_logits, dim=-1, descending=True)
+
+    results: dict[float, torch.Tensor] = {}
+    for temperature in dict.fromkeys(temperatures):
+        probabilities = torch.softmax(flat_logits / temperature, dim=-1)
+        sorted_probabilities = torch.gather(probabilities, -1, sorted_indices)
+        sampled = _nucleus_from_sorted(
+            sorted_probabilities, sorted_indices, top_p=top_p, uniforms=uniforms
+        )
+        results[temperature] = sampled.reshape(original_shape)
+    return results
+
+
 def nucleus_guess_ids(
     logits: torch.Tensor,
     *,
@@ -177,40 +285,20 @@ def nucleus_guess_ids(
     if logits.ndim < 1:
         raise ValueError("logits must have at least one dimension.")
 
+    if uniforms is not None:
+        # Delegate, so a sweep at this temperature is identical by construction
+        # rather than by numerical coincidence.
+        return nucleus_guess_ids_by_temperature(
+            logits, temperatures=(temperature,), top_p=top_p, uniforms=uniforms
+        )[temperature]
+
     original_shape = logits.shape[:-1]
     flat_logits = logits.reshape(-1, logits.shape[-1]).float()
-
     probabilities = torch.softmax(flat_logits / temperature, dim=-1)
     sorted_probabilities, sorted_indices = torch.sort(probabilities, dim=-1, descending=True)
-    cumulative = torch.cumsum(sorted_probabilities, dim=-1)
-
-    # Mass strictly before each token; the leading token always keeps 0 here.
-    excluded = (cumulative - sorted_probabilities) > top_p
-    sorted_probabilities = sorted_probabilities.masked_fill(excluded, 0.0)
-    sorted_probabilities = sorted_probabilities / sorted_probabilities.sum(dim=-1, keepdim=True)
-
-    if uniforms is None:
-        sampled_positions = torch.multinomial(
-            sorted_probabilities, num_samples=1, generator=generator
-        )
-    else:
-        draws = uniforms.reshape(-1)
-        if draws.numel() != sorted_probabilities.shape[0]:
-            raise ValueError(
-                f"uniforms holds {draws.numel()} values but there are "
-                f"{sorted_probabilities.shape[0]} positions to sample."
-            )
-        kept_cumulative = torch.cumsum(sorted_probabilities, dim=-1).contiguous()
-        sampled_positions = torch.searchsorted(
-            kept_cumulative, draws.to(kept_cumulative.dtype).unsqueeze(-1)
-        )
-        # A draw at or just below the final cumulative value can land one past
-        # the truncated head through rounding. Clamping to the last kept rank
-        # keeps every sample inside the nucleus.
-        last_kept = (~excluded).sum(dim=-1, keepdim=True) - 1
-        sampled_positions = torch.minimum(sampled_positions, last_kept)
-
-    sampled_ids = torch.gather(sorted_indices, -1, sampled_positions).squeeze(-1)
+    sampled_ids = _nucleus_from_sorted(
+        sorted_probabilities, sorted_indices, top_p=top_p, generator=generator
+    )
     return sampled_ids.reshape(original_shape)
 
 

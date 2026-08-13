@@ -37,6 +37,7 @@ import torch
 
 from llm_behavior_lab.evaluation.guessing import (
     apply_support_mask,
+    nucleus_guess_ids_by_temperature,
     eligible_support_mask,
     greedy_guess_ids,
     guess_counts,
@@ -164,6 +165,12 @@ class InitializationMeasurement:
     nucleus_counts: torch.Tensor
     mean_predicted_probabilities: torch.Tensor
     num_positions: int
+    #: ``[T, vocab]`` sweep counts, or ``None`` when no sweep ran.
+    sweep_counts: torch.Tensor | None = None
+    #: ``[T]`` fraction of positions where the sweep draw equalled the argmax.
+    sweep_agreement: torch.Tensor | None = None
+    #: The sweep temperatures, in the order the arrays are stored.
+    sweep_temperatures: tuple[float, ...] = ()
 
     @property
     def nucleus_counts_mean(self) -> torch.Tensor:
@@ -356,6 +363,9 @@ def _accumulate_batch(
     nucleus_counts: torch.Tensor,
     probability_sum: torch.Tensor,
     vocab_size: int,
+    sweep_temperatures: tuple[float, ...] = (),
+    sweep_counts: torch.Tensor | None = None,
+    sweep_matches: list[int] | None = None,
 ) -> None:
     """Fold one batch of logits into the running per-token counters.
 
@@ -365,7 +375,23 @@ def _accumulate_batch(
     only ``[vocab]``-sized state.
     """
 
-    greedy_counts += guess_counts(greedy_guess_ids(logits), vocab_size=vocab_size)
+    greedy_ids = greedy_guess_ids(logits)
+    greedy_counts += guess_counts(greedy_ids, vocab_size=vocab_size)
+
+    if sweep_temperatures:
+        # One shared sort inside, and the *same* uniforms as the canonical draw,
+        # so temperature is the only thing that changes.
+        sampled_by_temperature = nucleus_guess_ids_by_temperature(
+            logits,
+            temperatures=sweep_temperatures,
+            top_p=sampling.top_p,
+            uniforms=uniforms[0],
+        )
+        for index, temperature in enumerate(sweep_temperatures):
+            sampled = sampled_by_temperature[temperature]
+            sweep_counts[index] += guess_counts(sampled, vocab_size=vocab_size)
+            sweep_matches[index] += int((sampled == greedy_ids).sum())
+
     for replicate in range(sampling.num_replicates):
         sampled = nucleus_guess_ids(
             logits,
@@ -393,6 +419,7 @@ def measure_initialization(
     device: torch.device | str = "cpu",
     input_ids: torch.Tensor | None = None,
     inputs_embeds: torch.Tensor | None = None,
+    sweep_temperatures: Sequence[float] = (),
 ) -> InitializationMeasurement:
     """Measure one initialization without ever holding all logits.
 
@@ -448,6 +475,13 @@ def measure_initialization(
         (sampling.num_replicates, vocab_size), dtype=torch.long, device=device
     )
     probability_sum = torch.zeros(vocab_size, dtype=torch.float64, device=device)
+    temperatures = tuple(dict.fromkeys(float(value) for value in sweep_temperatures))
+    sweep_counts = (
+        torch.zeros((len(temperatures), vocab_size), dtype=torch.long, device=device)
+        if temperatures
+        else None
+    )
+    sweep_matches = [0] * len(temperatures) if temperatures else None
 
     if input_ids is not None and inputs_embeds is not None:
         raise ValueError("Provide at most one of input_ids or inputs_embeds.")
@@ -489,6 +523,9 @@ def measure_initialization(
                 nucleus_counts=nucleus_counts,
                 probability_sum=probability_sum,
                 vocab_size=vocab_size,
+                sweep_temperatures=temperatures,
+                sweep_counts=sweep_counts,
+                sweep_matches=sweep_matches,
             )
             consumed += batch_positions
             del logits, output
@@ -505,6 +542,13 @@ def measure_initialization(
         nucleus_counts=nucleus_counts.cpu(),
         mean_predicted_probabilities=(probability_sum / consumed).float().cpu(),
         num_positions=consumed,
+        sweep_counts=None if sweep_counts is None else sweep_counts.cpu(),
+        sweep_agreement=(
+            None
+            if sweep_matches is None
+            else torch.tensor([count / consumed for count in sweep_matches], dtype=torch.float64)
+        ),
+        sweep_temperatures=temperatures,
     )
 
 
