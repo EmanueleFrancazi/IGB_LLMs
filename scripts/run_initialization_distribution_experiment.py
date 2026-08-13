@@ -569,7 +569,11 @@ def main() -> None:
                 **condition_inputs,
             )
 
-        measurements.append(measure())
+        # The raw T=1 predictive diagnostics are collected for the real input
+        # only: they describe the model's predictive geometry on the corpus, and
+        # computing them for the control conditions would triple their cost
+        # without being part of the question.
+        measurements.append(measure(collect_probability_statistics=True))
         if (
             protocol["gradient_analysis_enabled"]
             and index == protocol["gradient_initialization_index"]
@@ -680,6 +684,24 @@ def main() -> None:
                 "shares_logits_with_canonical": True,
                 "shares_uniforms_with_canonical": True,
             },
+            "predictive_probabilities": {
+                "enabled": True,
+                "from_raw_logits": True,
+                "support": "eligible",
+                "eligible_vocab_size": len(eligible_token_ids),
+                "temperature": 1.0,
+                "before_top_p": True,
+                "before_sampling": True,
+                "input_condition": "real",
+                "uniform_probability": 1.0 / len(eligible_token_ids),
+                "note": (
+                    "Softmax of the raw logits restricted to the eligible support, "
+                    "at temperature 1, before any top-p truncation and before any "
+                    "greedy or nucleus selection. NOT the nucleus distribution."
+                ),
+                "ranked_profile_order": "rank_within_position_then_average_over_positions",
+                "retains_full_probability_tensor": False,
+            },
             "gradient_analysis": gradient_metadata,
             "vocab_size": tokenizer.vocab_size,
             "eligible_vocab_size": len(eligible_token_ids),
@@ -759,6 +781,10 @@ def main() -> None:
         },
         sweep_counts_by_condition=sweep_arrays("sweep_counts"),
         sweep_agreement_by_condition=sweep_arrays("sweep_agreement"),
+        predictive_ranked_probabilities=stacked("ranked_probability_profile"),
+        predictive_max_probabilities=stacked("max_probabilities"),
+        predictive_target_probabilities=stacked("target_probabilities"),
+        predictive_target_losses=stacked("target_losses"),
         gradient_position_indices=(
             None if gradient_result is None else gradient_result.position_indices.numpy()
         ),
@@ -947,6 +973,46 @@ def main() -> None:
                 ratios = summary["conditions"][name]["metrics"]["effective_support_over_null"]["mean"]
                 print(f"    {name:<9} " + "  ".join(f"{value:.3f}" for value in ratios))
         run.save_analysis_json("temperature_sweep_summary.json", summary)
+
+    if record.has_predictive_probability_analysis:
+        from llm_behavior_lab.analysis import predictive_probability_summary
+
+        predictive = predictive_probability_summary(record)
+        uniform = predictive["uniform_probability"]
+        print(
+            "\nRaw predictive distribution (T = 1, eligible support, before top-p "
+            "and before any sampling decision):"
+        )
+        print(
+            f"  ranked WITHIN each position, then averaged over positions "
+            f"(not figure 1's across-position ranking)"
+        )
+        ranks = predictive["ranked_profile_at_rank"]
+        print("  " + "  ".join(f"P({rank})={value:.4g}" for rank, value in ranks.items()))
+        print(
+            f"  uniform 1/K = {uniform:.4g};  rank 1 is "
+            f"{predictive['rank1_over_uniform']:.2f}x uniform;  "
+            f"profile dynamic range {predictive['profile_dynamic_range']:.4g}"
+        )
+        pooled = predictive["max_probability"]["pooled"]
+        print(
+            f"  p_max: min {pooled['p00']:.4g}, p05 {pooled['p05']:.4g}, "
+            f"p25 {pooled['p25']:.4g}, median {pooled['p50']:.4g}, "
+            f"p75 {pooled['p75']:.4g}, p95 {pooled['p95']:.4g}, "
+            f"p99 {pooled['p99']:.4g}, max {pooled['p100']:.4g}"
+        )
+        print(
+            f"  p_max mean {pooled['mean']:.4g} "
+            f"({predictive['max_probability']['mean_over_uniform']:.2f}x uniform); "
+            "greedy always takes the top token, which is not the same as that "
+            "token carrying much mass"
+        )
+        target = predictive["target_probability"]
+        print(
+            f"  p_target mean {target['probability']['mean']:.4g}, "
+            f"loss mean {target['loss']['mean']:.4f} "
+            f"(uniform log K = {target['uniform_loss']:.4f})"
+        )
 
     if gradient_result is not None:
         from llm_behavior_lab.analysis import gradient_guess_table
