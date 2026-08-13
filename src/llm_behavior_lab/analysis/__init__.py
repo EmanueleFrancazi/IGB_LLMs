@@ -50,7 +50,10 @@ from llm_behavior_lab.analysis.aggregation import (
 )
 from llm_behavior_lab.analysis.gradients import (
     TokenGradientSummary,
+    gradient_guess_correlations,
     gradient_guess_table,
+    gradient_observable_summary,
+    spearman_rho,
     token_gradient_norms,
 )
 from llm_behavior_lab.analysis.nulls import (
@@ -85,7 +88,10 @@ __all__ = [
     "InitializationExperimentRecord",
     "TokenGradientSummary",
     "UniformNullSummary",
+    "gradient_guess_correlations",
     "gradient_guess_table",
+    "gradient_observable_summary",
+    "spearman_rho",
     "token_gradient_norms",
     "expected_occupancy_counts",
     "expected_zero_frequency_count",

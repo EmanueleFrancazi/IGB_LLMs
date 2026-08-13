@@ -60,6 +60,7 @@ __all__ = [
     "POLICY_STYLES",
     "escape_token_label",
     "generate_all_figures",
+    "plot_gradient_vs_guess_bias",
     "plot_ranked_frequency_profiles",
     "plot_sampling_adequacy",
     "plot_input_structure_profiles",
@@ -899,6 +900,180 @@ def _sweep_fractions(record: Any, condition: str) -> np.ndarray:
     return counts / counts.sum(axis=-1, keepdims=True)
 
 
+def plot_gradient_vs_guess_bias(
+    record: Any,
+    directory: str | Path,
+    *,
+    x_scale: str = "auto",
+    num_labels: int = 4,
+) -> list[Path]:
+    """Figure 8 -- does the model pull hardest on the tokens it likes to guess?
+
+    One marker per token with ``n_i > 0``: its exact mean full-parameter gradient
+    norm ``G_i`` against the fraction ``q_i`` of the *same* evaluation positions
+    at which greedy argmax selected it, coloured by the whole-split corpus
+    fraction ``p_i``.
+
+    Three scale decisions are made from the data rather than by habit.
+
+    The **y axis is symmetric-log with the linear region ending at one guess**,
+    ``1/D``. Most tokens are never greedily guessed, and ``q_i = 0`` is a measured
+    outcome, not missing data; a plain logarithmic axis would delete exactly the
+    tokens the figure exists to show. Below ``1/D`` the only attainable value is
+    zero, so the linear region is precisely the gap between "never guessed" and
+    "guessed once", and a reference line marks it.
+
+    The **x axis follows the observed dynamic range**: logarithmic once ``G_i``
+    spans at least a decade, linear otherwise, because a log axis over a
+    half-decade spreads noise and hides structure. The choice is recorded in the
+    axis label so a reader never has to guess which one they are looking at.
+
+    The **colour is logarithmic** over positive ``p_i`` with a perceptually
+    uniform map. Corpus frequency is heavy-tailed; a linear map would collapse
+    every token but the few most common into one shade. Nothing is clipped.
+    """
+
+    from llm_behavior_lab.analysis.gradients import (
+        gradient_guess_correlations,
+        gradient_guess_table,
+        gradient_observable_summary,
+    )
+
+    if not record.has_position_gradients:
+        raise ValueError(
+            "This record carries no per-position gradient analysis, so figure 8 "
+            "has nothing to draw."
+        )
+    if x_scale not in ("auto", "log", "linear"):
+        raise ValueError(f"x_scale must be 'auto', 'log', or 'linear'; got {x_scale!r}.")
+
+    table = gradient_guess_table(record)
+    summary = gradient_observable_summary(record)
+    correlations = gradient_guess_correlations(record)
+
+    plotted = table["target_occurrence_count"] > 0
+    norms = table["mean_gradient_norm"][plotted]
+    guesses = table["greedy_guess_fraction"][plotted]
+    corpus = table["corpus_fraction"][plotted]
+    token_ids = table["token_id"][plotted]
+
+    # Every plotted token occurs as a target, so it occurs in the split and has
+    # positive corpus mass. Guarded rather than assumed: a token that somehow had
+    # none cannot be placed on a logarithmic colour scale, and dropping it
+    # silently would misstate the token count.
+    coloured = corpus > 0
+    dropped = int((~coloured).sum())
+
+    from matplotlib.colors import LogNorm
+
+    figure = _new_figure(width=8.0, height=6.0)
+    axes = figure.subplots()
+
+    one_guess = 1.0 / float(table["num_positions"])
+    marks = axes.scatter(
+        norms[coloured],
+        guesses[coloured],
+        c=corpus[coloured],
+        s=7,
+        alpha=0.55,
+        cmap="viridis",
+        norm=LogNorm(vmin=float(corpus[coloured].min()), vmax=float(corpus[coloured].max())),
+        edgecolors="none",
+        rasterized=True,
+    )
+    colourbar = figure.colorbar(marks, ax=axes, pad=0.02)
+    colourbar.set_label("Whole-corpus empirical token frequency  p(i)", fontsize=9)
+
+    axes.axhline(
+        one_guess,
+        color="#888888",
+        linewidth=0.9,
+        linestyle=":",
+        zorder=0,
+    )
+    axes.annotate(
+        f"one guess = 1/D = {one_guess:.2g}\nbelow: never guessed (q = 0)",
+        (0.985, one_guess),
+        xycoords=("axes fraction", "data"),
+        textcoords="offset points",
+        xytext=(0, 4),
+        fontsize=7,
+        color="#666666",
+        ha="right",
+        va="bottom",
+    )
+
+    positive_norms = norms[norms > 0]
+    use_log_x = x_scale == "log" or (
+        x_scale == "auto"
+        and positive_norms.size > 0
+        and float(positive_norms.max() / positive_norms.min()) >= 10.0
+    )
+    if use_log_x:
+        axes.set_xscale("log")
+    # Linear below one guess keeps q = 0 on the axis; logarithmic above it keeps
+    # the four decades of guess frequency legible.
+    axes.set_yscale("symlog", linthresh=one_guess, linscale=0.6)
+    axes.set_ylim(bottom=0.0)
+
+    scale_note = "log scale" if use_log_x else "linear scale"
+    axes.set_xlabel(
+        f"mean single-position parameter-gradient norm  G(i)  [{scale_note}]"
+    )
+    axes.set_ylabel("greedy guess fraction  q(i)   [symlog below 1/D]")
+    axes.set_title("Gradient magnitude vs. initial guessing bias, by token")
+    axes.grid(True, which="both", alpha=0.22)
+
+    tokens = record.tokens
+    if tokens and num_labels > 0:
+        # A small deterministic set of extremes, not a label per token: at a few
+        # thousand marks, labelling broadly destroys the figure it annotates.
+        candidates: list[tuple[str, int]] = [
+            ("largest q", int(np.argmax(guesses))),
+            ("largest G", int(np.argmax(norms))),
+            ("smallest G", int(np.argmin(norms))),
+            ("largest p", int(np.argmax(corpus))),
+        ]
+        seen: set[int] = set()
+        for label, index in candidates[:num_labels]:
+            if index in seen or not coloured[index]:
+                continue
+            seen.add(index)
+            axes.annotate(
+                f"{escape_token_label(tokens[int(token_ids[index])])} ({label})",
+                (norms[index], guesses[index]),
+                textcoords="offset points",
+                xytext=(5, 4),
+                fontsize=7,
+                color="#222222",
+            )
+
+    rho = correlations["spearman_gradient_vs_guess"]
+    lines = [
+        f"initialization {summary['initialization_index']}"
+        f" / seed {record.gradient_analysis.get('model_seed', 'n/a')}",
+        f"D = {_format_count(summary['num_positions'])} positions"
+        f"{'' if summary['covers_all_positions'] else ' (SUBSET)'}",
+        f"tokens plotted (n(i) > 0) = {_format_count(summary['num_plotted_tokens'])}",
+        f"never guessed: {_format_count(summary['zero_guess_tokens'])}"
+        f" ({summary['zero_guess_fraction']:.1%})",
+        f"Spearman rho(G, q) = {rho:.4f}",
+    ]
+    if dropped:
+        lines.append(f"omitted, no corpus mass: {_format_count(dropped)}")
+    axes.text(
+        0.02,
+        0.97,
+        "\n".join(lines),
+        transform=axes.transAxes,
+        fontsize=7.5,
+        va="top",
+        ha="left",
+        bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure8_gradient_vs_initial_guess_bias")
+
+
 def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     """Write every figure for one record and return the paths in figure order."""
 
@@ -913,4 +1088,6 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
         written.extend(plot_temperature_ranked_profiles(record, directory))
         written.extend(plot_temperature_ranked_distances(record, directory))
         written.extend(plot_temperature_support_and_agreement(record, directory))
+    if record.has_position_gradients:
+        written.extend(plot_gradient_vs_guess_bias(record, directory))
     return written

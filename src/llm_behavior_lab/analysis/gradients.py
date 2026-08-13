@@ -40,10 +40,24 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "GRADIENT_QUANTILES",
+    "OCCURRENCE_STRATA",
     "TokenGradientSummary",
+    "gradient_guess_correlations",
     "gradient_guess_table",
+    "gradient_observable_summary",
+    "spearman_rho",
     "token_gradient_norms",
 ]
+
+#: Percentiles reported for every distribution, so a scale choice is made from
+#: the data rather than from an assumption about it.
+GRADIENT_QUANTILES = (0, 1, 5, 25, 50, 75, 95, 99, 100)
+
+#: Inclusive ``n_i`` bands for the precision diagnostic. ``G_i`` is a mean over
+#: ``n_i`` positions, so a token seen once is far noisier than one seen a hundred
+#: times; these bands make that visible without changing the primary statistic.
+OCCURRENCE_STRATA = ((1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 64), (65, None))
 
 
 @dataclass(frozen=True)
@@ -176,4 +190,191 @@ def gradient_guess_table(record: Any) -> dict[str, Any]:
         "initialization_index": summary.initialization_index,
         "greedy_source": "gradient_evaluated_positions",
         "corpus_source": "whole_analysis_split",
+    }
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    """Rank values, giving tied entries their shared average rank.
+
+    Average ranks are not a refinement here, they are the whole correctness
+    question. Most tokens are never greedily guessed, so ``q_i`` carries one
+    enormous tie block at zero; ordinal ranking would invent an arbitrary order
+    inside it and report a correlation that is partly an artefact of the sort.
+    """
+
+    values = np.asarray(values, dtype=np.float64)
+    order = np.argsort(values, kind="mergesort")
+    ordered = values[order]
+    ranks = np.empty(values.shape[0], dtype=np.float64)
+
+    start = 0
+    while start < ordered.shape[0]:
+        stop = start
+        while stop + 1 < ordered.shape[0] and ordered[stop + 1] == ordered[start]:
+            stop += 1
+        ranks[order[start : stop + 1]] = 0.5 * (start + stop) + 1.0
+        start = stop + 1
+    return ranks
+
+
+def spearman_rho(x: np.ndarray, y: np.ndarray) -> float:
+    """Spearman rank correlation, tie-corrected, in NumPy alone.
+
+    Written out rather than taken from SciPy because the analysis layer's only
+    dependency is NumPy: a finished experiment must stay re-analyzable without
+    installing anything further. It is the Pearson correlation of average ranks,
+    which is the definition SciPy implements for tied data.
+
+    Returns:
+        ``rho`` in ``[-1, 1]``, or NaN when fewer than two points are supplied or
+        either input is constant, in which case the coefficient is undefined
+        rather than zero.
+    """
+
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.shape != y.shape:
+        raise ValueError(
+            f"spearman_rho needs matching shapes, got {x.shape} and {y.shape}."
+        )
+    if x.ndim != 1:
+        raise ValueError("spearman_rho expects one-dimensional inputs.")
+    if x.shape[0] < 2:
+        return float("nan")
+
+    rank_x = _average_ranks(x)
+    rank_y = _average_ranks(y)
+    rank_x -= rank_x.mean()
+    rank_y -= rank_y.mean()
+    denominator = np.sqrt(float((rank_x**2).sum()) * float((rank_y**2).sum()))
+    if denominator == 0.0:
+        return float("nan")
+    return float((rank_x * rank_y).sum() / denominator)
+
+
+def _quantiles(values: np.ndarray) -> dict[str, float]:
+    """Summarize one distribution at the shared percentiles."""
+
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return {"count": 0}
+    percentiles = np.percentile(values, GRADIENT_QUANTILES)
+    summary: dict[str, float] = {"count": int(values.size), "mean": float(values.mean())}
+    for percentile, value in zip(GRADIENT_QUANTILES, percentiles):
+        summary[f"p{percentile:02d}"] = float(value)
+    return summary
+
+
+def _plotted_mask(record: Any) -> np.ndarray:
+    """Tokens carrying at least one gradient measurement, i.e. ``n_i > 0``."""
+
+    return np.asarray(token_gradient_norms(record).target_count) > 0
+
+
+def gradient_observable_summary(record: Any) -> dict[str, Any]:
+    """Describe the distributions behind figure 8, before anything is plotted.
+
+    Axis scaling and colour normalization are chosen from these numbers rather
+    than assumed, so this is deliberately a separate, printable step.
+    """
+
+    table = gradient_guess_table(record)
+    plotted = _plotted_mask(record)
+    counts = table["target_occurrence_count"][plotted]
+    norms = table["mean_gradient_norm"][plotted]
+    guesses = table["greedy_guess_fraction"][plotted]
+    corpus = table["corpus_fraction"][plotted]
+
+    zero_guess = int((guesses == 0.0).sum())
+    positive_norms = norms[norms > 0]
+    dynamic_range = (
+        float(positive_norms.max() / positive_norms.min()) if positive_norms.size else float("nan")
+    )
+
+    occurrence_histogram = {
+        str(value): int((counts == value).sum()) for value in (1, 2, 3, 4, 5)
+    }
+    occurrence_histogram["6_to_10"] = int(((counts >= 6) & (counts <= 10)).sum())
+    occurrence_histogram["11_to_100"] = int(((counts >= 11) & (counts <= 100)).sum())
+    occurrence_histogram["over_100"] = int((counts > 100).sum())
+
+    return {
+        "num_positions": int(table["num_positions"]),
+        "covers_all_positions": bool(table["covers_all_positions"]),
+        "initialization_index": int(table["initialization_index"]),
+        "num_plotted_tokens": int(plotted.sum()),
+        "vocab_size": int(record.vocab_size),
+        "eligible_vocab_size": int(record.eligible_vocab_size),
+        "mean_gradient_norm": _quantiles(norms),
+        "gradient_dynamic_range": dynamic_range,
+        "greedy_guess_fraction": _quantiles(guesses),
+        "zero_guess_tokens": zero_guess,
+        "zero_guess_fraction": float(zero_guess / max(int(plotted.sum()), 1)),
+        "positive_corpus_fraction": _quantiles(corpus[corpus > 0]),
+        "nonpositive_corpus_tokens": int((corpus <= 0).sum()),
+        # A token can be guessed without ever being a target, in which case it
+        # has no G_i and cannot be plotted. This says how much of the greedy mass
+        # the plotted tokens actually account for, so the omission is visible
+        # rather than silent.
+        "greedy_mass_on_plotted_tokens": float(guesses.sum()),
+        "target_occurrence_count": _quantiles(counts),
+        "occurrence_histogram": occurrence_histogram,
+    }
+
+
+def gradient_guess_correlations(record: Any) -> dict[str, Any]:
+    """Rank correlations between ``G_i``, ``q_i`` and ``p_i``.
+
+    Computed over every token with ``n_i > 0`` -- the same set figure 8 plots.
+    Tokens that were never greedily guessed are **included**: ``q_i = 0`` is a
+    measured outcome, and dropping it would bias the primary coefficient towards
+    the tokens the model happens to favour.
+
+    The primary coefficient is deliberately **unweighted**, even though ``G_i``
+    is a mean over ``n_i`` positions and is therefore far noisier for a token
+    seen once than for one seen a hundred times. Weighting would answer a
+    different question and would need its own justification, so the imprecision
+    is reported instead, through ``strata`` and ``sensitivity``, and left visible.
+    """
+
+    table = gradient_guess_table(record)
+    plotted = _plotted_mask(record)
+    counts = table["target_occurrence_count"][plotted]
+    norms = table["mean_gradient_norm"][plotted]
+    guesses = table["greedy_guess_fraction"][plotted]
+    corpus = table["corpus_fraction"][plotted]
+
+    strata = []
+    for low, high in OCCURRENCE_STRATA:
+        selected = counts >= low if high is None else (counts >= low) & (counts <= high)
+        strata.append(
+            {
+                "min_occurrences": low,
+                "max_occurrences": high,
+                "num_tokens": int(selected.sum()),
+                "spearman_gradient_vs_guess": spearman_rho(norms[selected], guesses[selected]),
+            }
+        )
+
+    sensitivity = [
+        {
+            "min_occurrences": threshold,
+            "num_tokens": int((counts >= threshold).sum()),
+            "spearman_gradient_vs_guess": spearman_rho(
+                norms[counts >= threshold], guesses[counts >= threshold]
+            ),
+        }
+        for threshold in (1, 2, 5, 10, 20, 50)
+    ]
+
+    return {
+        "num_tokens": int(plotted.sum()),
+        "num_positions": int(table["num_positions"]),
+        "includes_zero_guess_tokens": True,
+        "weighted": False,
+        "spearman_gradient_vs_guess": spearman_rho(norms, guesses),
+        "spearman_gradient_vs_corpus": spearman_rho(norms, corpus),
+        "spearman_guess_vs_corpus": spearman_rho(guesses, corpus),
+        "strata": strata,
+        "sensitivity_by_min_occurrences": sensitivity,
     }
