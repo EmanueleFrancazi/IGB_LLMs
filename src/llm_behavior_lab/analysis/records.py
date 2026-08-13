@@ -34,12 +34,12 @@ __all__ = [
 ]
 
 #: Version 2 added ``eligible_token_ids``. Version 3 added the optional
-#: input-condition counts and the uniform-null profile. Older records load
-#: unchanged: version 1 predates special-token exclusion, so every token was
-#: eligible -- exactly the default applied when that array is absent -- and the
-#: version 3 additions are optional, so their absence simply means the run did
-#: not carry those comparisons.
-RECORD_VERSION = 4
+#: input-condition counts and the uniform-null profile. Version 5 added the
+#: optional per-position gradient arrays. Older records load unchanged: version 1
+#: predates special-token exclusion, so every token was eligible -- exactly the
+#: default applied when that array is absent -- and every later addition is
+#: optional, so its absence simply means the run did not carry that analysis.
+RECORD_VERSION = 5
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -67,6 +67,23 @@ _NULL_PREFIX = "uniform_null__"
 _SWEEP_COUNTS_PREFIX = "sweep_counts__"
 _SWEEP_AGREEMENT_PREFIX = "sweep_agreement__"
 
+#: Version 5 additions. All four are ``[D_g]`` and aligned entry by entry, where
+#: ``D_g`` is the number of positions the gradient analysis covered -- every
+#: evaluation position unless a run deliberately used a window subset. They are
+#: present or absent together; a run without the analysis stores none of them.
+#:
+#: Raw per-position values are stored rather than pre-aggregated per-token sums,
+#: because ``records`` owns the format and ``aggregation`` owns every statistic.
+#: ``G_i`` and ``n_i`` are therefore derived, never persisted twice, and a later
+#: re-aggregation stays possible without recomputing a single gradient. The cost
+#: is about 0.8 MB at ``D_g = 32768``.
+_GRADIENT_ARRAY_NAMES = (
+    "gradient_position_indices",
+    "gradient_position_target_ids",
+    "gradient_position_greedy_ids",
+    "gradient_position_norms",
+)
+
 
 def _atomic_write_bytes(path: Path, write) -> Path:
     """Write via a temporary file in the destination directory, then rename.
@@ -89,6 +106,18 @@ def _atomic_write_bytes(path: Path, write) -> Path:
         temporary_path.unlink(missing_ok=True)
         raise
     return path
+
+
+def _optional_array(values: Any, dtype: Any) -> np.ndarray | None:
+    """Convert an optional sequence to an array, preserving ``None``.
+
+    ``None`` means "this run did not carry that analysis" and must survive as
+    ``None``; an empty array would claim the analysis ran and found nothing.
+    """
+
+    if values is None:
+        return None
+    return np.asarray(values, dtype=dtype)
 
 
 def _fractions(counts: np.ndarray) -> np.ndarray:
@@ -127,6 +156,12 @@ class InitializationExperimentRecord:
     recoverable: the **full** vocabulary ``V``, the **eligible** predictive
     support ``E`` after removing structural tokens, and the **corpus-observed**
     support, the eligible tokens that actually occur.
+
+    One optional group is indexed by *position* rather than by token: the
+    ``gradient_position_*`` vectors, each ``[D_g]``, holding the exact
+    single-position parameter-gradient norm and the target and greedy token at
+    every position the gradient analysis covered. They are token-aggregated by
+    :mod:`llm_behavior_lab.analysis.gradients`, never here.
     """
 
     token_ids: np.ndarray
@@ -149,6 +184,17 @@ class InitializationExperimentRecord:
     sweep_counts_by_condition: dict[str, np.ndarray] = field(default_factory=dict)
     #: Input condition -> ``[S, T]`` fraction of positions agreeing with greedy.
     sweep_agreement_by_condition: dict[str, np.ndarray] = field(default_factory=dict)
+    #: ``[D_g]`` flat ``window * block_size + offset`` index of each position the
+    #: gradient analysis covered. ``None`` when the run carried no such analysis.
+    gradient_position_indices: np.ndarray | None = None
+    #: ``[D_g]`` true next token ``y_d`` at each of those positions.
+    gradient_position_target_ids: np.ndarray | None = None
+    #: ``[D_g]`` greedy argmax at each of those positions, read from the same
+    #: support-masked logits as the loss. This is what ``q_i`` is derived from,
+    #: so the guess fractions describe the same position set as the norms.
+    gradient_position_greedy_ids: np.ndarray | None = None
+    #: ``[D_g]`` exact ``|| grad_theta ell_d ||_2`` over all trainable parameters.
+    gradient_position_norms: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -276,6 +322,31 @@ class InitializationExperimentRecord:
         """Whether a multi-temperature nucleus sweep was recorded."""
 
         return bool(self.sweep_counts_by_condition) and bool(self.sweep_temperatures)
+
+    @property
+    def has_position_gradients(self) -> bool:
+        """Whether per-position parameter-gradient norms were recorded."""
+
+        return self.gradient_position_norms is not None
+
+    @property
+    def gradient_analysis(self) -> dict[str, Any]:
+        """Protocol of the gradient analysis, empty when none was recorded."""
+
+        return dict(self.metadata.get("analysis", {}).get("gradient_analysis", {}))
+
+    @property
+    def gradient_initialization_index(self) -> int:
+        """Which initialization the gradients were measured on.
+
+        Read from the recorded protocol rather than assumed to be row 0, so a
+        table built from these arrays can never be paired with the wrong
+        initialization's guesses.
+        """
+
+        if not self.has_position_gradients:
+            raise ValueError("This record carries no per-position gradient analysis.")
+        return int(self.gradient_analysis.get("initialization_index", 0))
 
     @property
     def sweep_temperatures(self) -> tuple[float, ...]:
@@ -437,9 +508,71 @@ class InitializationExperimentRecord:
             if array.ndim != 1:
                 raise ValueError(f"uniform_null[{key!r}] must be one-dimensional.")
 
+        self._validate_position_gradients(vocab_size, num_inits)
+
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
             raise ValueError("metadata['tokens'] must have one entry per valid token ID.")
+
+    def _validate_position_gradients(self, vocab_size: int, num_inits: int) -> None:
+        """Check the optional per-position gradient arrays.
+
+        They are all-or-nothing: a record holding norms without the positions and
+        targets they belong to could not be aggregated, and one holding indices
+        without norms would silently produce an empty analysis.
+        """
+
+        present = {
+            name: getattr(self, name)
+            for name in _GRADIENT_ARRAY_NAMES
+            if getattr(self, name) is not None
+        }
+        if not present:
+            return
+        missing = sorted(set(_GRADIENT_ARRAY_NAMES) - set(present))
+        if missing:
+            raise ValueError(
+                "Per-position gradient arrays are all-or-nothing; missing: "
+                + ", ".join(missing)
+            )
+
+        lengths = {name: array.shape for name, array in present.items()}
+        for name, shape in lengths.items():
+            if len(shape) != 1:
+                raise ValueError(f"{name} must be one-dimensional, got shape {shape}.")
+        if len(set(shape[0] for shape in lengths.values())) != 1:
+            raise ValueError(
+                "Every per-position gradient array must cover the same positions; "
+                f"got lengths {[int(shape[0]) for shape in lengths.values()]}."
+            )
+        if self.gradient_position_norms.shape[0] == 0:
+            raise ValueError("Per-position gradient arrays must be non-empty.")
+
+        indices = self.gradient_position_indices
+        if indices.min() < 0:
+            raise ValueError("gradient_position_indices must be non-negative.")
+        if np.unique(indices).shape[0] != indices.shape[0]:
+            raise ValueError(
+                "gradient_position_indices must be distinct; each evaluation "
+                "position is measured at most once."
+            )
+        for name in ("gradient_position_target_ids", "gradient_position_greedy_ids"):
+            token_ids = getattr(self, name)
+            if token_ids.min() < 0 or token_ids.max() >= vocab_size:
+                raise ValueError(f"{name} contain values outside the vocabulary.")
+
+        norms = self.gradient_position_norms
+        if not np.all(np.isfinite(norms)):
+            raise ValueError("gradient_position_norms must all be finite.")
+        if np.any(norms < 0):
+            raise ValueError("gradient_position_norms must be non-negative.")
+
+        recorded = self.gradient_analysis.get("initialization_index")
+        if recorded is not None and not 0 <= int(recorded) < num_inits:
+            raise ValueError(
+                f"gradient_analysis.initialization_index {recorded} is outside the "
+                f"{num_inits} recorded initializations."
+            )
 
     def save(self, directory: str | Path, *, name: str = "initialization_distribution") -> Path:
         """Write the record as ``<name>.npz`` plus ``<name>.json``.
@@ -462,6 +595,10 @@ class InitializationExperimentRecord:
             arrays[f"{_SWEEP_COUNTS_PREFIX}{condition}"] = values
         for condition, values in self.sweep_agreement_by_condition.items():
             arrays[f"{_SWEEP_AGREEMENT_PREFIX}{condition}"] = values
+        for gradient_name in _GRADIENT_ARRAY_NAMES:
+            values = getattr(self, gradient_name)
+            if values is not None:
+                arrays[gradient_name] = values
         _atomic_write_bytes(
             directory / f"{name}.npz",
             lambda path: np.savez_compressed(path, **arrays),
@@ -502,6 +639,12 @@ class InitializationExperimentRecord:
                 if key.startswith(prefix)
             }
 
+        gradients = {
+            name: np.asarray(arrays[name])
+            for name in _GRADIENT_ARRAY_NAMES
+            if name in arrays
+        }
+
         return cls(
             **loaded,
             eligible_token_ids=eligible,
@@ -511,6 +654,7 @@ class InitializationExperimentRecord:
             uniform_null=collect(_NULL_PREFIX),
             sweep_counts_by_condition=collect(_SWEEP_COUNTS_PREFIX),
             sweep_agreement_by_condition=collect(_SWEEP_AGREEMENT_PREFIX),
+            **gradients,
         )
 
     @classmethod
@@ -530,6 +674,10 @@ class InitializationExperimentRecord:
         uniform_null: Mapping[str, np.ndarray] | None = None,
         sweep_counts_by_condition: Mapping[str, np.ndarray] | None = None,
         sweep_agreement_by_condition: Mapping[str, np.ndarray] | None = None,
+        gradient_position_indices: Sequence[int] | np.ndarray | None = None,
+        gradient_position_target_ids: Sequence[int] | np.ndarray | None = None,
+        gradient_position_greedy_ids: Sequence[int] | np.ndarray | None = None,
+        gradient_position_norms: Sequence[float] | np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -568,6 +716,14 @@ class InitializationExperimentRecord:
                 key: np.asarray(value)
                 for key, value in (sweep_agreement_by_condition or {}).items()
             },
+            gradient_position_indices=_optional_array(gradient_position_indices, np.int64),
+            gradient_position_target_ids=_optional_array(
+                gradient_position_target_ids, np.int64
+            ),
+            gradient_position_greedy_ids=_optional_array(
+                gradient_position_greedy_ids, np.int64
+            ),
+            gradient_position_norms=_optional_array(gradient_position_norms, np.float64),
         )
 
 

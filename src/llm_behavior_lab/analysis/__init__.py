@@ -48,6 +48,11 @@ from llm_behavior_lab.analysis.aggregation import (
     within_initialization_sampling_spread,
     zero_guess_counts,
 )
+from llm_behavior_lab.analysis.gradients import (
+    TokenGradientSummary,
+    gradient_guess_table,
+    token_gradient_norms,
+)
 from llm_behavior_lab.analysis.nulls import (
     DEFAULT_NULL_REPLICATES,
     UniformNullSummary,
@@ -78,7 +83,10 @@ __all__ = [
     "sweep_summary",
     "DEFAULT_NULL_REPLICATES",
     "InitializationExperimentRecord",
+    "TokenGradientSummary",
     "UniformNullSummary",
+    "gradient_guess_table",
+    "token_gradient_norms",
     "expected_occupancy_counts",
     "expected_zero_frequency_count",
     "expected_zero_frequency_fraction",
