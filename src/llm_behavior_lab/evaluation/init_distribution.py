@@ -158,6 +158,10 @@ class InitializationMeasurement:
 
     Every vector has length ``vocab_size`` and is indexed by token ID, so all
     records in an experiment align without any further bookkeeping.
+
+    The ``predictive_*`` fields are the optional probability diagnostics, and
+    unlike everything else here they are indexed by **rank** or by **position**
+    rather than by token ID. They are ``None`` unless the caller asked for them.
     """
 
     model_seed: int
@@ -165,6 +169,15 @@ class InitializationMeasurement:
     nucleus_counts: torch.Tensor
     mean_predicted_probabilities: torch.Tensor
     num_positions: int
+    #: ``[K]`` mean probability at each within-position rank, over the eligible
+    #: support. Rank-first, average-second -- see :func:`measure_initialization`.
+    ranked_probability_profile: torch.Tensor | None = None
+    #: ``[D]`` probability of the greedy token at each evaluated position.
+    max_probabilities: torch.Tensor | None = None
+    #: ``[D]`` probability assigned to the true next token at each position.
+    target_probabilities: torch.Tensor | None = None
+    #: ``[D]`` single-position cross-entropy ``-log p_target``.
+    target_losses: torch.Tensor | None = None
     #: ``[T, vocab]`` sweep counts, or ``None`` when no sweep ran.
     sweep_counts: torch.Tensor | None = None
     #: ``[T]`` fraction of positions where the sweep draw equalled the argmax.
@@ -354,6 +367,95 @@ def sampling_uniforms(
     return torch.stack(rows)
 
 
+@dataclass
+class _ProbabilityAccumulator:
+    """Running sufficient statistics of the raw ``T = 1`` predictive vectors.
+
+    These describe the probability vector the model produces **before any
+    sampling policy touches it**: raw logits, restricted to the eligible support,
+    softmax at temperature 1, no top-p truncation, no greedy or nucleus decision.
+    They are upstream of both policies and must never be confused with the
+    temperature-scaled, truncated distribution the nucleus sweep samples from.
+
+    Only sufficient statistics are kept. The full ``[positions, K]`` probability
+    tensor is never retained: at 32768 positions over 31997 eligible tokens that
+    is about 4 GiB per initialization, and nothing downstream needs it.
+    """
+
+    #: ``[K]`` running sum of the within-position sorted probabilities.
+    ranked_sum: torch.Tensor
+    #: ``[D]`` probability of the greedy token, filled position by position.
+    max_probabilities: torch.Tensor
+    #: ``[D]`` probability of the true next token.
+    target_probabilities: torch.Tensor
+    #: How many positions have been written so far.
+    filled: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        eligible_size: int,
+        num_positions: int,
+        device: torch.device,
+    ) -> "_ProbabilityAccumulator":
+        return cls(
+            ranked_sum=torch.zeros(eligible_size, dtype=torch.float64, device=device),
+            max_probabilities=torch.zeros(num_positions, dtype=torch.float64, device=device),
+            target_probabilities=torch.zeros(num_positions, dtype=torch.float64, device=device),
+        )
+
+
+def _accumulate_probability_statistics(
+    accumulator: _ProbabilityAccumulator,
+    probabilities: torch.Tensor,
+    *,
+    greedy_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    eligible_size: int,
+    vocab_size: int,
+) -> None:
+    """Fold one batch of raw predictive vectors into the running statistics.
+
+    The ranking order matters and is the whole point of the ranked profile:
+    probabilities are sorted **within each position first**, and only the sorted
+    values are summed across positions. Averaging probabilities across positions
+    and ranking afterwards would answer a different question -- it would describe
+    the aggregate marginal distribution, which is what figure 1 already shows.
+
+    Sorting the full ``[..., vocab]`` vector and keeping the leading
+    ``eligible_size`` entries is exact rather than approximate: ineligible tokens
+    were masked to ``-inf`` before the softmax, so they hold exactly zero and
+    sort to the tail. The leading K values are therefore precisely the eligible
+    probabilities in descending order.
+
+    The sweep sorts logits for its own purposes, and softmax is strictly
+    increasing so the two orderings agree. That sort is deliberately *not* shared:
+    it runs only when the sweep is enabled, and making a diagnostic's correctness
+    depend on whether an unrelated sampling path happened to run is exactly the
+    coupling that makes an analysis hard to audit.
+    """
+
+    flat = probabilities.reshape(-1, vocab_size)
+    count = flat.shape[0]
+    start, stop = accumulator.filled, accumulator.filled + count
+
+    ordered = torch.sort(flat, dim=-1, descending=True).values[:, :eligible_size]
+    accumulator.ranked_sum += ordered.double().sum(dim=0)
+
+    # Gathered at the greedy token rather than taken as an independent maximum,
+    # so "the probability of the token greedy selects" is true by construction
+    # and cannot drift from the greedy counts through a tie broken differently.
+    # Softmax is monotone, so this is also the maximum probability exactly.
+    accumulator.max_probabilities[start:stop] = (
+        flat.gather(-1, greedy_ids.reshape(-1, 1)).squeeze(-1).double()
+    )
+    accumulator.target_probabilities[start:stop] = (
+        flat.gather(-1, target_ids.reshape(-1, 1)).squeeze(-1).double()
+    )
+    accumulator.filled = stop
+
+
 def _accumulate_batch(
     logits: torch.Tensor,
     *,
@@ -366,6 +468,9 @@ def _accumulate_batch(
     sweep_temperatures: tuple[float, ...] = (),
     sweep_counts: torch.Tensor | None = None,
     sweep_matches: list[int] | None = None,
+    probabilities_accumulator: _ProbabilityAccumulator | None = None,
+    target_ids: torch.Tensor | None = None,
+    eligible_size: int | None = None,
 ) -> None:
     """Fold one batch of logits into the running per-token counters.
 
@@ -400,11 +505,28 @@ def _accumulate_batch(
             uniforms=uniforms[replicate],
         )
         nucleus_counts[replicate] += guess_counts(sampled, vocab_size=vocab_size)
+    # The raw T=1 predictive vectors. Computed once and shared: the mean
+    # predicted mass below and the probability diagnostics describe the same
+    # softmax, so neither can drift from the other.
+    probabilities = torch.softmax(logits.float(), dim=-1)
     # float64 because a 32k-token sum over tens of thousands of positions loses
     # meaningful precision in float32.
-    probability_sum += (
-        torch.softmax(logits.float(), dim=-1).reshape(-1, vocab_size).sum(dim=0).double()
-    )
+    probability_sum += probabilities.reshape(-1, vocab_size).sum(dim=0).double()
+
+    if probabilities_accumulator is not None:
+        if target_ids is None or eligible_size is None:
+            raise ValueError(
+                "Probability diagnostics need the batch's target IDs and the "
+                "eligible support size."
+            )
+        _accumulate_probability_statistics(
+            probabilities_accumulator,
+            probabilities,
+            greedy_ids=greedy_ids,
+            target_ids=target_ids,
+            eligible_size=eligible_size,
+            vocab_size=vocab_size,
+        )
 
 
 def measure_initialization(
@@ -420,6 +542,7 @@ def measure_initialization(
     input_ids: torch.Tensor | None = None,
     inputs_embeds: torch.Tensor | None = None,
     sweep_temperatures: Sequence[float] = (),
+    collect_probability_statistics: bool = False,
 ) -> InitializationMeasurement:
     """Measure one initialization without ever holding all logits.
 
@@ -448,6 +571,13 @@ def measure_initialization(
         inputs_embeds: Synthetic ``[windows, block, dim]`` vectors fed at the
             embedding boundary instead of any token IDs, for the Gaussian
             condition. Mutually exclusive with ``input_ids``.
+        collect_probability_statistics: Also summarise the **raw ``T = 1``
+            predictive vectors**: the rank-first ranked probability profile, the
+            probability of the greedy token, and the probability of the true
+            target. These describe the distribution *before* any sampling policy
+            -- no temperature scaling, no top-p truncation, no selection -- and
+            are therefore upstream of both greedy and nucleus. Off by default, so
+            every existing caller keeps its exact behaviour and cost.
 
     Returns:
         One :class:`InitializationMeasurement` with complete per-token vectors.
@@ -500,6 +630,17 @@ def measure_initialization(
             f"evaluation windows are {tuple(positions.input_ids.shape)}."
         )
 
+    eligible_size = int(mask.sum().item())
+    probabilities_accumulator = (
+        _ProbabilityAccumulator.create(
+            eligible_size=eligible_size,
+            num_positions=positions.num_positions,
+            device=device,
+        )
+        if collect_probability_statistics
+        else None
+    )
+
     model.eval()
     consumed = 0
     with torch.no_grad():
@@ -526,6 +667,11 @@ def measure_initialization(
                 sweep_temperatures=temperatures,
                 sweep_counts=sweep_counts,
                 sweep_matches=sweep_matches,
+                probabilities_accumulator=probabilities_accumulator,
+                # The targets never change with the input condition, so the
+                # target probability always refers to the real corpus token.
+                target_ids=positions.target_ids[start : start + forward_batch_size],
+                eligible_size=eligible_size,
             )
             consumed += batch_positions
             del logits, output
@@ -536,12 +682,33 @@ def measure_initialization(
             f"{positions.num_positions}."
         )
 
+    ranked_profile = None
+    max_probabilities = None
+    target_probabilities = None
+    target_losses = None
+    if probabilities_accumulator is not None:
+        if probabilities_accumulator.filled != consumed:
+            raise RuntimeError(
+                f"Probability diagnostics cover {probabilities_accumulator.filled} "
+                f"positions but {consumed} were measured."
+            )
+        ranked_profile = (probabilities_accumulator.ranked_sum / consumed).cpu()
+        max_probabilities = probabilities_accumulator.max_probabilities.cpu()
+        target_probabilities = probabilities_accumulator.target_probabilities.cpu()
+        # Recorded rather than recomputed downstream, so the loss and the
+        # probability it comes from can never disagree.
+        target_losses = -torch.log(target_probabilities)
+
     return InitializationMeasurement(
         model_seed=model_seed,
         greedy_counts=greedy_counts.cpu(),
         nucleus_counts=nucleus_counts.cpu(),
         mean_predicted_probabilities=(probability_sum / consumed).float().cpu(),
         num_positions=consumed,
+        ranked_probability_profile=ranked_profile,
+        max_probabilities=max_probabilities,
+        target_probabilities=target_probabilities,
+        target_losses=target_losses,
         sweep_counts=None if sweep_counts is None else sweep_counts.cpu(),
         sweep_agreement=(
             None
