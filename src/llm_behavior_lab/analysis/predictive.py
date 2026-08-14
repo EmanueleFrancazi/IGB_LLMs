@@ -50,6 +50,10 @@ import numpy as np
 __all__ = [
     "PROBABILITY_QUANTILES",
     "REPORTED_RANKS",
+    "TEMPERATURE_RANKS",
+    "TOP_K_MASSES",
+    "temperature_confidence_summary",
+    "temperature_ranked_profiles",
     "max_probability_summary",
     "predictive_probability_summary",
     "ranked_probability_profile",
@@ -193,4 +197,112 @@ def predictive_probability_summary(record: Any) -> dict[str, Any]:
         "num_zero_ranks": int((mean_profile <= 0).sum()),
         "max_probability": max_probability_summary(record),
         "target_probability": target_probability_summary(record),
+    }
+
+
+#: Ranks reported in the temperature comparison, and the top-k masses.
+TEMPERATURE_RANKS = (1, 2, 5, 10, 100)
+TOP_K_MASSES = (1, 10, 100)
+
+
+def _require_temperatures(record: Any) -> None:
+    if not record.has_temperature_confidence_analysis:
+        raise ValueError(
+            "This record carries no temperature-conditioned confidence analysis. "
+            "It predates the diagnostic; the experiment must be rerun to obtain it."
+        )
+
+
+def temperature_ranked_profiles(record: Any) -> dict[str, np.ndarray]:
+    """Mean and spread of the ranked profile at every diagnostic temperature.
+
+    Returns ``[N_T, K]`` arrays: the mean across initializations, its SEM, and the
+    min/max envelope, plus the temperature grid and the rank axis.
+    """
+
+    _require_temperatures(record)
+    profiles = np.asarray(
+        record.predictive_temperature_ranked_probabilities, dtype=np.float64
+    )
+    count = profiles.shape[0]
+    mean = profiles.mean(axis=0)
+    sem = (
+        profiles.std(axis=0, ddof=1) / np.sqrt(count)
+        if count > 1
+        else np.zeros_like(mean)
+    )
+    return {
+        "temperatures": np.asarray(record.confidence_temperatures, dtype=np.float64),
+        "ranks": np.arange(1, profiles.shape[2] + 1),
+        "profiles": profiles,
+        "mean": mean,
+        "sem": sem,
+        "low": profiles.min(axis=0),
+        "high": profiles.max(axis=0),
+    }
+
+
+def temperature_confidence_summary(record: Any) -> dict[str, Any]:
+    """Per-temperature confidence statistics for the fixed greedy decisions.
+
+    Every row describes the *same* greedy predictions: softmax is strictly
+    increasing, so ``argmax softmax(z/T) = argmax z`` for every positive ``T``.
+    Only the confidence attached to those decisions moves with temperature. This
+    is what distinguishes the diagnostic from the nucleus sweep, which samples
+    from the transformed distribution and therefore does change what is selected.
+    """
+
+    _require_temperatures(record)
+    temperatures = np.asarray(record.confidence_temperatures, dtype=np.float64)
+    maxima = np.asarray(record.predictive_temperature_max_probabilities, dtype=np.float64)
+    targets = np.asarray(
+        record.predictive_temperature_target_probabilities, dtype=np.float64
+    )
+    losses = np.asarray(record.predictive_temperature_target_losses, dtype=np.float64)
+    entropy = np.asarray(record.predictive_temperature_mean_entropy, dtype=np.float64)
+    profiles = temperature_ranked_profiles(record)
+    uniform = record.uniform_probability
+
+    rows = []
+    for index, temperature in enumerate(temperatures):
+        pooled = _quantiles(maxima[:, index, :])
+        mean_profile = profiles["mean"][index]
+        cumulative = np.cumsum(mean_profile)
+        mean_entropy = float(entropy[:, index].mean())
+        rows.append(
+            {
+                "temperature": float(temperature),
+                "is_canonical": bool(temperature == 1.0),
+                "max_probability": pooled,
+                "mean_over_uniform": float(pooled["mean"] / uniform),
+                "median_over_uniform": float(pooled["p50"] / uniform),
+                "ranked_profile_at_rank": {
+                    str(rank): float(mean_profile[rank - 1])
+                    for rank in TEMPERATURE_RANKS
+                    if rank <= mean_profile.shape[0]
+                },
+                "top_k_mass": {
+                    str(k): float(cumulative[k - 1])
+                    for k in TOP_K_MASSES
+                    if k <= cumulative.shape[0]
+                },
+                "mean_predictive_entropy": mean_entropy,
+                # exp of the mean entropy: the entropy-equivalent number of
+                # equally likely tokens in a typical single prediction, matching
+                # the project's effective-support convention.
+                "effective_support": float(np.exp(mean_entropy)),
+                "target_probability": _quantiles(targets[:, index, :]),
+                "target_loss": _quantiles(losses[:, index, :]),
+                "per_initialization_median_max": np.median(maxima[:, index, :], axis=1),
+            }
+        )
+
+    return {
+        "temperatures": temperatures,
+        "uniform_probability": uniform,
+        "eligible_vocab_size": int(record.eligible_vocab_size),
+        "num_positions": int(maxima.shape[2]),
+        "num_initializations": int(maxima.shape[0]),
+        "greedy_identity_is_temperature_invariant": True,
+        "rows": rows,
     }

@@ -59,10 +59,14 @@ from llm_behavior_lab.analysis.gradients import (
 from llm_behavior_lab.analysis.predictive import (
     PROBABILITY_QUANTILES,
     REPORTED_RANKS,
+    TEMPERATURE_RANKS,
+    TOP_K_MASSES,
     max_probability_summary,
     predictive_probability_summary,
     ranked_probability_profile,
     target_probability_summary,
+    temperature_confidence_summary,
+    temperature_ranked_profiles,
 )
 from llm_behavior_lab.analysis.nulls import (
     DEFAULT_NULL_REPLICATES,
@@ -102,6 +106,10 @@ __all__ = [
     "predictive_probability_summary",
     "ranked_probability_profile",
     "target_probability_summary",
+    "TEMPERATURE_RANKS",
+    "TOP_K_MASSES",
+    "temperature_confidence_summary",
+    "temperature_ranked_profiles",
     "gradient_guess_correlations",
     "gradient_guess_table",
     "gradient_observable_summary",

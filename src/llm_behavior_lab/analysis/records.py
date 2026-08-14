@@ -36,11 +36,12 @@ __all__ = [
 #: Version 2 added ``eligible_token_ids``. Version 3 added the optional
 #: input-condition counts and the uniform-null profile. Version 5 added the
 #: optional per-position gradient arrays. Version 6 added the optional raw
-#: predictive-probability diagnostics. Older records load unchanged: version 1
+#: predictive-probability diagnostics, and version 7 the temperature-conditioned
+#: greedy-confidence grid. Older records load unchanged: version 1
 #: predates special-token exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 6
+RECORD_VERSION = 7
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -98,6 +99,29 @@ _PROBABILITY_ARRAY_NAMES = (
     "predictive_target_probabilities",
     "predictive_target_losses",
 )
+
+#: Version 7 additions: the same statistics evaluated at a grid of diagnostic
+#: temperatures, ``[I, N_T, K]`` for the ranked profiles and ``[I, N_T, D]`` for
+#: the per-position vectors, plus the grid itself and the mean entropy.
+#:
+#: These are a **confidence** diagnostic, not a sampling one. Nothing is drawn
+#: and nothing is truncated; temperature only reshapes the logits into a
+#: probability vector whose geometry is measured. Because softmax is strictly
+#: increasing, every temperature here describes the *same* greedy decisions.
+#:
+#: The ``T = 1`` slice duplicates the version 6 arrays on purpose: it keeps the
+#: grid self-contained and lets validation assert the two agree exactly.
+_TEMPERATURE_ARRAY_NAMES = (
+    "predictive_temperatures",
+    "predictive_temperature_ranked_probabilities",
+    "predictive_temperature_max_probabilities",
+    "predictive_temperature_target_probabilities",
+    "predictive_temperature_target_losses",
+    "predictive_temperature_mean_entropy",
+)
+
+#: The unscaled reference inside that grid.
+CANONICAL_TEMPERATURE = 1.0
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -219,6 +243,18 @@ class InitializationExperimentRecord:
     predictive_target_probabilities: np.ndarray | None = None
     #: ``[I, D]`` single-position cross-entropy ``-log p_target``.
     predictive_target_losses: np.ndarray | None = None
+    #: ``[N_T]`` diagnostic temperatures, in the order the arrays are indexed by.
+    predictive_temperatures: np.ndarray | None = None
+    #: ``[I, N_T, K]`` ranked profile at each diagnostic temperature.
+    predictive_temperature_ranked_probabilities: np.ndarray | None = None
+    #: ``[I, N_T, D]`` probability of the greedy token at each temperature.
+    predictive_temperature_max_probabilities: np.ndarray | None = None
+    #: ``[I, N_T, D]`` probability of the true next token at each temperature.
+    predictive_temperature_target_probabilities: np.ndarray | None = None
+    #: ``[I, N_T, D]`` ``-log p_target`` at each temperature.
+    predictive_temperature_target_losses: np.ndarray | None = None
+    #: ``[I, N_T]`` mean per-position predictive entropy, in nats.
+    predictive_temperature_mean_entropy: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -369,6 +405,29 @@ class InitializationExperimentRecord:
         """``1 / K``: the probability each token gets under an exact uniform."""
 
         return 1.0 / float(self.eligible_vocab_size)
+
+    @property
+    def has_temperature_confidence_analysis(self) -> bool:
+        """Whether the temperature-conditioned confidence grid was recorded."""
+
+        return self.predictive_temperatures is not None
+
+    @property
+    def confidence_temperatures(self) -> tuple[float, ...]:
+        """The diagnostic temperatures, in the order every array is indexed by."""
+
+        if self.predictive_temperatures is None:
+            return ()
+        return tuple(float(value) for value in self.predictive_temperatures)
+
+    def temperature_index(self, temperature: float) -> int:
+        """Position of one diagnostic temperature within the grid."""
+
+        grid = self.confidence_temperatures
+        for index, value in enumerate(grid):
+            if value == float(temperature):
+                return index
+        raise KeyError(f"Temperature {temperature} is not in the recorded grid {grid}.")
 
     @property
     def has_position_gradients(self) -> bool:
@@ -557,6 +616,7 @@ class InitializationExperimentRecord:
 
         self._validate_position_gradients(vocab_size, num_inits)
         self._validate_predictive_probabilities(num_inits)
+        self._validate_temperature_confidence(num_inits)
 
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
@@ -702,6 +762,122 @@ class InitializationExperimentRecord:
                 "profile and the per-position statistics describe different data."
             )
 
+    def _validate_temperature_confidence(self, num_inits: int) -> None:
+        """Check the optional temperature-conditioned confidence grid.
+
+        The invariant worth the most here is the last one: the ``T = 1`` slice
+        must equal the canonical arrays exactly. The grid duplicates that slice
+        deliberately, and a duplicate that silently drifted would put two
+        different numbers behind the same name.
+        """
+
+        present = {
+            name: getattr(self, name)
+            for name in _TEMPERATURE_ARRAY_NAMES
+            if getattr(self, name) is not None
+        }
+        if not present:
+            return
+        missing = sorted(set(_TEMPERATURE_ARRAY_NAMES) - set(present))
+        if missing:
+            raise ValueError(
+                "Temperature-confidence arrays are all-or-nothing; missing: "
+                + ", ".join(missing)
+            )
+
+        temperatures = self.predictive_temperatures
+        if temperatures.ndim != 1 or temperatures.shape[0] == 0:
+            raise ValueError("predictive_temperatures must be a non-empty 1-D array.")
+        if np.any(temperatures <= 0.0):
+            raise ValueError(
+                "Every diagnostic temperature must be positive; softmax(z/T) is "
+                "undefined at T = 0, and greedy is already the T -> 0 limit."
+            )
+        if np.unique(temperatures).shape[0] != temperatures.shape[0]:
+            raise ValueError("predictive_temperatures must be distinct.")
+
+        count = temperatures.shape[0]
+        profiles = self.predictive_temperature_ranked_probabilities
+        if profiles.shape != (num_inits, count, self.eligible_vocab_size):
+            raise ValueError(
+                "predictive_temperature_ranked_probabilities must have shape "
+                f"[initializations, temperatures, eligible_vocab]; got {profiles.shape}."
+            )
+        num_positions = self.predictive_temperature_max_probabilities.shape[2]
+        for name in (
+            "predictive_temperature_max_probabilities",
+            "predictive_temperature_target_probabilities",
+            "predictive_temperature_target_losses",
+        ):
+            array = getattr(self, name)
+            if array.shape != (num_inits, count, num_positions):
+                raise ValueError(
+                    f"{name} must have shape [initializations, temperatures, positions] "
+                    f"({num_inits}, {count}, {num_positions}); got {array.shape}."
+                )
+        if self.predictive_temperature_mean_entropy.shape != (num_inits, count):
+            raise ValueError(
+                "predictive_temperature_mean_entropy must have shape "
+                f"[initializations, temperatures]; got "
+                f"{self.predictive_temperature_mean_entropy.shape}."
+            )
+
+        if not np.all(np.isfinite(profiles)) or np.any(profiles < 0.0):
+            raise ValueError(
+                "predictive_temperature_ranked_probabilities must be finite and "
+                "non-negative."
+            )
+        if np.any(np.diff(profiles, axis=2) > 1e-12):
+            raise ValueError(
+                "Every temperature's ranked profile must be non-increasing with rank."
+            )
+        totals = profiles.sum(axis=2)
+        if not np.allclose(totals, 1.0, rtol=0.0, atol=1e-6):
+            raise ValueError(
+                "Every temperature's ranked profile must sum to 1 over the eligible "
+                f"support; got totals in [{totals.min():.9f}, {totals.max():.9f}]."
+            )
+        for name in (
+            "predictive_temperature_max_probabilities",
+            "predictive_temperature_target_probabilities",
+        ):
+            array = getattr(self, name)
+            if np.any(array < 0.0) or np.any(array > 1.0):
+                raise ValueError(f"{name} must lie in [0, 1].")
+        if not np.allclose(
+            profiles[:, :, 0],
+            self.predictive_temperature_max_probabilities.mean(axis=2),
+            rtol=1e-6,
+            atol=1e-9,
+        ):
+            raise ValueError(
+                "Rank 1 of every temperature's ranked profile must equal that "
+                "temperature's mean maximum probability."
+            )
+
+        if self.predictive_ranked_probabilities is None:
+            return
+        canonical = np.flatnonzero(temperatures == CANONICAL_TEMPERATURE)
+        if canonical.size != 1:
+            return
+        index = int(canonical[0])
+        for grid_name, canonical_name in (
+            ("predictive_temperature_ranked_probabilities", "predictive_ranked_probabilities"),
+            ("predictive_temperature_max_probabilities", "predictive_max_probabilities"),
+            (
+                "predictive_temperature_target_probabilities",
+                "predictive_target_probabilities",
+            ),
+            ("predictive_temperature_target_losses", "predictive_target_losses"),
+        ):
+            if not np.array_equal(
+                getattr(self, grid_name)[:, index], getattr(self, canonical_name)
+            ):
+                raise ValueError(
+                    f"{grid_name} at T = 1 differs from {canonical_name}; the grid's "
+                    "canonical slice and the canonical arrays must be identical."
+                )
+
     def save(self, directory: str | Path, *, name: str = "initialization_distribution") -> Path:
         """Write the record as ``<name>.npz`` plus ``<name>.json``.
 
@@ -723,7 +899,9 @@ class InitializationExperimentRecord:
             arrays[f"{_SWEEP_COUNTS_PREFIX}{condition}"] = values
         for condition, values in self.sweep_agreement_by_condition.items():
             arrays[f"{_SWEEP_AGREEMENT_PREFIX}{condition}"] = values
-        for optional_name in _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES:
+        for optional_name in (
+            _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES + _TEMPERATURE_ARRAY_NAMES
+        ):
             values = getattr(self, optional_name)
             if values is not None:
                 arrays[optional_name] = values
@@ -769,7 +947,9 @@ class InitializationExperimentRecord:
 
         optional = {
             name: np.asarray(arrays[name])
-            for name in _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES
+            for name in (
+                _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES + _TEMPERATURE_ARRAY_NAMES
+            )
             if name in arrays
         }
 
@@ -810,6 +990,12 @@ class InitializationExperimentRecord:
         predictive_max_probabilities: np.ndarray | None = None,
         predictive_target_probabilities: np.ndarray | None = None,
         predictive_target_losses: np.ndarray | None = None,
+        predictive_temperatures: np.ndarray | None = None,
+        predictive_temperature_ranked_probabilities: np.ndarray | None = None,
+        predictive_temperature_max_probabilities: np.ndarray | None = None,
+        predictive_temperature_target_probabilities: np.ndarray | None = None,
+        predictive_temperature_target_losses: np.ndarray | None = None,
+        predictive_temperature_mean_entropy: np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -866,6 +1052,22 @@ class InitializationExperimentRecord:
                 predictive_target_probabilities, np.float64
             ),
             predictive_target_losses=_optional_array(predictive_target_losses, np.float64),
+            predictive_temperatures=_optional_array(predictive_temperatures, np.float64),
+            predictive_temperature_ranked_probabilities=_optional_array(
+                predictive_temperature_ranked_probabilities, np.float64
+            ),
+            predictive_temperature_max_probabilities=_optional_array(
+                predictive_temperature_max_probabilities, np.float64
+            ),
+            predictive_temperature_target_probabilities=_optional_array(
+                predictive_temperature_target_probabilities, np.float64
+            ),
+            predictive_temperature_target_losses=_optional_array(
+                predictive_temperature_target_losses, np.float64
+            ),
+            predictive_temperature_mean_entropy=_optional_array(
+                predictive_temperature_mean_entropy, np.float64
+            ),
         )
 
 
