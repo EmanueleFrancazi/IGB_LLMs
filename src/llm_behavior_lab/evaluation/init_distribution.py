@@ -46,6 +46,8 @@ from llm_behavior_lab.evaluation.guessing import (
 )
 
 __all__ = [
+    "CANONICAL_TEMPERATURE",
+    "CONFIDENCE_TEMPERATURES",
     "EvaluationPositions",
     "InitializationMeasurement",
     "NucleusSamplingSettings",
@@ -178,6 +180,18 @@ class InitializationMeasurement:
     target_probabilities: torch.Tensor | None = None
     #: ``[D]`` single-position cross-entropy ``-log p_target``.
     target_losses: torch.Tensor | None = None
+    #: Diagnostic temperatures of the greedy-confidence grid, in array order.
+    confidence_temperatures: tuple[float, ...] = ()
+    #: ``[N_T, K]`` ranked profile at each diagnostic temperature.
+    temperature_ranked_probabilities: torch.Tensor | None = None
+    #: ``[N_T, D]`` probability of the greedy token at each temperature.
+    temperature_max_probabilities: torch.Tensor | None = None
+    #: ``[N_T, D]`` probability of the true next token at each temperature.
+    temperature_target_probabilities: torch.Tensor | None = None
+    #: ``[N_T, D]`` ``-log p_target`` at each temperature.
+    temperature_target_losses: torch.Tensor | None = None
+    #: ``[N_T]`` mean per-position predictive entropy, in nats.
+    temperature_mean_entropy: torch.Tensor | None = None
     #: ``[T, vocab]`` sweep counts, or ``None`` when no sweep ran.
     sweep_counts: torch.Tensor | None = None
     #: ``[T]`` fraction of positions where the sweep draw equalled the argmax.
@@ -367,6 +381,21 @@ def sampling_uniforms(
     return torch.stack(rows)
 
 
+#: Diagnostic temperatures for the greedy-confidence analysis: the six values of
+#: the stochastic nucleus sweep plus ``T = 1``, the canonical unscaled reference.
+#:
+#: This grid is **not** the nucleus sweep and does not redefine it. Nothing here
+#: is sampled and nothing is truncated: temperature is used only to reshape the
+#: logits into a probability vector whose geometry is then measured. Because
+#: softmax is strictly increasing, ``argmax softmax(z/T) = argmax z`` for every
+#: positive ``T``, so every one of these temperatures describes the *same* greedy
+#: decisions with different confidence attached to them.
+CONFIDENCE_TEMPERATURES = (0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20)
+
+#: The unscaled reference inside that grid.
+CANONICAL_TEMPERATURE = 1.00
+
+
 @dataclass
 class _ProbabilityAccumulator:
     """Running sufficient statistics of the raw ``T = 1`` predictive vectors.
@@ -382,12 +411,16 @@ class _ProbabilityAccumulator:
     is about 4 GiB per initialization, and nothing downstream needs it.
     """
 
-    #: ``[K]`` running sum of the within-position sorted probabilities.
+    #: The diagnostic temperatures, in the order every array is indexed by.
+    temperatures: tuple[float, ...]
+    #: ``[N_T, K]`` running sum of the within-position sorted probabilities.
     ranked_sum: torch.Tensor
-    #: ``[D]`` probability of the greedy token, filled position by position.
+    #: ``[N_T, D]`` probability of the greedy token, filled position by position.
     max_probabilities: torch.Tensor
-    #: ``[D]`` probability of the true next token.
+    #: ``[N_T, D]`` probability of the true next token.
     target_probabilities: torch.Tensor
+    #: ``[N_T]`` running sum of the per-position predictive entropy, in nats.
+    entropy_sum: torch.Tensor
     #: How many positions have been written so far.
     filled: int = 0
 
@@ -395,64 +428,101 @@ class _ProbabilityAccumulator:
     def create(
         cls,
         *,
+        temperatures: Sequence[float],
         eligible_size: int,
         num_positions: int,
         device: torch.device,
     ) -> "_ProbabilityAccumulator":
+        count = len(temperatures)
         return cls(
-            ranked_sum=torch.zeros(eligible_size, dtype=torch.float64, device=device),
-            max_probabilities=torch.zeros(num_positions, dtype=torch.float64, device=device),
-            target_probabilities=torch.zeros(num_positions, dtype=torch.float64, device=device),
+            temperatures=tuple(float(value) for value in temperatures),
+            ranked_sum=torch.zeros((count, eligible_size), dtype=torch.float64, device=device),
+            max_probabilities=torch.zeros(
+                (count, num_positions), dtype=torch.float64, device=device
+            ),
+            target_probabilities=torch.zeros(
+                (count, num_positions), dtype=torch.float64, device=device
+            ),
+            entropy_sum=torch.zeros(count, dtype=torch.float64, device=device),
         )
 
 
 def _accumulate_probability_statistics(
     accumulator: _ProbabilityAccumulator,
-    probabilities: torch.Tensor,
+    logits: torch.Tensor,
+    canonical_probabilities: torch.Tensor,
     *,
     greedy_ids: torch.Tensor,
     target_ids: torch.Tensor,
     eligible_size: int,
     vocab_size: int,
 ) -> None:
-    """Fold one batch of raw predictive vectors into the running statistics.
+    """Fold one batch into the running statistics, at every diagnostic temperature.
 
-    The ranking order matters and is the whole point of the ranked profile:
-    probabilities are sorted **within each position first**, and only the sorted
-    values are summed across positions. Averaging probabilities across positions
-    and ranking afterwards would answer a different question -- it would describe
-    the aggregate marginal distribution, which is what figure 1 already shows.
+    Two orderings matter here and they are unrelated.
+
+    The ranking order is the statistic: probabilities are sorted **within each
+    position first**, and only the sorted values are summed across positions.
+    Averaging probabilities across positions and ranking afterwards would answer
+    a different question -- the aggregate marginal distribution, which figure 1
+    already shows.
+
+    The temperature order is free. Softmax is strictly increasing, so ``z_i > z_j``
+    implies ``softmax(z/T)_i > softmax(z/T)_j`` for every positive ``T``: one
+    descending permutation of the logits sorts every temperature's probability
+    vector. The sort is therefore done **once** per batch and the probabilities
+    are *gathered* through it. Gathering moves floats without arithmetic, so the
+    result is bit-for-bit what a direct sort of each temperature's probabilities
+    would give.
+
+    That same monotonicity is why ``argmax`` is temperature-invariant, which is
+    the invariant the whole experiment rests on: every temperature here describes
+    the *same* greedy decisions with different confidence attached.
+
+    The sort is computed here rather than borrowed from the nucleus sweep. The
+    sweep's sort runs only when sampling is enabled, and a diagnostic whose
+    correctness depends on whether an unrelated sampling path happened to run
+    cannot be audited.
 
     Sorting the full ``[..., vocab]`` vector and keeping the leading
-    ``eligible_size`` entries is exact rather than approximate: ineligible tokens
-    were masked to ``-inf`` before the softmax, so they hold exactly zero and
-    sort to the tail. The leading K values are therefore precisely the eligible
-    probabilities in descending order.
-
-    The sweep sorts logits for its own purposes, and softmax is strictly
-    increasing so the two orderings agree. That sort is deliberately *not* shared:
-    it runs only when the sweep is enabled, and making a diagnostic's correctness
-    depend on whether an unrelated sampling path happened to run is exactly the
-    coupling that makes an analysis hard to audit.
+    ``eligible_size`` entries is exact: ineligible tokens were masked to ``-inf``
+    before the softmax, so they hold exactly zero and sort to the tail.
     """
 
-    flat = probabilities.reshape(-1, vocab_size)
-    count = flat.shape[0]
+    flat_logits = logits.reshape(-1, vocab_size)
+    flat_canonical = canonical_probabilities.reshape(-1, vocab_size)
+    count = flat_logits.shape[0]
     start, stop = accumulator.filled, accumulator.filled + count
 
-    ordered = torch.sort(flat, dim=-1, descending=True).values[:, :eligible_size]
-    accumulator.ranked_sum += ordered.double().sum(dim=0)
+    greedy_index = greedy_ids.reshape(-1, 1)
+    target_index = target_ids.reshape(-1, 1)
+    order = torch.argsort(flat_logits, dim=-1, descending=True)
 
-    # Gathered at the greedy token rather than taken as an independent maximum,
-    # so "the probability of the token greedy selects" is true by construction
-    # and cannot drift from the greedy counts through a tie broken differently.
-    # Softmax is monotone, so this is also the maximum probability exactly.
-    accumulator.max_probabilities[start:stop] = (
-        flat.gather(-1, greedy_ids.reshape(-1, 1)).squeeze(-1).double()
-    )
-    accumulator.target_probabilities[start:stop] = (
-        flat.gather(-1, target_ids.reshape(-1, 1)).squeeze(-1).double()
-    )
+    for index, temperature in enumerate(accumulator.temperatures):
+        # T = 1 reuses the tensor the mean predicted mass is taken from, so the
+        # canonical slice of this grid and that statistic cannot disagree.
+        probabilities = (
+            flat_canonical
+            if temperature == CANONICAL_TEMPERATURE
+            else torch.softmax(flat_logits / temperature, dim=-1)
+        )
+        ordered = probabilities.gather(-1, order)[:, :eligible_size].double()
+        accumulator.ranked_sum[index] += ordered.sum(dim=0)
+        # Entropy from the ranked values: a permutation cannot change a sum over
+        # the whole vector, and the tail is exactly zero.
+        accumulator.entropy_sum[index] += -(
+            ordered * torch.log(ordered.clamp_min(torch.finfo(torch.float64).tiny))
+        ).sum(dim=-1).sum()
+
+        # Gathered at the greedy token rather than taken as an independent
+        # maximum, so "the probability of the token greedy selects" is true by
+        # construction. Softmax is monotone, so it is also the maximum exactly.
+        accumulator.max_probabilities[index, start:stop] = (
+            probabilities.gather(-1, greedy_index).squeeze(-1).double()
+        )
+        accumulator.target_probabilities[index, start:stop] = (
+            probabilities.gather(-1, target_index).squeeze(-1).double()
+        )
     accumulator.filled = stop
 
 
@@ -521,6 +591,7 @@ def _accumulate_batch(
             )
         _accumulate_probability_statistics(
             probabilities_accumulator,
+            logits,
             probabilities,
             greedy_ids=greedy_ids,
             target_ids=target_ids,
@@ -543,6 +614,7 @@ def measure_initialization(
     inputs_embeds: torch.Tensor | None = None,
     sweep_temperatures: Sequence[float] = (),
     collect_probability_statistics: bool = False,
+    confidence_temperatures: Sequence[float] = CONFIDENCE_TEMPERATURES,
 ) -> InitializationMeasurement:
     """Measure one initialization without ever holding all logits.
 
@@ -631,8 +703,18 @@ def measure_initialization(
         )
 
     eligible_size = int(mask.sum().item())
+    confidence_grid = tuple(dict.fromkeys(float(value) for value in confidence_temperatures))
+    if collect_probability_statistics:
+        if not confidence_grid:
+            raise ValueError("confidence_temperatures must not be empty.")
+        if any(value <= 0.0 for value in confidence_grid):
+            raise ValueError(
+                "Every confidence temperature must be positive; softmax(z/T) is "
+                "undefined at T = 0, and greedy is already the T -> 0 limit."
+            )
     probabilities_accumulator = (
         _ProbabilityAccumulator.create(
+            temperatures=confidence_grid,
             eligible_size=eligible_size,
             num_positions=positions.num_positions,
             device=device,
@@ -686,18 +768,31 @@ def measure_initialization(
     max_probabilities = None
     target_probabilities = None
     target_losses = None
+    temperature_ranked = None
+    temperature_max = None
+    temperature_target = None
+    temperature_losses = None
+    temperature_entropy = None
     if probabilities_accumulator is not None:
         if probabilities_accumulator.filled != consumed:
             raise RuntimeError(
                 f"Probability diagnostics cover {probabilities_accumulator.filled} "
                 f"positions but {consumed} were measured."
             )
-        ranked_profile = (probabilities_accumulator.ranked_sum / consumed).cpu()
-        max_probabilities = probabilities_accumulator.max_probabilities.cpu()
-        target_probabilities = probabilities_accumulator.target_probabilities.cpu()
+        canonical = confidence_grid.index(CANONICAL_TEMPERATURE)
+        temperature_ranked = (probabilities_accumulator.ranked_sum / consumed).cpu()
+        temperature_max = probabilities_accumulator.max_probabilities.cpu()
+        temperature_target = probabilities_accumulator.target_probabilities.cpu()
         # Recorded rather than recomputed downstream, so the loss and the
         # probability it comes from can never disagree.
-        target_losses = -torch.log(target_probabilities)
+        temperature_losses = -torch.log(temperature_target)
+        temperature_entropy = (probabilities_accumulator.entropy_sum / consumed).cpu()
+        # The canonical T = 1 slice is also surfaced under its own names, which
+        # is what every earlier consumer reads.
+        ranked_profile = temperature_ranked[canonical]
+        max_probabilities = temperature_max[canonical]
+        target_probabilities = temperature_target[canonical]
+        target_losses = temperature_losses[canonical]
 
     return InitializationMeasurement(
         model_seed=model_seed,
@@ -709,6 +804,14 @@ def measure_initialization(
         max_probabilities=max_probabilities,
         target_probabilities=target_probabilities,
         target_losses=target_losses,
+        confidence_temperatures=(
+            () if probabilities_accumulator is None else confidence_grid
+        ),
+        temperature_ranked_probabilities=temperature_ranked,
+        temperature_max_probabilities=temperature_max,
+        temperature_target_probabilities=temperature_target,
+        temperature_target_losses=temperature_losses,
+        temperature_mean_entropy=temperature_entropy,
         sweep_counts=None if sweep_counts is None else sweep_counts.cpu(),
         sweep_agreement=(
             None
