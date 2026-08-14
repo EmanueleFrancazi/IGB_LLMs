@@ -61,8 +61,11 @@ __all__ = [
     "escape_token_label",
     "generate_all_figures",
     "plot_gradient_vs_guess_bias",
+    "plot_greedy_confidence_vs_temperature",
     "plot_max_predictive_probability",
     "plot_ranked_predictive_probabilities",
+    "plot_temperature_max_predictive_probability",
+    "plot_temperature_ranked_predictive_probabilities",
     "plot_ranked_frequency_profiles",
     "plot_sampling_adequacy",
     "plot_input_structure_profiles",
@@ -1350,4 +1353,336 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
         written.extend(plot_max_predictive_probability(record, directory))
     if record.has_position_gradients:
         written.extend(plot_gradient_vs_guess_bias(record, directory))
+    if record.has_temperature_confidence_analysis:
+        written.extend(plot_temperature_ranked_predictive_probabilities(record, directory))
+        written.extend(plot_temperature_max_predictive_probability(record, directory))
+        written.extend(plot_greedy_confidence_vs_temperature(record, directory))
     return written
+
+
+def _temperature_colours(count: int) -> list:
+    """Cool-to-warm ordering so a sharpening sequence reads as a sequence."""
+
+    import matplotlib.cm as cm
+
+    return [cm.viridis(value) for value in np.linspace(0.05, 0.92, count)]
+
+
+def plot_temperature_ranked_predictive_probabilities(
+    record: Any,
+    directory: str | Path,
+    *,
+    y_scale: str = "auto",
+) -> list[Path]:
+    """Figure 11 -- ranked predictive profiles across the diagnostic temperatures.
+
+    One curve per temperature, showing how lowering ``T`` concentrates mass into
+    the leading ranks. Every curve describes the **same greedy decisions**:
+    softmax is strictly increasing, so ``argmax softmax(z/T) = argmax z`` for
+    every positive ``T``. Only the confidence attached to those decisions moves.
+
+    That is what separates this from the nucleus sweep. The sweep *samples* from
+    the transformed distribution, so its selections really do change with
+    temperature; here nothing is sampled and nothing is truncated.
+
+    Uncertainty is drawn only for the canonical ``T = 1`` reference. Seven
+    overlapping bands would be an unreadable forest, and the initialization
+    spread is far smaller than the separation between temperatures -- so one band
+    establishes the scale and the rest stay legible.
+    """
+
+    from llm_behavior_lab.analysis.predictive import temperature_ranked_profiles
+
+    if not record.has_temperature_confidence_analysis:
+        raise ValueError(
+            "This record carries no temperature-confidence analysis, so figure 11 "
+            "has nothing to draw."
+        )
+    if y_scale not in ("auto", "log", "linear"):
+        raise ValueError(f"y_scale must be 'auto', 'log', or 'linear'; got {y_scale!r}.")
+
+    profiles = temperature_ranked_profiles(record)
+    temperatures = profiles["temperatures"]
+    ranks = profiles["ranks"]
+    uniform = record.uniform_probability
+    large = _is_large(record)
+    colours = _temperature_colours(len(temperatures))
+
+    figure = _new_figure(width=8.5, height=5.8)
+    axes = figure.subplots()
+
+    for index, temperature in enumerate(temperatures):
+        canonical = float(temperature) == 1.0
+        mean = profiles["mean"][index]
+        if canonical:
+            axes.fill_between(
+                ranks,
+                _positive(mean - profiles["sem"][index]),
+                _positive(mean + profiles["sem"][index]),
+                color="#333333",
+                alpha=0.30,
+                linewidth=0,
+                rasterized=large,
+                label="T = 1 mean ± SEM",
+            )
+        axes.plot(
+            ranks,
+            _positive(mean),
+            color="#111111" if canonical else colours[index],
+            linewidth=2.0 if canonical else 1.2,
+            linestyle="-" if canonical else "--",
+            label=f"T = {temperature:g}" + ("  (canonical)" if canonical else ""),
+            **_profile_kwargs(large),
+        )
+    axes.axhline(
+        uniform,
+        color=NULL_STYLE["color"],
+        linestyle=":",
+        linewidth=1.1,
+        label=f"uniform 1/K = {uniform:.3g}",
+    )
+
+    if _probability_scale(profiles["mean"], y_scale):
+        axes.set_yscale("log")
+        scale_note = "log scale"
+    else:
+        scale_note = "linear scale"
+    if large:
+        axes.set_xscale("log")
+    axes.set_xlabel("within-position probability rank  r  (ranked inside each position)")
+    axes.set_ylabel(f"mean predictive probability  Pbar_T(r)  [{scale_note}]")
+    axes.set_title("Confidence geometry vs. temperature, at fixed greedy decisions")
+    axes.grid(True, which="both", alpha=0.22)
+    axes.legend(loc="upper right", fontsize=7.5, frameon=True, ncol=2)
+    axes.text(
+        0.02,
+        0.05,
+        "argmax softmax(z/T) = argmax z for every T > 0:\n"
+        "every curve describes the SAME greedy decisions",
+        transform=axes.transAxes,
+        fontsize=7.5,
+        va="bottom",
+        ha="left",
+        bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure11_temperature_ranked_predictive_probabilities")
+
+
+def plot_temperature_max_predictive_probability(
+    record: Any,
+    directory: str | Path,
+    *,
+    panel_temperatures: Sequence[float] | None = None,
+    x_scale: str = "auto",
+) -> list[Path]:
+    """Figure 12 -- the greedy winner's confidence, one ECDF panel per temperature.
+
+    The same representation as figure 9, repeated across the six sweep
+    temperatures so the panels are directly comparable, with the canonical
+    ``T = 1`` median marked in each as a fixed reference. Axis limits are shared
+    across panels, so apparent sharpening is the data rather than a rescaling.
+
+    Kept as an ECDF: the question is "how large is the greedy winner's
+    probability at a typical position", which is a quantile question.
+    """
+
+    from llm_behavior_lab.analysis.predictive import temperature_confidence_summary
+
+    if not record.has_temperature_confidence_analysis:
+        raise ValueError(
+            "This record carries no temperature-confidence analysis, so figure 12 "
+            "has nothing to draw."
+        )
+    if x_scale not in ("auto", "log", "linear"):
+        raise ValueError(f"x_scale must be 'auto', 'log', or 'linear'; got {x_scale!r}.")
+
+    summary = temperature_confidence_summary(record)
+    grid = list(record.confidence_temperatures)
+    chosen = (
+        [value for value in grid if value != 1.0]
+        if panel_temperatures is None
+        else [float(value) for value in panel_temperatures]
+    )
+    if not chosen:
+        raise ValueError("No panel temperatures are available in this record.")
+
+    maxima = np.asarray(record.predictive_temperature_max_probabilities, dtype=np.float64)
+    uniform = record.uniform_probability
+    canonical_median = None
+    if 1.0 in grid:
+        canonical_median = summary["rows"][grid.index(1.0)]["max_probability"]["p50"]
+
+    columns = 3
+    rows = int(np.ceil(len(chosen) / columns))
+    figure = _new_figure(width=4.1 * columns, height=3.4 * rows)
+    panels = figure.subplots(rows, columns, squeeze=False, sharex=True, sharey=True)
+    levels = np.linspace(0.0, 1.0, 401)
+
+    # Shared limits so a panel cannot look sharper merely by being rescaled.
+    selected = [maxima[:, grid.index(value), :] for value in chosen]
+    # The uniform reference is included in the shared range even when no panel's
+    # data reaches it: it is the scientific floor every panel is read against,
+    # and excluding it would leave "how far above chance" unanswerable by eye.
+    lower = min([float(values.min()) for values in selected] + [uniform])
+    upper = max(float(values.max()) for values in selected)
+    use_log = _probability_scale(np.concatenate([v.reshape(-1) for v in selected]), x_scale)
+
+    for panel_index, temperature in enumerate(chosen):
+        axes = panels[panel_index // columns][panel_index % columns]
+        values = maxima[:, grid.index(temperature), :]
+        for initialization in range(values.shape[0]):
+            axes.plot(
+                np.quantile(values[initialization], levels),
+                levels,
+                color="#1f77b4",
+                alpha=0.30,
+                linewidth=0.7,
+            )
+        axes.plot(
+            np.quantile(values.reshape(-1), levels),
+            levels,
+            color="#08306b",
+            linewidth=1.6,
+        )
+        median = float(np.median(values))
+        axes.axvline(median, color="#d62728", linestyle=":", linewidth=1.0)
+        if lower <= uniform <= upper:
+            axes.axvline(uniform, color=NULL_STYLE["color"], linestyle="--", linewidth=0.9)
+        if canonical_median is not None and lower <= canonical_median <= upper:
+            axes.axvline(canonical_median, color="#111111", linestyle="-.", linewidth=0.9)
+
+        row = summary["rows"][grid.index(temperature)]["max_probability"]
+        axes.set_title(f"T = {temperature:g}", fontsize=10)
+        axes.text(
+            0.03,
+            0.97,
+            f"median {row['p50']:.3g}\np95 {row['p95']:.3g}\np99 {row['p99']:.3g}\n"
+            f"median/uniform {row['p50'] / uniform:.1f}x",
+            transform=axes.transAxes,
+            fontsize=7,
+            va="top",
+            ha="left",
+            bbox=_ANNOTATION_BOX,
+        )
+        axes.grid(True, which="both", alpha=0.22)
+        if use_log:
+            axes.set_xscale("log")
+        axes.set_xlim(lower, upper)
+        axes.set_ylim(0.0, 1.0)
+
+    for panel_index in range(len(chosen), rows * columns):
+        panels[panel_index // columns][panel_index % columns].set_visible(False)
+    for column in range(columns):
+        panels[rows - 1][column].set_xlabel(
+            f"p_max(d)  [{'log' if use_log else 'linear'} scale]"
+        )
+    for row_index in range(rows):
+        panels[row_index][0].set_ylabel("empirical CDF")
+
+    figure.suptitle(
+        "Greedy-winner confidence across temperature (identical greedy decisions)",
+        fontsize=12,
+    )
+    figure.text(
+        0.5,
+        0.005,
+        "thin blue: per initialization   dark blue: pooled   red dotted: panel median   "
+        "black dash-dot: T = 1 median   grey dashed: uniform 1/K",
+        ha="center",
+        fontsize=7.5,
+    )
+    return save_figure(figure, directory, "figure12_temperature_max_predictive_probability")
+
+
+def plot_greedy_confidence_vs_temperature(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 13 -- how fast confidence rises as temperature falls.
+
+    Two stacked panels rather than one: ``p_max`` is a probability and the
+    effective support is a token count, and forcing them onto a shared axis to
+    save space would misrepresent both.
+
+    Temperature is drawn on a logarithmic axis at its true numerical spacing --
+    the grid is not uniformly spaced, and plotting it as if it were would distort
+    the shape of the very trend the figure exists to show.
+    """
+
+    from llm_behavior_lab.analysis.predictive import temperature_confidence_summary
+
+    if not record.has_temperature_confidence_analysis:
+        raise ValueError(
+            "This record carries no temperature-confidence analysis, so figure 13 "
+            "has nothing to draw."
+        )
+
+    summary = temperature_confidence_summary(record)
+    temperatures = np.asarray([row["temperature"] for row in summary["rows"]])
+    order = np.argsort(temperatures)
+    temperatures = temperatures[order]
+    rows = [summary["rows"][index] for index in order]
+    uniform = record.uniform_probability
+
+    figure = _new_figure(width=7.5, height=6.8)
+    top, bottom = figure.subplots(2, 1, sharex=True)
+
+    for key, label, style in (
+        ("p50", "median p_max", {"color": "#08306b", "marker": "o"}),
+        ("mean", "mean p_max", {"color": "#1f77b4", "marker": "s"}),
+        ("p95", "p95 p_max", {"color": "#6baed6", "marker": "^"}),
+    ):
+        top.plot(
+            temperatures,
+            [row["max_probability"][key] for row in rows],
+            linewidth=1.4,
+            markersize=4,
+            label=label,
+            **style,
+        )
+    top.axhline(
+        uniform,
+        color=NULL_STYLE["color"],
+        linestyle="--",
+        linewidth=1.0,
+        label=f"uniform 1/K = {uniform:.3g}",
+    )
+    top.set_yscale("log")
+    top.set_ylabel("probability of the greedy token")
+    top.grid(True, which="both", alpha=0.22)
+    top.legend(fontsize=8, loc="upper right")
+    top.set_title("Confidence of fixed greedy decisions vs. temperature")
+
+    bottom.plot(
+        temperatures,
+        [row["effective_support"] for row in rows],
+        color="#2ca02c",
+        marker="o",
+        markersize=4,
+        linewidth=1.4,
+        label="effective support  exp(mean H)",
+    )
+    bottom.axhline(
+        record.eligible_vocab_size,
+        color=NULL_STYLE["color"],
+        linestyle="--",
+        linewidth=1.0,
+        label=f"eligible K = {_format_count(record.eligible_vocab_size)}",
+    )
+    bottom.set_yscale("log")
+    bottom.set_xscale("log")
+    bottom.set_xlabel("softmax temperature T  (log axis, true spacing)")
+    bottom.set_ylabel("effective support (tokens)")
+    bottom.grid(True, which="both", alpha=0.22)
+    bottom.legend(fontsize=8, loc="upper left")
+
+    for axes in (top, bottom):
+        axes.axvline(1.0, color="#111111", linestyle="-.", linewidth=0.9, alpha=0.7)
+    # Labelled on the lower panel: the upper one's legend already occupies the
+    # corner an annotation there would land in.
+    bottom.annotate(
+        "T = 1 reference",
+        (1.0, bottom.get_ylim()[0]),
+        textcoords="offset points",
+        xytext=(5, 10),
+        fontsize=7.5,
+        color="#111111",
+    )
+    return save_figure(figure, directory, "figure13_greedy_confidence_vs_temperature")
