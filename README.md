@@ -1133,6 +1133,17 @@ The benchmark writes no record and draws no figure; it times several window coun
 scaling can be checked, and prints a projected full-run cost explicitly labelled as an
 extrapolation.
 
+The same probabilities are also evaluated at a grid of diagnostic temperatures,
+`T = 0.12 … 1.20` with `T = 1` as the canonical reference, giving
+`figure11_temperature_ranked_predictive_probabilities.svg`,
+`figure12_temperature_max_predictive_probability.svg` and
+`figure13_greedy_confidence_vs_temperature.svg`. Nothing is sampled and nothing is
+truncated there: softmax is strictly increasing, so `argmax softmax(z/T) = argmax z`
+and every temperature describes the **same greedy decisions** with different
+confidence attached. That is what makes it a different experiment from the nucleus
+sweep, which samples from the transformed distribution and therefore does change what
+gets selected.
+
 This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
 differentiates the *window-averaged* loss with respect to block activations. See
 [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) §5e for the exact definition.

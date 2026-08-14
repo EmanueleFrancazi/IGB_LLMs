@@ -548,6 +548,59 @@ condition. They do not touch any RNG stream, and switching them on leaves the
 greedy counts, nucleus counts, sweep counts and sampling draws bit-for-bit
 unchanged — which is asserted by test with the sweep both enabled and disabled.
 
+### Temperature-conditioned greedy confidence
+
+The same probability machinery evaluated at a grid of diagnostic temperatures:
+
+```
+T = 0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20      p_T[d,i] = softmax(z[d]/T)
+```
+
+**Nothing is sampled and nothing is truncated.** Temperature is used only to
+reshape the logits into a probability vector whose geometry is then measured.
+
+The invariance the analysis rests on is exact: softmax is strictly increasing, so
+
+```
+argmax_i softmax(z[d]/T)_i = argmax_i z[d,i]      for every T > 0
+```
+
+Every temperature therefore describes the **same greedy decisions**, with
+different confidence attached to them. Greedy counts, token identities,
+evaluation positions, logits and RNG behaviour are all unchanged; only `p_max_T`,
+the ranked profile, and the entropy move.
+
+Three facts must be kept apart:
+
+| | changes with T? | why |
+|---|---|---|
+| greedy identity | **no** | argmax is scale-invariant under a positive temperature |
+| confidence `p_max_T` | **yes** | the distribution sharpens as `T` falls |
+| nucleus selections | **yes** | the sweep *samples* from the transformed distribution |
+
+The third is the existing stochastic sweep and is a different experiment. These
+figures are what explains why nucleus behaviour moved strongly with temperature
+even though greedy token identities never did.
+
+Per temperature the record keeps the ranked profile `[I, N_T, K]` and `p_max_T`,
+`p_target_T`, `loss_T`, each `[I, N_T, D]`, plus the mean predictive entropy
+`[I, N_T]`. The full `[I, N_T, D, K]` tensor is never built. Top-k cumulative
+mass needs no extra array: it is a prefix sum of the ranked profile.
+
+One sort per batch serves every temperature. Softmax is monotone, so a single
+descending permutation of the logits orders every temperature's probability
+vector, and the probabilities are *gathered* through it -- moving floats without
+arithmetic, so the result is bit-for-bit a direct sort. That sort is computed by
+the diagnostic rather than borrowed from the nucleus sweep, whose sort runs only
+when sampling is enabled.
+
+The `T = 1` slice duplicates the canonical arrays deliberately, and validation
+asserts the two are identical.
+
+Figures 11, 12 and 13 present this: the ranked profiles across temperature, a
+six-panel ECDF of `p_max_T` on shared axes, and a compact confidence-versus-
+temperature summary with probability and effective support on separate panels.
+
 ---
 
 ## 5e. Gradient magnitude versus guessing bias
