@@ -701,6 +701,13 @@ def main() -> None:
                 ),
                 "ranked_profile_order": "rank_within_position_then_average_over_positions",
                 "retains_full_probability_tensor": False,
+                "confidence_temperatures": list(measurements[0].confidence_temperatures),
+                "confidence_temperature_note": (
+                    "Diagnostic only: softmax(z/T) is measured, never sampled and "
+                    "never truncated. argmax softmax(z/T) = argmax z for every "
+                    "positive T, so every temperature describes the SAME greedy "
+                    "decisions. This is not the stochastic nucleus sweep."
+                ),
             },
             "gradient_analysis": gradient_metadata,
             "vocab_size": tokenizer.vocab_size,
@@ -785,6 +792,14 @@ def main() -> None:
         predictive_max_probabilities=stacked("max_probabilities"),
         predictive_target_probabilities=stacked("target_probabilities"),
         predictive_target_losses=stacked("target_losses"),
+        predictive_temperatures=np.asarray(measurements[0].confidence_temperatures),
+        predictive_temperature_ranked_probabilities=stacked("temperature_ranked_probabilities"),
+        predictive_temperature_max_probabilities=stacked("temperature_max_probabilities"),
+        predictive_temperature_target_probabilities=stacked(
+            "temperature_target_probabilities"
+        ),
+        predictive_temperature_target_losses=stacked("temperature_target_losses"),
+        predictive_temperature_mean_entropy=stacked("temperature_mean_entropy"),
         gradient_position_indices=(
             None if gradient_result is None else gradient_result.position_indices.numpy()
         ),
