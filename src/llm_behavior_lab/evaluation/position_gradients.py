@@ -57,7 +57,9 @@ from llm_behavior_lab.evaluation.guessing import (
 from llm_behavior_lab.evaluation.init_distribution import EvaluationPositions
 
 __all__ = [
+    "CANONICAL_GRADIENT_TEMPERATURE",
     "GRADIENT_DEFINITION",
+    "GRADIENT_TEMPERATURES",
     "PositionGradientResult",
     "compute_position_gradient_norms",
     "evenly_spaced_indices",
@@ -71,6 +73,24 @@ GRADIENT_DEFINITION = (
     "l2_norm_of_gradient_of_single_position_next_token_cross_entropy"
     "_with_respect_to_all_trainable_parameters"
 )
+
+#: Temperatures at which the loss itself is defined. The six established sweep
+#: values plus ``T = 1``, the canonical baseline.
+#:
+#: Temperature enters the **loss**, not a post-hoc rescaling of a result:
+#: ``ell_T(d) = -log softmax(z_d / T)[y_d]``. The gradient therefore changes with
+#: ``T`` through two routes at once -- the explicit ``1/T`` in
+#: ``d ell_T / d z_i = (p_T(i) - 1[i = y]) / T`` and the sharpening of ``p_T``
+#: itself. Both are intended. No compensating ``T^2`` factor is applied; this is
+#: plain temperature-scaled cross entropy, not a distillation loss.
+#:
+#: Greedy identity is untouched: softmax is strictly increasing, so
+#: ``argmax softmax(z/T) = argmax z`` for every positive ``T``. The guessing bias
+#: is held fixed while the learning signal varies, which is the whole design.
+GRADIENT_TEMPERATURES = (0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20)
+
+#: The canonical baseline inside that grid.
+CANONICAL_GRADIENT_TEMPERATURE = 1.00
 
 
 @dataclass(frozen=True)
@@ -91,6 +111,13 @@ class PositionGradientResult:
     position_indices: torch.Tensor
     target_ids: torch.Tensor
     greedy_ids: torch.Tensor
+    #: ``[N_T, D_g]`` exact norms, one row per temperature.
+    temperature_gradient_norms: torch.Tensor
+    #: ``[N_T, D_g]`` the losses those gradients were taken of.
+    temperature_losses: torch.Tensor
+    #: The temperature grid, in the order the rows are stored.
+    temperatures: tuple[float, ...]
+    #: ``[D_g]`` canonical ``T = 1`` slice, the established observable.
     gradient_norms: torch.Tensor
     losses: torch.Tensor
     parameter_count: int
@@ -100,6 +127,12 @@ class PositionGradientResult:
     seconds: float
     definition: str = GRADIENT_DEFINITION
     softmax_support: str = "eligible"
+
+    @property
+    def canonical_index(self) -> int:
+        """Row holding the canonical ``T = 1`` observable."""
+
+        return self.temperatures.index(CANONICAL_GRADIENT_TEMPERATURE)
 
     @property
     def num_positions(self) -> int:
@@ -119,6 +152,10 @@ class PositionGradientResult:
             "num_positions": self.num_positions,
             "num_windows": self.num_windows,
             "block_size": self.block_size,
+            "temperatures": list(self.temperatures),
+            "canonical_temperature": CANONICAL_GRADIENT_TEMPERATURE,
+            "temperature_enters_the_loss": True,
+            "compensating_t_squared_factor": False,
             "mean_loss": float(self.losses.mean().item()),
             "mean_gradient_norm": float(self.gradient_norms.mean().item()),
             "seconds": round(self.seconds, 3),
@@ -306,6 +343,7 @@ def compute_position_gradient_norms(
     eligible_token_ids: Sequence[int] | None = None,
     window_indices: Sequence[int] | None = None,
     num_windows: int | None = None,
+    temperatures: Sequence[float] = GRADIENT_TEMPERATURES,
     progress: Callable[[int, int], None] | None = None,
 ) -> PositionGradientResult:
     """Measure ``g_d`` exactly, one evaluation position at a time.
@@ -345,6 +383,21 @@ def compute_position_gradient_norms(
                 f"window_indices must lie in [0, {positions.num_windows})."
             )
 
+    grid = tuple(dict.fromkeys(float(value) for value in temperatures))
+    if not grid:
+        raise ValueError("temperatures must not be empty.")
+    if any(value <= 0.0 for value in grid):
+        raise ValueError(
+            "Every gradient temperature must be positive; softmax(z/T) is "
+            "undefined at T = 0."
+        )
+    if CANONICAL_GRADIENT_TEMPERATURE not in grid:
+        raise ValueError(
+            f"The canonical baseline T = {CANONICAL_GRADIENT_TEMPERATURE} must be "
+            "present in the grid; it is the established observable every other "
+            "temperature is read against."
+        )
+
     device = positions.input_ids.device
     mask = eligible_support_mask(vocab_size, eligible_token_ids, device=device)
     _check_targets_eligible(positions.target_ids[list(window_indices)], mask)
@@ -356,8 +409,11 @@ def compute_position_gradient_norms(
     position_indices = torch.empty(total_positions, dtype=torch.long)
     target_ids = torch.empty(total_positions, dtype=torch.long)
     greedy_ids = torch.empty(total_positions, dtype=torch.long)
-    gradient_norms = torch.empty(total_positions, dtype=torch.float64)
-    losses = torch.empty(total_positions, dtype=torch.float64)
+    # [N_T, D_g] scalars only. A [D_g, N_T, parameters] tensor is never formed:
+    # at 32768 positions, 7 temperatures and 8.6M parameters that would be about
+    # 7.9 PB. One gradient set exists at a time and is reduced to a scalar.
+    gradient_norms = torch.empty((len(grid), total_positions), dtype=torch.float64)
+    losses = torch.empty((len(grid), total_positions), dtype=torch.float64)
 
     was_training = model.training
     started = time.perf_counter()
@@ -375,35 +431,48 @@ def compute_position_gradient_norms(
             # by construction rather than by a second, separately-batched pass.
             window_greedy = greedy_guess_ids(logits.detach())
 
+            last_offset = block_size - 1
+            last_temperature = len(grid) - 1
             for offset in range(block_size):
-                loss = F.cross_entropy(
-                    logits[offset : offset + 1],
-                    window_targets[0, offset : offset + 1],
-                )
-                # Not .backward(): autograd.grad returns the gradients and leaves
-                # every parameter.grad exactly as the caller left it.
-                grads = torch.autograd.grad(
-                    loss,
-                    parameters,
-                    retain_graph=offset + 1 < block_size,
-                    allow_unused=True,
-                )
-                _require_every_parameter_reached(grads, parameters)
-                # Accumulated in float64 on whichever device the gradients live
-                # on; a 8.6M-parameter sum of squares loses meaningful precision
-                # in float32.
-                squared = None
-                for gradient in grads:
-                    contribution = gradient.detach().double().pow(2).sum()
-                    squared = contribution if squared is None else squared + contribution
-
                 position_indices[cursor] = window * block_size + offset
                 target_ids[cursor] = window_targets[0, offset]
                 greedy_ids[cursor] = window_greedy[offset]
-                gradient_norms[cursor] = squared.sqrt().cpu()
-                losses[cursor] = loss.detach().double().cpu()
+
+                for index, temperature in enumerate(grid):
+                    # Temperature scales the logits *inside* the loss, so the
+                    # gradient really is the gradient of a different objective --
+                    # not a rescaled version of one. Dividing by exactly 1.0 is
+                    # the identity in IEEE-754, so the canonical row is bitwise
+                    # the established T = 1 observable rather than a near copy.
+                    loss = F.cross_entropy(
+                        logits[offset : offset + 1] / temperature,
+                        window_targets[0, offset : offset + 1],
+                    )
+                    # Not .backward(): autograd.grad returns the gradients and
+                    # leaves every parameter.grad exactly as the caller left it.
+                    # The one forward graph for this window is retained until the
+                    # final temperature of the final position uses it.
+                    grads = torch.autograd.grad(
+                        loss,
+                        parameters,
+                        retain_graph=not (
+                            offset == last_offset and index == last_temperature
+                        ),
+                        allow_unused=True,
+                    )
+                    _require_every_parameter_reached(grads, parameters)
+                    # Accumulated in float64 on whichever device the gradients
+                    # live on; an 8.6M-parameter sum of squares loses meaningful
+                    # precision in float32.
+                    squared = None
+                    for gradient in grads:
+                        contribution = gradient.detach().double().pow(2).sum()
+                        squared = contribution if squared is None else squared + contribution
+
+                    gradient_norms[index, cursor] = squared.sqrt().cpu()
+                    losses[index, cursor] = loss.detach().double().cpu()
+                    del grads, squared, loss
                 cursor += 1
-                del grads, squared, loss
 
             del logits, window_greedy
             if progress is not None:
@@ -412,12 +481,16 @@ def compute_position_gradient_norms(
         model.train(was_training)
     seconds = time.perf_counter() - started
 
+    canonical = grid.index(CANONICAL_GRADIENT_TEMPERATURE)
     return PositionGradientResult(
         position_indices=position_indices,
         target_ids=target_ids,
         greedy_ids=greedy_ids,
-        gradient_norms=gradient_norms,
-        losses=losses,
+        temperature_gradient_norms=gradient_norms,
+        temperature_losses=losses,
+        temperatures=grid,
+        gradient_norms=gradient_norms[canonical],
+        losses=losses[canonical],
         parameter_count=sum(parameter.numel() for parameter in parameters),
         num_parameter_tensors=len(parameters),
         num_windows=len(window_indices),

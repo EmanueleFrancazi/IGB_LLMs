@@ -54,6 +54,7 @@ from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     build_evaluation_positions,
 )
 from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    GRADIENT_TEMPERATURES,
     compute_position_gradient_norms,
 )
 from llm_behavior_lab.models import build_model_from_config  # noqa: E402
@@ -128,6 +129,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--temperatures",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="T",
+        help=(
+            "Loss temperatures to time. Defaults to the full grid. Pass 1.0 alone "
+            "to time the canonical baseline for a like-for-like comparison."
+        ),
+    )
+    parser.add_argument(
         "--split",
         choices=["train", "val"],
         default=None,
@@ -156,6 +168,7 @@ def main() -> None:
     model_config = load_yaml_config(args.model_config)
     experiment_config = load_yaml_config(args.experiment_config)
 
+    temperatures = tuple(args.temperatures) if args.temperatures else GRADIENT_TEMPERATURES
     window_counts = sorted(set(int(value) for value in args.window_counts))
     if not window_counts or window_counts[0] <= 0:
         raise ValueError("--window-counts must be positive integers.")
@@ -219,9 +232,20 @@ def main() -> None:
     print(f"Parameters in the norm: {parameter_count:,} across {num_parameter_tensors} tensors")
     print(f"Device: {device}")
     print(f"Block size: {block_size} -> {block_size} positions per window")
+    print(
+        f"Loss temperatures: {len(temperatures)} "
+        f"({', '.join(f'{value:g}' for value in temperatures)})"
+    )
+    print(
+        "One backward pass per position PER TEMPERATURE, from a single retained "
+        "forward graph per window."
+    )
     print()
 
-    header = f"{'windows':>8} {'positions':>10} {'seconds':>10} {'positions/s':>12}"
+    header = (
+        f"{'windows':>8} {'positions':>10} {'seconds':>10} {'positions/s':>12}"
+        f" {'backwards/s':>12}"
+    )
     if device.type == "cuda":
         header += f" {'CUDA alloc':>12} {'CUDA resvd':>12}"
     print(header)
@@ -237,6 +261,7 @@ def main() -> None:
             vocab_size=tokenizer.vocab_size,
             eligible_token_ids=tokenizer.eligible_token_ids,
             num_windows=count,
+            temperatures=temperatures,
         )
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -246,6 +271,7 @@ def main() -> None:
         row = (
             f"{count:>8} {result.num_positions:>10,} "
             f"{result.seconds:>10.3f} {rate:>12,.2f}"
+            f" {rate * len(temperatures):>12,.2f}"
         )
         peaks = _cuda_peaks(device)
         if peaks is not None:
@@ -278,8 +304,12 @@ def main() -> None:
     print("EXTRAPOLATION (measured positions/s from the largest window count,")
     print("assumes linear scaling in positions -- this figure was NOT measured):")
     print(
-        f"  D = {FULL_EXPERIMENT_POSITIONS:,} positions -> {projected:,.0f} s "
-        f"({projected / 60:,.1f} min) on {device}"
+        f"  D = {FULL_EXPERIMENT_POSITIONS:,} positions x {len(temperatures)} "
+        f"temperatures -> {projected:,.0f} s ({projected / 60:,.1f} min) on {device}"
+    )
+    print(
+        f"  per-temperature share: {projected / len(temperatures):,.0f} s "
+        f"({projected / len(temperatures) / 60:,.1f} min)"
     )
 
 
