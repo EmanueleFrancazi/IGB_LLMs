@@ -689,9 +689,59 @@ sums. `G_i`, `n_i` and `q_i` are derived from them by
 `analysis/gradients.py`, so a later re-aggregation never requires recomputing a
 gradient.
 
+### Temperature-conditioned gradients
+
+The same grid of temperatures, but now **inside the loss** rather than inside a
+diagnostic probability:
+
+```
+ell_T(d) = -log softmax(z_d / T)[y_d]      g_d(T) = || grad_theta ell_T(d) ||_2
+d ell_T / d z_i = (p_T(i) - 1[i = y]) / T
+```
+
+Both routes are intended: the explicit `1/T` and the sharpening of `p_T`. **No
+compensating `T^2` factor** is applied — this is plain temperature-scaled cross
+entropy, not a distillation loss.
+
+This is a controlled experiment because of the invariance. Softmax is strictly
+increasing, so `argmax softmax(z/T) = argmax z`, and the greedy guess fraction
+`q_i` is *exactly* the same at every temperature. So is `n_i`, which counts
+targets, and so is `p_i`. Anything that moves across the panels of figure 10
+moves for gradient reasons alone.
+
+Two limits, both analytic and both tested:
+
+* the greedy winner is the target → `p_T(y) → 1`, and the gradient → 0 as
+  `T → 0`, because the probability error decays exponentially in `1/T` and beats
+  the explicit `1/T`;
+* the greedy winner is not the target → `|p_T - onehot| → sqrt(2)`, so the logit
+  gradient grows as `O(1/T)`.
+
+One forward graph per window is retained and re-differentiated once per position
+*per temperature*, so no extra forward pass is taken and no
+`[positions, temperatures, parameters]` tensor is ever formed. `T = 1` is one
+row of that grid, not a second implementation: dividing by exactly 1.0 is the
+identity in IEEE-754, so the canonical row is bitwise the established observable,
+and validation asserts it equals the stored canonical array.
+
 ### Figure 10
 
-`figure10_gradient_vs_initial_guess_bias.svg`: one marker per token with
+`figure10_temperature_gradient_vs_initial_guess_bias.svg`: six panels, one per
+sweep temperature, each a token scatter of `G_i(T)` against the *fixed* `q_i`,
+coloured by `p_i` on one shared logarithmic colour scale with a single colorbar.
+The y axis is shared and keeps the symlog treatment with its linear region ending
+at `1/D`, so never-guessed tokens stay on the axis. The x axis uses shared limits
+when every panel remains readable within them and per-panel limits otherwise, in
+which case each title says so — a silent rescaling would invent a comparison the
+figure cannot support.
+
+The single-temperature scatter remains available as
+`supplementary_t1_gradient_vs_initial_guess_bias.svg`, and older records that
+carry only the canonical slice still render it.
+
+### Legacy single-temperature figure
+
+One marker per token with
 `n_i > 0`, at `x = G_i` and `y = q_i`, coloured by `p_i`.
 
 Three scale decisions are made from the observed distributions rather than by

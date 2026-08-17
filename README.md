@@ -1148,7 +1148,12 @@ This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
 differentiates the *window-averaged* loss with respect to block activations. See
 [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) §5e for the exact definition.
 
-A run carrying gradient data also gets `figure10_gradient_vs_initial_guess_bias.svg`:
+A run carrying gradient data also gets `figure10_temperature_gradient_vs_initial_guess_bias.svg`,
+six panels relating the gradient to the guessing bias across loss temperatures. There
+temperature is inside the loss, `ell_T = -log softmax(z/T)[y]`, so the gradient really
+changes — while `q_i`, `n_i` and `p_i` are identical in every panel because
+`argmax softmax(z/T) = argmax z`. The single-temperature version remains as
+`supplementary_t1_gradient_vs_initial_guess_bias.svg`:
 one marker per token with `n_i > 0`, at `x = G_i` and `y = q_i`, coloured by corpus
 frequency. Runs without gradient data produce exactly the figures they did before.
 
