@@ -1,4 +1,7 @@
-"""Tests for figure 10 and the statistics printed beside it.
+"""Tests for the single-temperature gradient scatter and its statistics.
+
+Superseded as figure 10 by the six-panel temperature version and kept as a
+supplementary canonical-slice figure; see ``test_temperature_gradients.py``.
 
 Two properties matter more than the drawing itself and are pinned hardest here.
 
@@ -239,10 +242,10 @@ def test_the_primary_correlation_matches_a_direct_computation() -> None:
 # -- the figure --------------------------------------------------------------
 
 
-def test_figure_ten_is_written_as_svg(tmp_path) -> None:
+def test_the_supplementary_scatter_is_written_as_svg(tmp_path) -> None:
     written = plot_gradient_vs_guess_bias(_record(), tmp_path)
 
-    assert [path.name for path in written] == ["figure10_gradient_vs_initial_guess_bias.svg"]
+    assert [path.name for path in written] == ["supplementary_t1_gradient_vs_initial_guess_bias.svg"]
     assert written[0].is_file() and written[0].stat().st_size > 0
     assert "svg" in written[0].read_text(encoding="utf-8")[:2000].lower()
 
@@ -398,10 +401,13 @@ def test_the_figure_set_includes_figure_eight_only_with_gradient_data(tmp_path) 
     names_with = {path.name for path in with_gradients}
     names_without = {path.name for path in without}
 
-    assert "figure10_gradient_vs_initial_guess_bias.svg" in names_with
-    assert "figure10_gradient_vs_initial_guess_bias.svg" not in names_without
+    # This fixture carries only the canonical slice, so the figure set draws the
+    # supplementary scatter rather than the six-panel figure 10.
+    supplementary = "supplementary_t1_gradient_vs_initial_guess_bias.svg"
+    assert supplementary in names_with
+    assert supplementary not in names_without
     # Runs without gradient data are otherwise completely unchanged.
-    assert names_with - {"figure10_gradient_vs_initial_guess_bias.svg"} == names_without
+    assert names_with - {supplementary} == names_without
 
 
 def test_a_record_without_gradients_refuses_to_draw_figure_eight(tmp_path) -> None:

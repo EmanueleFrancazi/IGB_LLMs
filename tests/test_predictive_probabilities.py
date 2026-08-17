@@ -435,8 +435,12 @@ def test_the_renderer_maps_all_three_recent_figures() -> None:
 
     assert module.FIGURES["figure8"] == "plot_ranked_predictive_probabilities"
     assert module.FIGURES["figure9"] == "plot_max_predictive_probability"
-    assert module.FIGURES["figure10"] == "plot_gradient_vs_guess_bias"
+    # Figure 10 is the six-panel temperature version; the single-temperature
+    # scatter remains selectable as a supplement.
+    assert module.FIGURES["figure10"] == "plot_temperature_gradient_vs_guess_bias"
+    assert module.FIGURES["supplementary-gradient"] == "plot_gradient_vs_guess_bias"
     for name, function_name in module.FIGURES.items():
         assert callable(getattr(figure_module, function_name)), name
     assert module.CONDITIONAL_FIGURES["figure8"] == "has_predictive_probability_analysis"
-    assert module.CONDITIONAL_FIGURES["figure10"] == "has_position_gradients"
+    assert module.CONDITIONAL_FIGURES["figure10"] == "has_temperature_gradient_analysis"
+    assert module.CONDITIONAL_FIGURES["supplementary-gradient"] == "has_position_gradients"

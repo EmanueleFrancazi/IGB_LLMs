@@ -56,7 +56,8 @@ FIGURES = {
     "figure7": "plot_temperature_support_and_agreement",
     "figure8": "plot_ranked_predictive_probabilities",
     "figure9": "plot_max_predictive_probability",
-    "figure10": "plot_gradient_vs_guess_bias",
+    "figure10": "plot_temperature_gradient_vs_guess_bias",
+    "supplementary-gradient": "plot_gradient_vs_guess_bias",
     "figure11": "plot_temperature_ranked_predictive_probabilities",
     "figure12": "plot_temperature_max_predictive_probability",
     "figure13": "plot_greedy_confidence_vs_temperature",
@@ -66,7 +67,8 @@ FIGURES = {
 CONDITIONAL_FIGURES = {
     "figure8": "has_predictive_probability_analysis",
     "figure9": "has_predictive_probability_analysis",
-    "figure10": "has_position_gradients",
+    "figure10": "has_temperature_gradient_analysis",
+    "supplementary-gradient": "has_position_gradients",
     "figure11": "has_temperature_confidence_analysis",
     "figure12": "has_temperature_confidence_analysis",
     "figure13": "has_temperature_confidence_analysis",
@@ -303,6 +305,69 @@ def report_temperature_confidence(record: Any) -> dict[str, Any]:
     return summary
 
 
+def report_temperature_gradients(record: Any) -> dict[str, Any]:
+    """Print, and return, the gradient statistics at every loss temperature.
+
+    Temperature is inside the loss here, so the gradient really does change;
+    the greedy guessing bias it is compared against does not, being invariant
+    under any positive temperature.
+    """
+
+    from llm_behavior_lab.analysis import temperature_gradient_summary
+
+    summary = temperature_gradient_summary(record)
+    print("\n== Temperature-conditioned gradients (T inside the loss) ==")
+    print(
+        f"  D_g = {summary['num_positions']:,},  tokens with n(i) > 0 = "
+        f"{summary['num_tokens']:,};  q(i), n(i), p(i) identical at every T"
+    )
+    print(
+        f"  {'T':>6} {'g med':>11} {'g mean':>11} {'g max':>11} "
+        f"{'G med':>11} {'G min':>11} {'G max':>11} {'rho(G,q)':>10} {'rho(G,p)':>10}"
+    )
+    for row in summary["rows"]:
+        g, G = row["position_gradient_norm"], row["token_gradient_norm"]
+        marker = "*" if row["is_canonical"] else " "
+        print(
+            f"  {row['temperature']:>6g}{marker} {g['p50']:>10.4g} {g['mean']:>11.4g}"
+            f" {g['p100']:>11.4g} {G['p50']:>11.4g} {G['p00']:>11.4g} {G['p100']:>11.4g}"
+            f" {row['spearman_gradient_vs_guess']:>+10.4f}"
+            f" {row['spearman_gradient_vs_corpus']:>+10.4f}"
+        )
+    print("  (* marks the canonical T = 1 baseline)")
+
+    print("\n  rho(G(T), q) stratified by n(i) -- reliability diagnostics, not estimates")
+    bands = [
+        f"{s['min_occurrences']}+"
+        if s["max_occurrences"] is None
+        else (
+            str(s["min_occurrences"])
+            if s["max_occurrences"] == s["min_occurrences"]
+            else f"{s['min_occurrences']}-{s['max_occurrences']}"
+        )
+        for s in summary["rows"][0]["strata"]
+    ]
+    print(f"  {'T':>6}" + "".join(f"{band:>10}" for band in bands))
+    for row in summary["rows"]:
+        print(
+            f"  {row['temperature']:>6g}"
+            + "".join(f"{s['spearman_gradient_vs_guess']:>10.4f}" for s in row["strata"])
+        )
+    print(f"\n  {'T':>6}" + "".join(
+        f"{'n>=' + str(s['min_occurrences']):>10}"
+        for s in summary["rows"][0]["sensitivity_by_min_occurrences"]
+    ))
+    for row in summary["rows"]:
+        print(
+            f"  {row['temperature']:>6g}"
+            + "".join(
+                f"{s['spearman_gradient_vs_guess']:>10.4f}"
+                for s in row["sensitivity_by_min_occurrences"]
+            )
+        )
+    return summary
+
+
 def main() -> None:
     """Report the available statistics and redraw the requested figures."""
 
@@ -315,6 +380,7 @@ def main() -> None:
     print(f"  predictive probabilities: {record.has_predictive_probability_analysis}")
     print(f"  temperature confidence: {record.has_temperature_confidence_analysis}")
     print(f"  position gradients: {record.has_position_gradients}")
+    print(f"  temperature gradients: {record.has_temperature_gradient_analysis}")
 
     statistics: dict[str, Any] = {}
     if record.has_predictive_probability_analysis:
@@ -323,6 +389,8 @@ def main() -> None:
         statistics["temperature_confidence"] = report_temperature_confidence(record)
     if record.has_position_gradients:
         statistics["gradients"] = report_gradient_statistics(record)
+    if record.has_temperature_gradient_analysis:
+        statistics["temperature_gradients"] = report_temperature_gradients(record)
     if statistics:
         if args.stats_json is not None:
             args.stats_json.parent.mkdir(parents=True, exist_ok=True)
@@ -353,7 +421,8 @@ def main() -> None:
         scale_argument = {
             "figure8": "y_scale",
             "figure9": "x_scale",
-            "figure10": "x_scale",
+            "figure10": "x_limits",
+            "supplementary-gradient": "x_scale",
             "figure11": "y_scale",
             "figure12": "x_scale",
         }
