@@ -250,3 +250,117 @@ def test_buffers_are_never_touched() -> None:
 
     for name, tensor in model.named_buffers():
         assert torch.equal(tensor, before[name]), name
+
+
+# -- protocol resolution: the historical contract ----------------------------
+
+
+def _load_runner():
+    """Load the experiment script's protocol resolver without running it."""
+
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_initialization_distribution_experiment.py"
+    )
+    spec = importlib.util.spec_from_file_location("initialization_distribution_script", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _historical_args(**overrides):
+    """A namespace as it looked *before* the scale option existed.
+
+    Deliberately minimal, and deliberately without ``initialization_scale``: this
+    is the shape every protocol test written before the scale work still hands to
+    the resolver, and it must keep resolving.
+    """
+
+    import argparse
+
+    fields = {
+        "num_initializations": None, "num_windows": None, "block_size": None,
+        "num_replicates": None, "split": None, "forward_batch_size": None,
+        "temperatures": None, "no_temperature_sweep": False,
+        "no_uniform_null": False, "no_input_structure": False,
+        "gradient_analysis": False, "no_gradient_analysis": False,
+        "gradient_windows": None,
+    }
+    fields.update(overrides)
+    return argparse.Namespace(**fields)
+
+
+def test_a_namespace_without_the_scale_option_resolves_to_the_baseline() -> None:
+    """Absent means alpha = 1, because that is the historical condition.
+
+    The scale intervention is a literal no-op at 1, so a protocol constructed
+    before the option existed describes exactly the unscaled baseline. Failing
+    instead would make every pre-existing protocol test depend on an option that
+    has nothing to do with what it asserts.
+    """
+
+    resolve = _load_runner()._resolve_protocol
+
+    protocol = resolve({}, _historical_args())
+
+    assert protocol["initialization_scale"] == 1.0
+
+
+def test_an_explicit_scale_is_honoured() -> None:
+    resolve = _load_runner()._resolve_protocol
+
+    protocol = resolve({}, _historical_args(initialization_scale=0.5))
+
+    assert protocol["initialization_scale"] == 0.5
+
+
+def test_the_fallback_equals_the_parser_default() -> None:
+    """The two must agree, or an omitted flag would mean two different things."""
+
+    import sys
+
+    module = _load_runner()
+    argv = sys.argv
+    try:
+        sys.argv = ["run_initialization_distribution_experiment.py"]
+        parsed = module.parse_args()
+    finally:
+        sys.argv = argv
+
+    from_parser = module._resolve_protocol({}, parsed)["initialization_scale"]
+    from_fallback = module._resolve_protocol({}, _historical_args())["initialization_scale"]
+
+    assert parsed.initialization_scale == 1.0
+    assert from_parser == from_fallback == 1.0
+
+
+def test_historical_gradient_and_sweep_resolution_are_unchanged() -> None:
+    """The compatibility fallback must not disturb anything else it touches."""
+
+    resolve = _load_runner()._resolve_protocol
+
+    bare = resolve({}, _historical_args())
+    assert bare["gradient_analysis_enabled"] is False
+    assert bare["gradient_initialization_index"] == 0
+    assert bare["gradient_num_windows"] is None
+    assert bare["temperature_sweep_enabled"] is False
+    assert bare["sweep_temperatures"] == ()
+
+    enabled = resolve(
+        {
+            "gradient_analysis": {"enabled": True, "num_windows": 8},
+            "temperature_sweep": {"enabled": True, "temperatures": [0.3, 0.6]},
+        },
+        _historical_args(),
+    )
+    assert enabled["gradient_analysis_enabled"] is True
+    assert enabled["gradient_num_windows"] == 8
+    assert enabled["temperature_sweep_enabled"] is True
+    assert enabled["sweep_temperatures"] == (0.3, 0.6)
+    assert enabled["initialization_scale"] == 1.0

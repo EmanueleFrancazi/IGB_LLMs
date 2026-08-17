@@ -364,7 +364,11 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             (bool(gradients.get("enabled", False)) or args.gradient_analysis)
             and not args.no_gradient_analysis
         ),
-        "initialization_scale": float(args.initialization_scale),
+        # Absent from a namespace built before this option existed means the
+        # historical condition, which is exactly alpha = 1: the scale intervention
+        # is a no-op there. The fallback must match the parser default above, and
+        # a test pins the two together.
+        "initialization_scale": float(getattr(args, "initialization_scale", 1.0)),
         "gradient_initialization_index": int(gradients.get("initialization_index", 0)),
         "gradient_num_windows": (
             args.gradient_windows
