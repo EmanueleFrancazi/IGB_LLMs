@@ -54,6 +54,8 @@ from llm_behavior_lab.analysis.gradients import (
     gradient_guess_table,
     gradient_observable_summary,
     spearman_rho,
+    temperature_gradient_summary,
+    temperature_gradient_table,
     token_gradient_norms,
 )
 from llm_behavior_lab.analysis.predictive import (
@@ -114,6 +116,8 @@ __all__ = [
     "gradient_guess_table",
     "gradient_observable_summary",
     "spearman_rho",
+    "temperature_gradient_summary",
+    "temperature_gradient_table",
     "token_gradient_norms",
     "expected_occupancy_counts",
     "expected_zero_frequency_count",

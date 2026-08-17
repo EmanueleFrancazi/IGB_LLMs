@@ -46,6 +46,8 @@ __all__ = [
     "gradient_guess_correlations",
     "gradient_guess_table",
     "gradient_observable_summary",
+    "temperature_gradient_summary",
+    "temperature_gradient_table",
     "spearman_rho",
     "token_gradient_norms",
 ]
@@ -377,4 +379,110 @@ def gradient_guess_correlations(record: Any) -> dict[str, Any]:
         "spearman_guess_vs_corpus": spearman_rho(guesses, corpus),
         "strata": strata,
         "sensitivity_by_min_occurrences": sensitivity,
+    }
+
+
+def _require_temperature_gradients(record: Any) -> None:
+    if not record.has_temperature_gradient_analysis:
+        raise ValueError(
+            "This record carries no temperature-conditioned gradient analysis. "
+            "It predates the diagnostic; the experiment must be rerun to obtain it."
+        )
+
+
+def temperature_gradient_table(record: Any, temperature: float) -> dict[str, Any]:
+    """The figure-10 table at one gradient temperature.
+
+    Only ``mean_gradient_norm`` moves with temperature. ``n_i``, ``q_i`` and
+    ``p_i`` are read from the same stored positions, targets and greedy IDs at
+    every temperature, which is the point of the design: greedy identity is
+    temperature-invariant, so any change in the scatter comes entirely from the
+    gradient side.
+    """
+
+    _require_temperature_gradients(record)
+    index = record.gradient_temperature_index(temperature)
+    table = dict(gradient_guess_table(record))
+
+    vocab_size = record.vocab_size
+    targets = np.asarray(record.gradient_position_target_ids, dtype=np.int64)
+    norms = np.asarray(record.gradient_temperature_position_norms[index], dtype=np.float64)
+    counts = table["target_occurrence_count"]
+    sums = np.bincount(targets, weights=norms, minlength=vocab_size)
+    means = np.full(vocab_size, np.nan, dtype=np.float64)
+    measured = counts > 0
+    means[measured] = sums[measured] / counts[measured]
+
+    table["mean_gradient_norm"] = means
+    table["temperature"] = float(temperature)
+    table["is_canonical"] = float(temperature) == 1.0
+    return table
+
+
+def temperature_gradient_summary(record: Any) -> dict[str, Any]:
+    """Per-temperature gradient statistics against the fixed guessing bias.
+
+    ``n_i`` is computed once and shared: it counts target occurrences, which no
+    temperature can change. Reporting it per temperature would suggest otherwise.
+    """
+
+    _require_temperature_gradients(record)
+    grid = record.gradient_temperature_grid
+    per_position = np.asarray(record.gradient_temperature_position_norms, dtype=np.float64)
+    base = gradient_guess_table(record)
+    plotted = base["target_occurrence_count"] > 0
+    counts = base["target_occurrence_count"][plotted]
+    guesses = base["greedy_guess_fraction"][plotted]
+    corpus = base["corpus_fraction"][plotted]
+
+    rows = []
+    for index, temperature in enumerate(grid):
+        table = temperature_gradient_table(record, temperature)
+        token_norms = table["mean_gradient_norm"][plotted]
+        positions = per_position[index]
+
+        strata = []
+        for low, high in OCCURRENCE_STRATA:
+            selected = counts >= low if high is None else (counts >= low) & (counts <= high)
+            strata.append(
+                {
+                    "min_occurrences": low,
+                    "max_occurrences": high,
+                    "num_tokens": int(selected.sum()),
+                    "spearman_gradient_vs_guess": spearman_rho(
+                        token_norms[selected], guesses[selected]
+                    ),
+                }
+            )
+        rows.append(
+            {
+                "temperature": float(temperature),
+                "is_canonical": float(temperature) == 1.0,
+                "position_gradient_norm": _quantiles(positions),
+                "token_gradient_norm": _quantiles(token_norms),
+                "num_tokens": int(plotted.sum()),
+                "spearman_gradient_vs_guess": spearman_rho(token_norms, guesses),
+                "spearman_gradient_vs_corpus": spearman_rho(token_norms, corpus),
+                "strata": strata,
+                "sensitivity_by_min_occurrences": [
+                    {
+                        "min_occurrences": threshold,
+                        "num_tokens": int((counts >= threshold).sum()),
+                        "spearman_gradient_vs_guess": spearman_rho(
+                            token_norms[counts >= threshold], guesses[counts >= threshold]
+                        ),
+                    }
+                    for threshold in (1, 2, 5, 10, 20, 50)
+                ],
+            }
+        )
+
+    return {
+        "temperatures": np.asarray(grid, dtype=np.float64),
+        "num_positions": int(per_position.shape[1]),
+        "num_tokens": int(plotted.sum()),
+        "greedy_is_temperature_invariant": True,
+        # Occurrence counts describe targets, which no temperature can change.
+        "target_occurrence_count": _quantiles(counts),
+        "rows": rows,
     }

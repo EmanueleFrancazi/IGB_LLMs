@@ -37,11 +37,12 @@ __all__ = [
 #: input-condition counts and the uniform-null profile. Version 5 added the
 #: optional per-position gradient arrays. Version 6 added the optional raw
 #: predictive-probability diagnostics, and version 7 the temperature-conditioned
-#: greedy-confidence grid. Older records load unchanged: version 1
-#: predates special-token exclusion, so every token was eligible -- exactly the
+#: greedy-confidence grid, and version 8 the temperature-conditioned gradient
+#: norms. Older records load unchanged: version 1 predates special-token
+#: exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 7
+RECORD_VERSION = 8
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -122,6 +123,18 @@ _TEMPERATURE_ARRAY_NAMES = (
 
 #: The unscaled reference inside that grid.
 CANONICAL_TEMPERATURE = 1.0
+
+#: Version 8 additions. ``[N_T]`` temperatures and ``[N_T, D_g]`` exact gradient
+#: norms, where temperature enters the **loss** rather than rescaling a result:
+#: ``ell_T(d) = -log softmax(z_d/T)[y_d]``. The canonical ``T = 1`` row is also
+#: kept under the version 5 name, and validation asserts the two agree exactly.
+#:
+#: Small: 7 temperatures over 32768 positions is about 1.8 MB. The expense of
+#: this analysis is backward passes, not storage.
+_GRADIENT_TEMPERATURE_ARRAY_NAMES = (
+    "gradient_temperatures",
+    "gradient_temperature_position_norms",
+)
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -243,6 +256,10 @@ class InitializationExperimentRecord:
     predictive_target_probabilities: np.ndarray | None = None
     #: ``[I, D]`` single-position cross-entropy ``-log p_target``.
     predictive_target_losses: np.ndarray | None = None
+    #: ``[N_T]`` temperatures at which the loss itself was defined.
+    gradient_temperatures: np.ndarray | None = None
+    #: ``[N_T, D_g]`` exact full-parameter gradient norm at each temperature.
+    gradient_temperature_position_norms: np.ndarray | None = None
     #: ``[N_T]`` diagnostic temperatures, in the order the arrays are indexed by.
     predictive_temperatures: np.ndarray | None = None
     #: ``[I, N_T, K]`` ranked profile at each diagnostic temperature.
@@ -405,6 +422,29 @@ class InitializationExperimentRecord:
         """``1 / K``: the probability each token gets under an exact uniform."""
 
         return 1.0 / float(self.eligible_vocab_size)
+
+    @property
+    def has_temperature_gradient_analysis(self) -> bool:
+        """Whether gradient norms were measured across a temperature grid."""
+
+        return self.gradient_temperature_position_norms is not None
+
+    @property
+    def gradient_temperature_grid(self) -> tuple[float, ...]:
+        """Temperatures at which the gradient loss was defined."""
+
+        if self.gradient_temperatures is None:
+            return ()
+        return tuple(float(value) for value in self.gradient_temperatures)
+
+    def gradient_temperature_index(self, temperature: float) -> int:
+        """Row holding one gradient temperature."""
+
+        grid = self.gradient_temperature_grid
+        for index, value in enumerate(grid):
+            if value == float(temperature):
+                return index
+        raise KeyError(f"Temperature {temperature} is not in the gradient grid {grid}.")
 
     @property
     def has_temperature_confidence_analysis(self) -> bool:
@@ -617,6 +657,7 @@ class InitializationExperimentRecord:
         self._validate_position_gradients(vocab_size, num_inits)
         self._validate_predictive_probabilities(num_inits)
         self._validate_temperature_confidence(num_inits)
+        self._validate_temperature_gradients()
 
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
@@ -878,6 +919,66 @@ class InitializationExperimentRecord:
                     "canonical slice and the canonical arrays must be identical."
                 )
 
+    def _validate_temperature_gradients(self) -> None:
+        """Check the optional temperature-conditioned gradient norms.
+
+        The invariant that matters most is the last: the canonical row must equal
+        the version 5 array exactly. Temperature enters the loss here, so a drift
+        between the two would mean the established observable and its own
+        baseline slice disagree.
+        """
+
+        present = {
+            name: getattr(self, name)
+            for name in _GRADIENT_TEMPERATURE_ARRAY_NAMES
+            if getattr(self, name) is not None
+        }
+        if not present:
+            return
+        missing = sorted(set(_GRADIENT_TEMPERATURE_ARRAY_NAMES) - set(present))
+        if missing:
+            raise ValueError(
+                "Temperature-gradient arrays are all-or-nothing; missing: "
+                + ", ".join(missing)
+            )
+        if self.gradient_position_norms is None:
+            raise ValueError(
+                "Temperature-conditioned gradient norms require the per-position "
+                "gradient arrays they are aligned with."
+            )
+
+        temperatures = self.gradient_temperatures
+        norms = self.gradient_temperature_position_norms
+        if temperatures.ndim != 1 or temperatures.shape[0] == 0:
+            raise ValueError("gradient_temperatures must be a non-empty 1-D array.")
+        if np.any(temperatures <= 0.0):
+            raise ValueError("Every gradient temperature must be positive.")
+        if np.unique(temperatures).shape[0] != temperatures.shape[0]:
+            raise ValueError("gradient_temperatures must be distinct.")
+        expected = (temperatures.shape[0], self.gradient_position_norms.shape[0])
+        if norms.shape != expected:
+            raise ValueError(
+                "gradient_temperature_position_norms must have shape "
+                f"[temperatures, positions] {expected}; got {norms.shape}."
+            )
+        if not np.all(np.isfinite(norms)) or np.any(norms < 0.0):
+            raise ValueError(
+                "gradient_temperature_position_norms must be finite and non-negative."
+            )
+
+        canonical = np.flatnonzero(temperatures == CANONICAL_TEMPERATURE)
+        if canonical.size != 1:
+            raise ValueError(
+                f"The canonical baseline T = {CANONICAL_TEMPERATURE} must appear "
+                "exactly once in gradient_temperatures."
+            )
+        if not np.array_equal(norms[int(canonical[0])], self.gradient_position_norms):
+            raise ValueError(
+                "The canonical gradient temperature row differs from "
+                "gradient_position_norms; the established T = 1 observable and its "
+                "own baseline slice must be identical."
+            )
+
     def save(self, directory: str | Path, *, name: str = "initialization_distribution") -> Path:
         """Write the record as ``<name>.npz`` plus ``<name>.json``.
 
@@ -900,7 +1001,10 @@ class InitializationExperimentRecord:
         for condition, values in self.sweep_agreement_by_condition.items():
             arrays[f"{_SWEEP_AGREEMENT_PREFIX}{condition}"] = values
         for optional_name in (
-            _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES + _TEMPERATURE_ARRAY_NAMES
+            _GRADIENT_ARRAY_NAMES
+            + _PROBABILITY_ARRAY_NAMES
+            + _TEMPERATURE_ARRAY_NAMES
+            + _GRADIENT_TEMPERATURE_ARRAY_NAMES
         ):
             values = getattr(self, optional_name)
             if values is not None:
@@ -948,7 +1052,10 @@ class InitializationExperimentRecord:
         optional = {
             name: np.asarray(arrays[name])
             for name in (
-                _GRADIENT_ARRAY_NAMES + _PROBABILITY_ARRAY_NAMES + _TEMPERATURE_ARRAY_NAMES
+                _GRADIENT_ARRAY_NAMES
+                + _PROBABILITY_ARRAY_NAMES
+                + _TEMPERATURE_ARRAY_NAMES
+                + _GRADIENT_TEMPERATURE_ARRAY_NAMES
             )
             if name in arrays
         }
@@ -996,6 +1103,8 @@ class InitializationExperimentRecord:
         predictive_temperature_target_probabilities: np.ndarray | None = None,
         predictive_temperature_target_losses: np.ndarray | None = None,
         predictive_temperature_mean_entropy: np.ndarray | None = None,
+        gradient_temperatures: np.ndarray | None = None,
+        gradient_temperature_position_norms: np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -1067,6 +1176,10 @@ class InitializationExperimentRecord:
             ),
             predictive_temperature_mean_entropy=_optional_array(
                 predictive_temperature_mean_entropy, np.float64
+            ),
+            gradient_temperatures=_optional_array(gradient_temperatures, np.float64),
+            gradient_temperature_position_norms=_optional_array(
+                gradient_temperature_position_norms, np.float64
             ),
         )
 
