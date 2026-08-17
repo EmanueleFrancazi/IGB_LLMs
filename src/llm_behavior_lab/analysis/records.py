@@ -38,11 +38,12 @@ __all__ = [
 #: optional per-position gradient arrays. Version 6 added the optional raw
 #: predictive-probability diagnostics, and version 7 the temperature-conditioned
 #: greedy-confidence grid, and version 8 the temperature-conditioned gradient
-#: norms. Older records load unchanged: version 1 predates special-token
+#: norms, and version 9 the identity-preserving mean token probabilities.
+#: Older records load unchanged: version 1 predates special-token
 #: exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 8
+RECORD_VERSION = 9
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -135,6 +136,21 @@ _GRADIENT_TEMPERATURE_ARRAY_NAMES = (
     "gradient_temperatures",
     "gradient_temperature_position_norms",
 )
+
+#: Version 9 addition: ``[I, N_T, V]`` mean probability **at fixed token
+#: identity**, ``pbar_{s,T}(i) = mean_d p_{s,T}(d, i)``.
+#:
+#: This is the opposite order of operations from the ranked profile: identity is
+#: preserved while averaging, and ranking happens afterwards. Comparing the two
+#: separates within-prediction concentration from a persistent preference for
+#: particular tokens. Its ``T = 1`` row generalizes ``mean_predicted_probabilities``
+#: rather than duplicating that logic, and validation asserts the two agree.
+#:
+#: The ranked figure-14 profile is derived from this deterministically and is not
+#: stored again. About 21.5 MB at 12 initializations, 7 temperatures, V = 32000 --
+#: against roughly 50 GiB for the full ``[I, N_T, D, V]`` tensor, which is never
+#: formed.
+_MEAN_TOKEN_ARRAY_NAME = "predictive_temperature_mean_token_probabilities"
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -256,6 +272,8 @@ class InitializationExperimentRecord:
     predictive_target_probabilities: np.ndarray | None = None
     #: ``[I, D]`` single-position cross-entropy ``-log p_target``.
     predictive_target_losses: np.ndarray | None = None
+    #: ``[I, N_T, V]`` mean probability at fixed token identity (figure 14).
+    predictive_temperature_mean_token_probabilities: np.ndarray | None = None
     #: ``[N_T]`` temperatures at which the loss itself was defined.
     gradient_temperatures: np.ndarray | None = None
     #: ``[N_T, D_g]`` exact full-parameter gradient norm at each temperature.
@@ -422,6 +440,30 @@ class InitializationExperimentRecord:
         """``1 / K``: the probability each token gets under an exact uniform."""
 
         return 1.0 / float(self.eligible_vocab_size)
+
+    @property
+    def initialization_scale(self) -> float:
+        """The scale multiplier ``alpha`` this record was produced at.
+
+        Read from metadata, defaulting to 1.0 so every record written before the
+        scale experiment reports the baseline it was in fact run at rather than
+        an absent value.
+        """
+
+        recorded = self.metadata.get("initialization_scale", {})
+        return float(recorded.get("alpha", 1.0)) if recorded else 1.0
+
+    @property
+    def raw_logit_diagnostics(self) -> list[dict[str, Any]]:
+        """Per-initialization summaries of the finite eligible logits."""
+
+        return list(self.metadata.get("analysis", {}).get("raw_logits", []))
+
+    @property
+    def has_mean_token_probabilities(self) -> bool:
+        """Whether identity-preserving mean token probabilities were recorded."""
+
+        return self.predictive_temperature_mean_token_probabilities is not None
 
     @property
     def has_temperature_gradient_analysis(self) -> bool:
@@ -658,6 +700,7 @@ class InitializationExperimentRecord:
         self._validate_predictive_probabilities(num_inits)
         self._validate_temperature_confidence(num_inits)
         self._validate_temperature_gradients()
+        self._validate_mean_token_probabilities(num_inits, vocab_size)
 
         tokens = self.metadata.get("tokens")
         if tokens is not None and len(tokens) != vocab_size:
@@ -979,6 +1022,58 @@ class InitializationExperimentRecord:
                 "own baseline slice must be identical."
             )
 
+    def _validate_mean_token_probabilities(self, num_inits: int, vocab_size: int) -> None:
+        """Check the identity-preserving mean token probabilities.
+
+        The invariant that earns its keep is the last one: the ``T = 1`` row must
+        agree with ``mean_predicted_probabilities``, which has always held the
+        same quantity. Generalizing that field rather than adding a second
+        implementation is only safe if the two provably coincide.
+        """
+
+        values = self.predictive_temperature_mean_token_probabilities
+        if values is None:
+            return
+        if self.predictive_temperatures is None:
+            raise ValueError(
+                "Mean token probabilities require the temperature grid they are "
+                "indexed by."
+            )
+        count = self.predictive_temperatures.shape[0]
+        if values.shape != (num_inits, count, vocab_size):
+            raise ValueError(
+                "predictive_temperature_mean_token_probabilities must have shape "
+                f"[initializations, temperatures, vocab] "
+                f"({num_inits}, {count}, {vocab_size}); got {values.shape}."
+            )
+        if not np.all(np.isfinite(values)) or np.any(values < 0.0):
+            raise ValueError(
+                "predictive_temperature_mean_token_probabilities must be finite "
+                "and non-negative."
+            )
+        totals = values.sum(axis=2)
+        if not np.allclose(totals, 1.0, rtol=0.0, atol=1e-6):
+            raise ValueError(
+                "Each mean token-probability vector must sum to 1; got totals in "
+                f"[{totals.min():.9f}, {totals.max():.9f}]."
+            )
+
+        canonical = np.flatnonzero(self.predictive_temperatures == CANONICAL_TEMPERATURE)
+        if canonical.size != 1:
+            return
+        index = int(canonical[0])
+        if not np.allclose(
+            values[:, index].astype(np.float32),
+            self.mean_predicted_probabilities,
+            rtol=1e-6,
+            atol=1e-9,
+        ):
+            raise ValueError(
+                "The T = 1 mean token probabilities differ from "
+                "mean_predicted_probabilities; the grid generalizes that field "
+                "and the two must describe the same quantity."
+            )
+
     def save(self, directory: str | Path, *, name: str = "initialization_distribution") -> Path:
         """Write the record as ``<name>.npz`` plus ``<name>.json``.
 
@@ -1005,6 +1100,7 @@ class InitializationExperimentRecord:
             + _PROBABILITY_ARRAY_NAMES
             + _TEMPERATURE_ARRAY_NAMES
             + _GRADIENT_TEMPERATURE_ARRAY_NAMES
+            + (_MEAN_TOKEN_ARRAY_NAME,)
         ):
             values = getattr(self, optional_name)
             if values is not None:
@@ -1056,6 +1152,7 @@ class InitializationExperimentRecord:
                 + _PROBABILITY_ARRAY_NAMES
                 + _TEMPERATURE_ARRAY_NAMES
                 + _GRADIENT_TEMPERATURE_ARRAY_NAMES
+                + (_MEAN_TOKEN_ARRAY_NAME,)
             )
             if name in arrays
         }
@@ -1105,6 +1202,7 @@ class InitializationExperimentRecord:
         predictive_temperature_mean_entropy: np.ndarray | None = None,
         gradient_temperatures: np.ndarray | None = None,
         gradient_temperature_position_norms: np.ndarray | None = None,
+        predictive_temperature_mean_token_probabilities: np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -1180,6 +1278,9 @@ class InitializationExperimentRecord:
             gradient_temperatures=_optional_array(gradient_temperatures, np.float64),
             gradient_temperature_position_norms=_optional_array(
                 gradient_temperature_position_norms, np.float64
+            ),
+            predictive_temperature_mean_token_probabilities=_optional_array(
+                predictive_temperature_mean_token_probabilities, np.float64
             ),
         )
 

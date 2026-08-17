@@ -58,11 +58,15 @@ from llm_behavior_lab.analysis.gradients import (
     temperature_gradient_table,
     token_gradient_norms,
 )
+from llm_behavior_lab.analysis.scale_comparison import greedy_scale_comparison
 from llm_behavior_lab.analysis.predictive import (
     PROBABILITY_QUANTILES,
     REPORTED_RANKS,
+    CUMULATIVE_DEPTHS,
     TEMPERATURE_RANKS,
     TOP_K_MASSES,
+    cumulative_order_comparison,
+    ranked_mean_token_probabilities,
     max_probability_summary,
     predictive_probability_summary,
     ranked_probability_profile,
@@ -108,8 +112,12 @@ __all__ = [
     "predictive_probability_summary",
     "ranked_probability_profile",
     "target_probability_summary",
+    "CUMULATIVE_DEPTHS",
     "TEMPERATURE_RANKS",
     "TOP_K_MASSES",
+    "cumulative_order_comparison",
+    "greedy_scale_comparison",
+    "ranked_mean_token_probabilities",
     "temperature_confidence_summary",
     "temperature_ranked_profiles",
     "gradient_guess_correlations",

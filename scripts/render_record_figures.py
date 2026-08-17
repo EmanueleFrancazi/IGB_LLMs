@@ -61,6 +61,7 @@ FIGURES = {
     "figure11": "plot_temperature_ranked_predictive_probabilities",
     "figure12": "plot_temperature_max_predictive_probability",
     "figure13": "plot_greedy_confidence_vs_temperature",
+    "figure14": "plot_ranked_mean_token_probabilities",
 }
 
 #: Figures that exist only when the record carries the analysis behind them.
@@ -72,6 +73,7 @@ CONDITIONAL_FIGURES = {
     "figure11": "has_temperature_confidence_analysis",
     "figure12": "has_temperature_confidence_analysis",
     "figure13": "has_temperature_confidence_analysis",
+    "figure14": "has_mean_token_probabilities",
 }
 
 
@@ -424,6 +426,7 @@ def main() -> None:
             "figure10": "x_limits",
             "supplementary-gradient": "x_scale",
             "figure11": "y_scale",
+            "figure14": "y_scale",
             "figure12": "x_scale",
         }
         keyword = scale_argument.get(args.only)

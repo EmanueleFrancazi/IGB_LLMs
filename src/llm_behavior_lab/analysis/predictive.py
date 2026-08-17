@@ -50,6 +50,9 @@ import numpy as np
 __all__ = [
     "PROBABILITY_QUANTILES",
     "REPORTED_RANKS",
+    "CUMULATIVE_DEPTHS",
+    "cumulative_order_comparison",
+    "ranked_mean_token_probabilities",
     "TEMPERATURE_RANKS",
     "TOP_K_MASSES",
     "temperature_confidence_summary",
@@ -306,3 +309,112 @@ def temperature_confidence_summary(record: Any) -> dict[str, Any]:
         "greedy_identity_is_temperature_invariant": True,
         "rows": rows,
     }
+
+
+#: Cumulative depths compared between the two orders of operations.
+CUMULATIVE_DEPTHS = (1, 10, 100, 1000)
+
+
+def _require_mean_tokens(record: Any) -> None:
+    if not record.has_mean_token_probabilities:
+        raise ValueError(
+            "This record carries no identity-preserving mean token probabilities. "
+            "It predates the diagnostic; the experiment must be rerun to obtain it."
+        )
+
+
+def ranked_mean_token_probabilities(record: Any) -> dict[str, np.ndarray]:
+    """Figure 14: average at fixed token identity **first**, then rank.
+
+    For every initialization independently:
+
+    .. code-block:: text
+
+        pbar_{s,T}(i) = mean_d p_{s,T}(d, i)        identity preserved
+        B_{s,T}(r)    = sort_descending_i pbar_{s,T}(i)
+
+    Ranking happens per initialization, before initializations are summarized.
+    Averaging probabilities across initializations first and ranking afterwards
+    would answer a different question, since different initializations prefer
+    different tokens and averaging would wash that out.
+
+    This is the mirror image of :func:`temperature_ranked_profiles`, which ranks
+    inside each *position* before averaging. That one asks how concentrated a
+    typical single prediction is; this one asks whether the **same** token
+    identities are systematically favoured across many different inputs.
+    """
+
+    _require_mean_tokens(record)
+    values = np.asarray(
+        record.predictive_temperature_mean_token_probabilities, dtype=np.float64
+    )
+    eligible = np.asarray(record.eligible_token_ids, dtype=np.int64)
+    # Ranked over the eligible support, matching every other ranked profile.
+    restricted = values[:, :, eligible]
+    profiles = np.sort(restricted, axis=2)[:, :, ::-1]
+
+    count = profiles.shape[0]
+    mean = profiles.mean(axis=0)
+    sem = (
+        profiles.std(axis=0, ddof=1) / np.sqrt(count)
+        if count > 1
+        else np.zeros_like(mean)
+    )
+    return {
+        "temperatures": np.asarray(record.confidence_temperatures, dtype=np.float64),
+        "ranks": np.arange(1, profiles.shape[2] + 1),
+        "profiles": profiles,
+        "mean": mean,
+        "sem": sem,
+        "low": profiles.min(axis=0),
+        "high": profiles.max(axis=0),
+        "mean_token_probabilities": restricted,
+    }
+
+
+def cumulative_order_comparison(record: Any) -> dict[str, Any]:
+    """Top-k mass under both orders of operations, and their difference.
+
+    ``A_T(r)`` ranks within each position and then averages; ``B_T(r)`` averages
+    at fixed identity and then ranks. For each depth ``k``:
+
+    .. code-block:: text
+
+        C_A(T, k) = sum_{r <= k} A_T(r)
+        C_B(T, k) = sum_{r <= k} B_T(r)
+        Delta     = C_A - C_B
+
+    ``Delta >= 0`` is expected on general grounds: letting the top-k identities
+    vary with the position cannot capture less mass than committing to one fixed
+    set of k tokens chosen after identity-preserving averaging. It is reported,
+    not asserted as a headline, and the sign is checked on controlled fixtures.
+    """
+
+    _require_mean_tokens(record)
+    within = temperature_ranked_profiles(record)["mean"]
+    identity = ranked_mean_token_probabilities(record)["mean"]
+    temperatures = np.asarray(record.confidence_temperatures, dtype=np.float64)
+
+    rows = []
+    for index, temperature in enumerate(temperatures):
+        within_cumulative = np.cumsum(within[index])
+        identity_cumulative = np.cumsum(identity[index])
+        depths = {}
+        for depth in CUMULATIVE_DEPTHS:
+            if depth > within_cumulative.shape[0]:
+                continue
+            rank_first = float(within_cumulative[depth - 1])
+            identity_first = float(identity_cumulative[depth - 1])
+            depths[str(depth)] = {
+                "rank_then_average": rank_first,
+                "average_then_rank": identity_first,
+                "delta": rank_first - identity_first,
+            }
+        rows.append(
+            {
+                "temperature": float(temperature),
+                "is_canonical": float(temperature) == 1.0,
+                "depths": depths,
+            }
+        )
+    return {"temperatures": temperatures, "depths": CUMULATIVE_DEPTHS, "rows": rows}

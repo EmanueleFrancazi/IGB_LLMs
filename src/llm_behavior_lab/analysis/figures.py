@@ -63,6 +63,7 @@ __all__ = [
     "plot_gradient_vs_guess_bias",
     "plot_greedy_confidence_vs_temperature",
     "plot_max_predictive_probability",
+    "plot_ranked_mean_token_probabilities",
     "plot_ranked_predictive_probabilities",
     "plot_temperature_gradient_vs_guess_bias",
     "plot_temperature_max_predictive_probability",
@@ -1367,6 +1368,8 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
         written.extend(plot_temperature_ranked_predictive_probabilities(record, directory))
         written.extend(plot_temperature_max_predictive_probability(record, directory))
         written.extend(plot_greedy_confidence_vs_temperature(record, directory))
+    if record.has_mean_token_probabilities:
+        written.extend(plot_ranked_mean_token_probabilities(record, directory))
     return written
 
 
@@ -1922,3 +1925,122 @@ def plot_temperature_gradient_vs_guess_bias(
     return save_figure(
         figure, directory, "figure10_temperature_gradient_vs_initial_guess_bias"
     )
+
+
+def plot_ranked_mean_token_probabilities(
+    record: Any,
+    directory: str | Path,
+    *,
+    y_scale: str = "auto",
+) -> list[Path]:
+    """Figure 14 -- average at fixed token identity first, then rank.
+
+    The complement of figure 11, and the comparison between the two is the point.
+
+    Figure 11 ranks probabilities **inside each prediction** and then averages at
+    equal rank. It asks: at a typical next-token prediction, how concentrated is
+    the distribution? Token identity is discarded before averaging, so a model
+    that is sharply peaked on a *different* token at every position still gives a
+    steep curve.
+
+    Figure 14 averages **at fixed token identity** across positions and ranks
+    afterwards. It asks: do the *same* tokens systematically receive elevated
+    probability across many different inputs?
+
+    Reading the pair:
+
+    * figure 11 steep, figure 14 comparatively flat -- individual predictions are
+      concentrated, but on tokens that change with the input;
+    * both steep -- individual predictions are concentrated **and** particular
+      token identities are persistently favoured.
+
+    That second case is what a persistent initialization guessing bias looks
+    like, which is why the two curves are kept apart rather than merged.
+
+    Ranking happens per initialization before initializations are summarized;
+    averaging probabilities across initializations first would blur away
+    precisely the identity structure being measured.
+    """
+
+    from llm_behavior_lab.analysis.predictive import ranked_mean_token_probabilities
+
+    if not record.has_mean_token_probabilities:
+        raise ValueError(
+            "This record carries no identity-preserving mean token probabilities, "
+            "so figure 14 has nothing to draw."
+        )
+    if y_scale not in ("auto", "log", "linear"):
+        raise ValueError(f"y_scale must be 'auto', 'log', or 'linear'; got {y_scale!r}.")
+
+    profile = ranked_mean_token_probabilities(record)
+    temperatures = profile["temperatures"]
+    ranks = profile["ranks"]
+    uniform = record.uniform_probability
+    large = _is_large(record)
+    colours = _temperature_colours(len(temperatures))
+
+    figure = _new_figure(width=8.5, height=5.8)
+    axes = figure.subplots()
+
+    for index, temperature in enumerate(temperatures):
+        canonical = float(temperature) == 1.0
+        mean = profile["mean"][index]
+        if canonical:
+            axes.fill_between(
+                ranks,
+                _positive(mean - profile["sem"][index]),
+                _positive(mean + profile["sem"][index]),
+                color="#333333",
+                alpha=0.30,
+                linewidth=0,
+                rasterized=large,
+                label="T = 1 mean ± SEM",
+            )
+        axes.plot(
+            ranks,
+            _positive(mean),
+            color="#111111" if canonical else colours[index],
+            linewidth=2.0 if canonical else 1.2,
+            linestyle="-" if canonical else "--",
+            label=f"T = {temperature:g}" + ("  (canonical)" if canonical else ""),
+            **_profile_kwargs(large),
+        )
+    axes.axhline(
+        uniform,
+        color=NULL_STYLE["color"],
+        linestyle=":",
+        linewidth=1.1,
+        label=f"uniform 1/K = {uniform:.3g}",
+    )
+
+    # Chosen from this figure's own range: identity-preserving averaging washes
+    # out position-specific peaks, so the curve is generally flatter than figure
+    # 11's and need not want the same scale.
+    if _probability_scale(profile["mean"], y_scale):
+        axes.set_yscale("log")
+        scale_note = "log scale"
+    else:
+        scale_note = "linear scale"
+    if large:
+        axes.set_xscale("log")
+    axes.set_xlabel("rank of token after averaging at fixed identity")
+    axes.set_ylabel(f"mean token probability  Pbar_T(i)  [{scale_note}]")
+    axes.set_title(
+        "Persistent token-identity probability bias (average first, then rank)",
+        pad=14,
+    )
+    axes.grid(True, which="both", alpha=0.22)
+    axes.legend(loc="upper right", fontsize=7.5, frameon=True, ncol=2)
+    axes.text(
+        0.02,
+        0.05,
+        "averaged at FIXED token identity, then ranked\n"
+        "figure 11 ranks within each prediction first: steep there with a flat\n"
+        "curve here means concentrated predictions on input-dependent tokens",
+        transform=axes.transAxes,
+        fontsize=7.5,
+        va="bottom",
+        ha="left",
+        bbox=_ANNOTATION_BOX,
+    )
+    return save_figure(figure, directory, "figure14_ranked_mean_token_probabilities")
