@@ -78,6 +78,10 @@ from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
 from llm_behavior_lab.experiment import ExperimentRun, experiment_settings_from_config  # noqa: E402
 from llm_behavior_lab.experiment.naming import compose_run_id  # noqa: E402
 from llm_behavior_lab.models import build_model_from_config  # noqa: E402
+from llm_behavior_lab.models.initialization_scale import (  # noqa: E402
+    initialization_scale_report,
+    scale_initialization,
+)
 from llm_behavior_lab.utils import get_device, seed_everything  # noqa: E402
 
 
@@ -229,6 +233,18 @@ def parse_args() -> argparse.Namespace:
         help="Skip the shuffled and Gaussian input conditions.",
     )
     parser.add_argument(
+        "--initialization-scale",
+        type=float,
+        default=1.0,
+        metavar="ALPHA",
+        help=(
+            "Multiply every audited zero-centred random weight by ALPHA, leaving "
+            "the deterministic RMSNorm gains untouched. 1.0 is a literal no-op. "
+            "Applied to a freshly built model, so each scale derives from the "
+            "same pristine draw and the conditions are paired."
+        ),
+    )
+    parser.add_argument(
         "--no-figures",
         action="store_true",
         help="Skip figure generation. The record is written either way.",
@@ -348,6 +364,7 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             (bool(gradients.get("enabled", False)) or args.gradient_analysis)
             and not args.no_gradient_analysis
         ),
+        "initialization_scale": float(args.initialization_scale),
         "gradient_initialization_index": int(gradients.get("initialization_index", 0)),
         "gradient_num_windows": (
             args.gradient_windows
@@ -506,6 +523,12 @@ def main() -> None:
         f"replicates={sampling.num_replicates}, sampling seed={sampling.seed}"
     )
     print(f"Device: {device}")
+    if protocol["initialization_scale"] != 1.0:
+        print(
+            f"Initialization scale: alpha = {protocol['initialization_scale']} "
+            f"(variance x {protocol['initialization_scale'] ** 2:g}); "
+            "applied to the audited random weights only"
+        )
 
     # ---- one measurement per initialization -------------------------------
     model_seeds: list[int] = []
@@ -514,6 +537,9 @@ def main() -> None:
     embedding_moment_log: list[dict[str, Any]] = []
     parameter_count = 0
     gradient_result = None
+    scale_applied: dict[str, Any] = {}
+    scale_report: dict[str, Any] = {}
+    logit_diagnostics: list[dict[str, Any]] = []
 
     shuffled_ids = None
     gaussian_bank = None
@@ -552,6 +578,19 @@ def main() -> None:
         model_seed = protocol["base_seed"] + index * protocol["seed_stride"]
         seed_everything(model_seed)
         model = build_model_from_config(model_config).to(device)
+        # Captured before the intervention so the per-group report measures the
+        # baseline rather than inferring it by dividing the scaled tensors.
+        baseline_parameters = (
+            [(name, parameter.detach().clone()) for name, parameter in model.named_parameters()]
+            if index == 0
+            else None
+        )
+        scale_applied = scale_initialization(model, protocol["initialization_scale"])
+        if index == 0:
+            scale_report = initialization_scale_report(
+                model, protocol["initialization_scale"], baseline=baseline_parameters
+            )
+        del baseline_parameters
         parameter_count = model.count_parameters()
         # Streamed: logits exist one batch at a time and are folded into
         # per-token counters, so memory does not grow with the position count.
@@ -574,6 +613,10 @@ def main() -> None:
         # computing them for the control conditions would triple their cost
         # without being part of the question.
         measurements.append(measure(collect_probability_statistics=True))
+        if measurements[-1].logit_diagnostics is not None:
+            logit_diagnostics.append(
+                dict(measurements[-1].logit_diagnostics, model_seed=model_seed)
+            )
         if (
             protocol["gradient_analysis_enabled"]
             and index == protocol["gradient_initialization_index"]
@@ -654,6 +697,21 @@ def main() -> None:
 
     metadata = {
         "experiment_type": "initialization_distribution",
+        "initialization_scale": {
+            "alpha": protocol["initialization_scale"],
+            "variance_factor": protocol["initialization_scale"] ** 2,
+            "is_no_op": protocol["initialization_scale"] == 1.0,
+            "has_single_sigma_w": False,
+            "note": (
+                "alpha is a global multiplier on every audited zero-centred random "
+                "weight. The architecture has no single sigma_w: the embedding is "
+                "normal_(0,1) and every linear is kaiming_uniform_(a=sqrt(5)) with a "
+                "fan-in dependent scale. Deterministic RMSNorm gains are not scaled, "
+                "and the architecture contains no bias parameters at all."
+            ),
+            "applied": scale_applied,
+            "parameter_groups": scale_report,
+        },
         "device": str(device),
         "model_name": model_config["model"]["name"],
         "model_parameter_count": parameter_count,
@@ -709,6 +767,9 @@ def main() -> None:
                     "decisions. This is not the stochastic nucleus sweep."
                 ),
             },
+            # Describes z itself, not z/T, so it is stored once per
+            # initialization rather than once per temperature.
+            "raw_logits": logit_diagnostics,
             "gradient_analysis": gradient_metadata,
             "vocab_size": tokenizer.vocab_size,
             "eligible_vocab_size": len(eligible_token_ids),
@@ -800,6 +861,9 @@ def main() -> None:
         ),
         predictive_temperature_target_losses=stacked("temperature_target_losses"),
         predictive_temperature_mean_entropy=stacked("temperature_mean_entropy"),
+        predictive_temperature_mean_token_probabilities=stacked(
+            "temperature_mean_token_probabilities"
+        ),
         gradient_position_indices=(
             None if gradient_result is None else gradient_result.position_indices.numpy()
         ),
