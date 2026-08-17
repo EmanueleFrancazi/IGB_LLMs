@@ -192,6 +192,11 @@ class InitializationMeasurement:
     temperature_target_losses: torch.Tensor | None = None
     #: ``[N_T]`` mean per-position predictive entropy, in nats.
     temperature_mean_entropy: torch.Tensor | None = None
+    #: ``[N_T, V]`` mean probability at fixed token identity -- figure 14's
+    #: statistic. The ``T = 1`` row generalizes ``mean_predicted_probabilities``.
+    temperature_mean_token_probabilities: torch.Tensor | None = None
+    #: Compact summary of the raw eligible logits ``z``. Temperature-independent.
+    logit_diagnostics: dict[str, Any] | None = None
     #: ``[T, vocab]`` sweep counts, or ``None`` when no sweep ran.
     sweep_counts: torch.Tensor | None = None
     #: ``[T]`` fraction of positions where the sweep draw equalled the argmax.
@@ -421,6 +426,17 @@ class _ProbabilityAccumulator:
     target_probabilities: torch.Tensor
     #: ``[N_T]`` running sum of the per-position predictive entropy, in nats.
     entropy_sum: torch.Tensor
+    #: ``[D]`` per-position standard deviation of the **finite eligible** logits.
+    position_logit_std: torch.Tensor
+    #: ``[D]`` per-position ``max - median`` of the finite eligible logits.
+    position_logit_spread: torch.Tensor
+    #: Running sums over every finite eligible logit, for the overall moments.
+    logit_sum: torch.Tensor
+    logit_square_sum: torch.Tensor
+    #: ``[N_T, V]`` running sum of the probabilities **at fixed token identity**.
+    #: Averaged over positions this is the figure-14 statistic; its ``T = 1`` row
+    #: generalizes the existing ``mean_predicted_probabilities``.
+    token_probability_sum: torch.Tensor
     #: How many positions have been written so far.
     filled: int = 0
 
@@ -430,6 +446,7 @@ class _ProbabilityAccumulator:
         *,
         temperatures: Sequence[float],
         eligible_size: int,
+        vocab_size: int,
         num_positions: int,
         device: torch.device,
     ) -> "_ProbabilityAccumulator":
@@ -444,6 +461,15 @@ class _ProbabilityAccumulator:
                 (count, num_positions), dtype=torch.float64, device=device
             ),
             entropy_sum=torch.zeros(count, dtype=torch.float64, device=device),
+            position_logit_std=torch.zeros(num_positions, dtype=torch.float64, device=device),
+            position_logit_spread=torch.zeros(
+                num_positions, dtype=torch.float64, device=device
+            ),
+            logit_sum=torch.zeros((), dtype=torch.float64, device=device),
+            logit_square_sum=torch.zeros((), dtype=torch.float64, device=device),
+            token_probability_sum=torch.zeros(
+                (count, vocab_size), dtype=torch.float64, device=device
+            ),
         )
 
 
@@ -498,6 +524,24 @@ def _accumulate_probability_statistics(
     target_index = target_ids.reshape(-1, 1)
     order = torch.argsort(flat_logits, dim=-1, descending=True)
 
+    # Raw-logit diagnostics, taken from the **finite eligible** logits only.
+    # Ineligible entries were masked to -inf before this point, and a mean or a
+    # standard deviation over a tensor containing -inf is meaningless. Because
+    # -inf sorts to the tail, the leading ``eligible_size`` entries of the
+    # descending order are exactly the finite eligible values, so the sort that
+    # already exists for the ranked profile serves this too.
+    #
+    # These describe ``z`` itself, not ``z / T``, so they are computed once and
+    # are temperature-independent; storing them per temperature would imply a
+    # dependence that does not exist.
+    sorted_logits = flat_logits.gather(-1, order)[:, :eligible_size].double()
+    accumulator.position_logit_std[start:stop] = sorted_logits.std(dim=-1)
+    accumulator.position_logit_spread[start:stop] = (
+        sorted_logits[:, 0] - sorted_logits[:, eligible_size // 2]
+    )
+    accumulator.logit_sum += sorted_logits.sum()
+    accumulator.logit_square_sum += sorted_logits.pow(2).sum()
+
     for index, temperature in enumerate(accumulator.temperatures):
         # T = 1 reuses the tensor the mean predicted mass is taken from, so the
         # canonical slice of this grid and that statistic cannot disagree.
@@ -508,6 +552,11 @@ def _accumulate_probability_statistics(
         )
         ordered = probabilities.gather(-1, order)[:, :eligible_size].double()
         accumulator.ranked_sum[index] += ordered.sum(dim=0)
+        # The same probabilities summed WITHOUT reordering: token identity is
+        # preserved, so averaging these answers "do the same tokens keep getting
+        # high probability", which is a different question from the ranked sum
+        # above and is what figure 14 plots.
+        accumulator.token_probability_sum[index] += probabilities.double().sum(dim=0)
         # Entropy from the ranked values: a permutation cannot change a sum over
         # the whole vector, and the tail is exactly zero.
         accumulator.entropy_sum[index] += -(
@@ -524,6 +573,49 @@ def _accumulate_probability_statistics(
             probabilities.gather(-1, target_index).squeeze(-1).double()
         )
     accumulator.filled = stop
+
+
+def _summarize_logits(
+    accumulator: "_ProbabilityAccumulator", eligible_size: int
+) -> dict[str, Any]:
+    """Summarize the raw eligible logits compactly.
+
+    Describes ``z`` itself. Temperature only ever appears as ``z / T`` inside a
+    softmax, so these numbers are temperature-independent and are reported once
+    rather than duplicated across the grid.
+
+    Only summaries survive: the full ``[positions, vocab]`` logit tensor is never
+    retained, which at 32768 positions over 32000 tokens would be about 3.9 GiB.
+    """
+
+    count = float(accumulator.filled * eligible_size)
+    mean = float(accumulator.logit_sum / count)
+    variance = float(accumulator.logit_square_sum / count) - mean**2
+
+    def quantiles(values: torch.Tensor) -> dict[str, float]:
+        probabilities = torch.tensor([0.0, 0.05, 0.5, 0.95, 1.0], dtype=torch.float64)
+        computed = torch.quantile(values, probabilities.to(values.device))
+        keys = ("min", "p05", "median", "p95", "max")
+        summary = {key: float(value) for key, value in zip(keys, computed)}
+        summary["mean"] = float(values.mean())
+        return summary
+
+    return {
+        "support": "eligible",
+        "excludes_masked_entries": True,
+        "temperature_independent": True,
+        "note": (
+            "Computed from the finite eligible logits only. Ineligible entries are "
+            "masked to -inf before this point, so a mean or standard deviation "
+            "taken over the unmasked tensor would be meaningless."
+        ),
+        "num_positions": int(accumulator.filled),
+        "eligible_vocab_size": int(eligible_size),
+        "mean": mean,
+        "std": float(max(variance, 0.0) ** 0.5),
+        "per_position_std": quantiles(accumulator.position_logit_std),
+        "per_position_max_minus_median": quantiles(accumulator.position_logit_spread),
+    }
 
 
 def _accumulate_batch(
@@ -716,6 +808,7 @@ def measure_initialization(
         _ProbabilityAccumulator.create(
             temperatures=confidence_grid,
             eligible_size=eligible_size,
+            vocab_size=vocab_size,
             num_positions=positions.num_positions,
             device=device,
         )
@@ -773,6 +866,8 @@ def measure_initialization(
     temperature_target = None
     temperature_losses = None
     temperature_entropy = None
+    temperature_mean_token = None
+    logit_diagnostics = None
     if probabilities_accumulator is not None:
         if probabilities_accumulator.filled != consumed:
             raise RuntimeError(
@@ -787,6 +882,10 @@ def measure_initialization(
         # probability it comes from can never disagree.
         temperature_losses = -torch.log(temperature_target)
         temperature_entropy = (probabilities_accumulator.entropy_sum / consumed).cpu()
+        temperature_mean_token = (
+            probabilities_accumulator.token_probability_sum / consumed
+        ).cpu()
+        logit_diagnostics = _summarize_logits(probabilities_accumulator, eligible_size)
         # The canonical T = 1 slice is also surfaced under its own names, which
         # is what every earlier consumer reads.
         ranked_profile = temperature_ranked[canonical]
@@ -812,6 +911,8 @@ def measure_initialization(
         temperature_target_probabilities=temperature_target,
         temperature_target_losses=temperature_losses,
         temperature_mean_entropy=temperature_entropy,
+        temperature_mean_token_probabilities=temperature_mean_token,
+        logit_diagnostics=logit_diagnostics,
         sweep_counts=None if sweep_counts is None else sweep_counts.cpu(),
         sweep_agreement=(
             None
