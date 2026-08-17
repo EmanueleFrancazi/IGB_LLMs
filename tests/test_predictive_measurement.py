@@ -38,6 +38,38 @@ BLOCK_SIZE = 5
 NUM_WINDOWS = 4
 SWEEP = (0.3, 0.6, 1.2)
 TOKENS = [2 + (index * 5) % (VOCAB_SIZE - 2) for index in range(90)]
+FORWARD_BATCH = 2
+
+# -- numerical contract -------------------------------------------------------
+#
+# The observable is float32-derived on purpose. The model emits float32 logits
+# and ``softmax(logits.float())`` is a float32 vector; only the *accumulation*
+# across positions is float64, which is what a sum over tens of thousands of
+# positions requires. Converting the stored result to float64 does not make it a
+# float64 measurement, and a test must not demand accuracy the quantity never had.
+#
+# Measured float32 behaviour, from which these numbers are taken:
+#
+#   float32 eps                                        1.19e-07
+#   |sum(p) - 1| for one softmax vector, K = 31997     3e-08 median, 1.4e-07 max
+#   relative dp from a 1e-6 logit perturbation         7e-07 median, 5.8e-06 max
+#
+# A perturbation that size is exactly what different forward batching produces:
+# a different matmul reduction order changes the logits in their last bits.
+#
+#: Two independently computed float32 probability paths. Loose enough to absorb
+#: float32 rounding and batching-induced logit differences, and still five orders
+#: of magnitude tighter than any wrong rank, token, or temperature would be.
+PROBABILITY_RTOL = 1e-5
+PROBABILITY_ATOL = 1e-8
+
+#: |sum(p) - 1| over K float32-derived probabilities. About eight times float32
+#: eps, and the same contract the record validation applies. A profile that was
+#: genuinely unnormalized would miss by far more than this.
+NORMALIZATION_ATOL = 1e-6
+
+#: Both sides read from one accumulator, so only float64 summation order differs.
+FLOAT64_RTOL = 1e-9
 
 
 def _model(seed: int = 77) -> LlamaForCausalLM:
@@ -84,18 +116,36 @@ def _measure(model, positions, **overrides):
     return measure_initialization(model, positions, **parameters)
 
 
-def _reference_probabilities(model, positions) -> torch.Tensor:
-    """``[D, V]`` raw T=1 probabilities, computed all at once.
+def _reference_logits(model, positions, *, forward_batch_size: int = FORWARD_BATCH):
+    """``[W, block, V]`` support-masked logits, batched like the measurement.
 
-    Deliberately unlike the streamed path: every position's logits are
-    materialized first, which is only viable at this size, so agreement is
-    evidence rather than a restatement of the same code.
+    The batch size is matched on purpose. Two forward passes over the same
+    windows in differently sized batches use different matmul reduction orders
+    and produce logits that differ in their last float32 bits, so comparing a
+    measurement against a reference computed at another batch size would test
+    forward reproducibility rather than the aggregation being checked. Batching
+    invariance is worth testing, and is tested separately below at a tolerance
+    that suits it.
     """
 
-    logits = compute_evaluation_logits(model, positions, vocab_size=VOCAB_SIZE)
+    logits = compute_evaluation_logits(
+        model, positions, vocab_size=VOCAB_SIZE, forward_batch_size=forward_batch_size
+    )
     mask = eligible_support_mask(VOCAB_SIZE, ELIGIBLE)
-    masked = apply_support_mask(restrict_to_support(logits, vocab_size=VOCAB_SIZE).clone(), mask)
-    return torch.softmax(masked.float(), dim=-1).reshape(-1, VOCAB_SIZE)
+    return apply_support_mask(restrict_to_support(logits, vocab_size=VOCAB_SIZE).clone(), mask)
+
+
+def _reference_probabilities(model, positions) -> torch.Tensor:
+    """``[D, V]`` raw T=1 probabilities from the same logits, all at once.
+
+    Deliberately unlike the streamed path -- every position materialized first,
+    which is only viable at this size -- so agreement is evidence rather than a
+    restatement of the same code.
+    """
+
+    return torch.softmax(_reference_logits(model, positions).float(), dim=-1).reshape(
+        -1, VOCAB_SIZE
+    )
 
 
 # -- the diagnostics describe the right distribution -------------------------
@@ -111,7 +161,12 @@ def test_the_profile_matches_an_all_at_once_reference() -> None:
     ordered = torch.sort(probabilities, dim=-1, descending=True).values[:, : len(ELIGIBLE)]
     expected = ordered.double().mean(dim=0)
 
-    assert torch.allclose(measurement.ranked_probability_profile, expected, rtol=1e-9, atol=1e-12)
+    assert torch.allclose(
+        measurement.ranked_probability_profile,
+        expected,
+        rtol=PROBABILITY_RTOL,
+        atol=PROBABILITY_ATOL,
+    )
 
 
 def test_ranking_happens_within_positions_not_after_averaging() -> None:
@@ -143,7 +198,7 @@ def test_the_profile_satisfies_its_invariants() -> None:
     assert torch.all(torch.isfinite(profile))
     assert torch.all(profile >= 0)
     assert torch.all(torch.diff(profile) <= 1e-12)
-    assert float(profile.sum()) == pytest.approx(1.0, abs=1e-9)
+    assert float(profile.sum()) == pytest.approx(1.0, abs=NORMALIZATION_ATOL)
 
 
 def test_the_maximum_is_the_probability_of_the_greedy_token() -> None:
@@ -152,17 +207,22 @@ def test_the_maximum_is_the_probability_of_the_greedy_token() -> None:
     model, positions = _model(), _positions()
     measurement = _measure(model, positions, collect_probability_statistics=True)
 
-    probabilities = _reference_probabilities(model, positions)
-    logits = compute_evaluation_logits(model, positions, vocab_size=VOCAB_SIZE)
-    mask = eligible_support_mask(VOCAB_SIZE, ELIGIBLE)
-    masked = apply_support_mask(restrict_to_support(logits, vocab_size=VOCAB_SIZE).clone(), mask)
+    masked = _reference_logits(model, positions)
+    probabilities = torch.softmax(masked.float(), dim=-1).reshape(-1, VOCAB_SIZE)
     greedy = greedy_guess_ids(masked).reshape(-1)
 
     # The greedy token really is the argmax of the probability vector.
     assert torch.equal(probabilities.argmax(dim=-1), greedy)
     expected = probabilities.gather(-1, greedy.unsqueeze(-1)).squeeze(-1).double()
-    assert torch.allclose(measurement.max_probabilities, expected, rtol=1e-9)
-    assert torch.allclose(measurement.max_probabilities, probabilities.max(dim=-1).values.double())
+    assert torch.allclose(
+        measurement.max_probabilities, expected, rtol=PROBABILITY_RTOL, atol=PROBABILITY_ATOL
+    )
+    assert torch.allclose(
+        measurement.max_probabilities,
+        probabilities.max(dim=-1).values.double(),
+        rtol=PROBABILITY_RTOL,
+        atol=PROBABILITY_ATOL,
+    )
     assert float(measurement.max_probabilities.min()) >= 0.0
     assert float(measurement.max_probabilities.max()) <= 1.0
 
@@ -170,8 +230,10 @@ def test_the_maximum_is_the_probability_of_the_greedy_token() -> None:
 def test_rank_one_equals_the_mean_maximum() -> None:
     measurement = _measure(_model(), _positions(), collect_probability_statistics=True)
 
+    # Both sides come from the same accumulator, so only float64 summation order
+    # separates them and the tolerance can stay very tight.
     assert float(measurement.ranked_probability_profile[0]) == pytest.approx(
-        float(measurement.max_probabilities.mean()), rel=1e-9
+        float(measurement.max_probabilities.mean()), rel=FLOAT64_RTOL
     )
 
 
@@ -183,7 +245,12 @@ def test_the_target_probability_is_the_true_next_token() -> None:
     targets = positions.target_ids.reshape(-1)
     expected = probabilities.gather(-1, targets.unsqueeze(-1)).squeeze(-1).double()
 
-    assert torch.allclose(measurement.target_probabilities, expected, rtol=1e-9)
+    assert torch.allclose(
+        measurement.target_probabilities,
+        expected,
+        rtol=PROBABILITY_RTOL,
+        atol=PROBABILITY_ATOL,
+    )
 
 
 def test_the_loss_is_the_negative_log_target_probability() -> None:
@@ -278,8 +345,13 @@ def test_the_statistics_are_off_by_default() -> None:
     assert measurement.target_losses is None
 
 
-def test_batching_does_not_change_the_diagnostics() -> None:
-    """Memory-only knob: the forward batch size cannot move a number."""
+def test_batching_changes_no_discrete_outcome() -> None:
+    """The forward batch size is a memory knob, and the *decisions* are exact.
+
+    Everything discrete must be bit-for-bit identical: which token greedy picks,
+    how often each is picked, how many positions were measured. Those carry no
+    floating-point ambiguity and are asserted with equality.
+    """
 
     positions = _positions()
     small = _measure(
@@ -289,11 +361,42 @@ def test_batching_does_not_change_the_diagnostics() -> None:
         _model(), positions, forward_batch_size=NUM_WINDOWS, collect_probability_statistics=True
     )
 
-    assert torch.allclose(
-        small.ranked_probability_profile, large.ranked_probability_profile, rtol=1e-12
+    assert torch.equal(small.greedy_counts, large.greedy_counts)
+    assert torch.equal(small.nucleus_counts, large.nucleus_counts)
+    assert small.num_positions == large.num_positions
+
+
+def test_batching_moves_probabilities_only_within_float32_noise() -> None:
+    """The continuous values agree to float32, which is all they can agree to.
+
+    Different batch sizes give the matmuls different reduction orders, so the
+    logits differ in their last float32 bits and the probabilities inherit that.
+    Demanding exactness here would be demanding bitwise forward reproducibility,
+    which is a different property from the aggregation being correct -- and one
+    the hardware does not offer.
+    """
+
+    positions = _positions()
+    small = _measure(
+        _model(), positions, forward_batch_size=1, collect_probability_statistics=True
     )
-    assert torch.allclose(small.max_probabilities, large.max_probabilities, rtol=1e-12)
-    assert torch.allclose(small.target_probabilities, large.target_probabilities, rtol=1e-12)
+    large = _measure(
+        _model(), positions, forward_batch_size=NUM_WINDOWS, collect_probability_statistics=True
+    )
+
+    for name in (
+        "ranked_probability_profile",
+        "max_probabilities",
+        "target_probabilities",
+        "temperature_ranked_probabilities",
+        "temperature_max_probabilities",
+    ):
+        assert torch.allclose(
+            getattr(small, name),
+            getattr(large, name),
+            rtol=PROBABILITY_RTOL,
+            atol=PROBABILITY_ATOL,
+        ), name
 
 
 def test_ineligible_tokens_receive_no_probability() -> None:
@@ -306,7 +409,9 @@ def test_ineligible_tokens_receive_no_probability() -> None:
     assert measurement.ranked_probability_profile.shape[0] == len(ELIGIBLE)
     for token_id in INELIGIBLE:
         assert float(probabilities[:, token_id].abs().max()) == 0.0
-    assert np.isclose(float(measurement.ranked_probability_profile.sum()), 1.0, atol=1e-9)
+    assert np.isclose(
+        float(measurement.ranked_probability_profile.sum()), 1.0, atol=NORMALIZATION_ATOL
+    )
 
 
 # -- temperature-conditioned confidence --------------------------------------
@@ -318,24 +423,29 @@ def test_the_temperature_grid_holds_greedy_identity_fixed() -> None:
     model, positions = _model(), _positions()
     measurement = _measure(model, positions, collect_probability_statistics=True)
 
-    logits = compute_evaluation_logits(model, positions, vocab_size=VOCAB_SIZE)
-    mask = eligible_support_mask(VOCAB_SIZE, ELIGIBLE)
-    masked = apply_support_mask(restrict_to_support(logits, vocab_size=VOCAB_SIZE).clone(), mask)
+    masked = _reference_logits(model, positions)
     greedy = greedy_guess_ids(masked).reshape(-1)
     flat = masked.reshape(-1, VOCAB_SIZE).float()
 
     for index, temperature in enumerate(measurement.confidence_temperatures):
         probabilities = torch.softmax(flat / temperature, dim=-1)
+        # Exact, and it must stay exact: the identity of the greedy token is a
+        # discrete outcome, not a float comparison, and its invariance across
+        # temperature is the claim the whole experiment rests on.
         assert torch.equal(probabilities.argmax(dim=-1), greedy), temperature
         expected = probabilities.gather(-1, greedy.unsqueeze(-1)).squeeze(-1).double()
         assert torch.allclose(
-            measurement.temperature_max_probabilities[index], expected, rtol=1e-9
-        )
+            measurement.temperature_max_probabilities[index],
+            expected,
+            rtol=PROBABILITY_RTOL,
+            atol=PROBABILITY_ATOL,
+        ), temperature
         assert torch.allclose(
             measurement.temperature_max_probabilities[index],
             probabilities.max(dim=-1).values.double(),
-            rtol=1e-9,
-        )
+            rtol=PROBABILITY_RTOL,
+            atol=PROBABILITY_ATOL,
+        ), temperature
 
 
 def test_every_temperature_profile_matches_a_direct_reference() -> None:
@@ -344,10 +454,7 @@ def test_every_temperature_profile_matches_a_direct_reference() -> None:
     model, positions = _model(), _positions()
     measurement = _measure(model, positions, collect_probability_statistics=True)
 
-    logits = compute_evaluation_logits(model, positions, vocab_size=VOCAB_SIZE)
-    mask = eligible_support_mask(VOCAB_SIZE, ELIGIBLE)
-    masked = apply_support_mask(restrict_to_support(logits, vocab_size=VOCAB_SIZE).clone(), mask)
-    flat = masked.reshape(-1, VOCAB_SIZE).float()
+    flat = _reference_logits(model, positions).reshape(-1, VOCAB_SIZE).float()
 
     for index, temperature in enumerate(measurement.confidence_temperatures):
         probabilities = torch.softmax(flat / temperature, dim=-1)
@@ -355,9 +462,9 @@ def test_every_temperature_profile_matches_a_direct_reference() -> None:
         assert torch.allclose(
             measurement.temperature_ranked_probabilities[index],
             ordered.double().mean(dim=0),
-            rtol=1e-9,
-            atol=1e-12,
-        )
+            rtol=PROBABILITY_RTOL,
+            atol=PROBABILITY_ATOL,
+        ), temperature
 
 
 def test_the_canonical_slice_is_the_canonical_arrays() -> None:
