@@ -812,6 +812,14 @@ def main() -> None:
         gradient_position_norms=(
             None if gradient_result is None else gradient_result.gradient_norms.numpy()
         ),
+        gradient_temperatures=(
+            None if gradient_result is None else np.asarray(gradient_result.temperatures)
+        ),
+        gradient_temperature_position_norms=(
+            None
+            if gradient_result is None
+            else gradient_result.temperature_gradient_norms.numpy()
+        ),
         uniform_null=(
             {}
             if null_summary is None
