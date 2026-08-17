@@ -76,6 +76,7 @@ IGB_LLMs/
     check_experiment_tracking.py
     prepare_dataset.py
     run_initialization_distribution_experiment.py
+    run_initialization_scale_experiment.py
     benchmark_position_gradients.py
     render_record_figures.py
 
@@ -97,6 +98,7 @@ IGB_LLMs/
         nulls.py
         predictive.py
         records.py
+        scale_comparison.py
         transition.py
 
       data/
@@ -140,6 +142,7 @@ IGB_LLMs/
       models/
         __init__.py
         base.py
+        initialization_scale.py
         registry.py
         llama/
           __init__.py
@@ -1143,6 +1146,32 @@ and every temperature describes the **same greedy decisions** with different
 confidence attached. That is what makes it a different experiment from the nucleus
 sweep, which samples from the transformed distribution and therefore does change what
 gets selected.
+
+`figure14_ranked_mean_token_probabilities.svg` complements figure 11 by reversing the
+order of two operations: it averages probabilities **at fixed token identity** across
+positions and ranks afterwards, where figure 11 ranks within each position first. Figure
+11 asks how concentrated a typical single prediction is; figure 14 asks whether the *same*
+tokens are persistently favoured. Steep in 11 with a flat 14 means concentrated
+predictions on input-dependent tokens; steep in both is a persistent identity bias.
+
+### Initialization scale
+
+`scripts/run_initialization_scale_experiment.py` repeats the whole pipeline at three
+initialization scales, `alpha in {1.0, 0.5, 0.25}`, writing one self-contained run per
+scale under `scale_1/`, `scale_0p5/` and `scale_0p25/` plus a parent manifest:
+
+```bash
+python3 scripts/run_initialization_scale_experiment.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml --offline --gradient-analysis
+```
+
+`alpha` multiplies every audited zero-centred random weight; the deterministic RMSNorm
+gains are left alone and the architecture has no bias parameters. All three conditions
+share one draw, so signs and directions are identical and only magnitude differs, and
+`alpha = 1` is a literal no-op. **There is no single architecture-wide `sigma_w`** — the
+embedding is `normal_(0,1)` while every linear is `kaiming_uniform_(a=sqrt(5))` with a
+fan-in dependent scale — so standard deviations are reported per parameter group.
 
 This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
 differentiates the *window-averaged* loss with respect to block activations. See

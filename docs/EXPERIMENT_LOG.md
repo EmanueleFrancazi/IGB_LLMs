@@ -601,6 +601,129 @@ Figures 11, 12 and 13 present this: the ranked profiles across temperature, a
 six-panel ECDF of `p_max_T` on shared axes, and a compact confidence-versus-
 temperature summary with probability and effective support on separate panels.
 
+### Figure 14 — average by identity first, then rank
+
+The complement of figure 11, and the pair is the point.
+
+```
+figure 11:  A_{s,T}(r) = mean_d p_{s,T}(d,(r))          rank WITHIN position, then average
+figure 14:  pbar_{s,T}(i) = mean_d p_{s,T}(d,i)         average at FIXED identity
+            B_{s,T}(r)    = sort_desc_i pbar_{s,T}(i)   then rank
+```
+
+Figure 11 asks how concentrated a *typical single prediction* is; it discards
+token identity before averaging, so a model peaked on a different token at every
+position still gives a steep curve. Figure 14 asks whether the **same** tokens
+are systematically favoured across many inputs.
+
+* 11 steep, 14 flat → concentrated predictions on input-dependent tokens.
+* 11 steep, 14 steep → concentrated predictions **and** a persistent
+  token-identity preference — which is what an initialization guessing bias is.
+
+Ranking happens per initialization before initializations are summarized;
+averaging probabilities across initializations first would blur away exactly the
+identity structure being measured.
+
+Persisted as `[I, N_T, V]` mean token probabilities (~21.5 MB), whose `T = 1` row
+**generalizes the existing `mean_predicted_probabilities`** rather than
+duplicating it — validation asserts the two agree. The ranked profile is derived
+from it, not stored again, and the `[I, N_T, D, V]` tensor is never formed.
+
+`cumulative_order_comparison` reports `C_A(T,k)`, `C_B(T,k)` and
+`Delta = C_A - C_B` at `k = 1, 10, 100, 1000`. `Delta >= 0` is expected on general
+grounds — letting the top-k identities vary by position cannot capture less mass
+than one fixed top-k set — and is checked on controlled fixtures. It is reported,
+not promoted to a headline.
+
+---
+
+## 5f. Initialization scale
+
+An exploratory extension: repeat the whole pipeline at three initialization
+scales, motivated by work relating initialization scale to initial bias regimes
+and gradient propagation. That work intervenes on a single `sigma_w`; **this
+architecture has none**, so the analogue is a global multiplier.
+
+```
+alpha in {1.0, 0.5, 0.25}     sigma per group x alpha     variance per group x alpha^2
+```
+
+### Initialization audit
+
+No custom initializer exists; PyTorch defaults apply and differ by tensor class
+in both scale and distribution family:
+
+| group | rule | baseline std |
+|---|---|---|
+| `tok_embeddings.weight` | `normal_(0,1)` | 1.00000 |
+| attention and MLP projections, `output.weight` (fan-in 128) | `kaiming_uniform_(a=sqrt5)` | 0.05103 |
+| `feed_forward.w2.weight` (fan-in 384) | same | 0.02946 |
+| RMSNorm gains | `ones_` | deterministic, **not scaled** |
+
+**No bias parameters exist anywhere** — every `nn.Linear` is `bias=False` — so the
+zero-bias condition is identical to every historical experiment. Embedding and
+head are untied. Standard deviations are reported **per group**; quoting one
+number would misrepresent a 34× spread across two initializer families.
+
+### The intervention
+
+Build the model from its seed exactly as before, then multiply the audited random
+tensors by `alpha`. All three conditions share one draw, so signs and directions
+are identical and only magnitude differs. `alpha = 1` is a **literal no-op** — the
+tensors are not touched — and each condition derives from its own pristine
+baseline, never cumulatively.
+
+### Why this need not be a pure logit rescaling
+
+`logits = output(norm(h))`, and RMSNorm divides out the scale of `h`, so `alpha`
+reaches the logits through `output.weight` alone — a common factor, which would
+leave greedy identities invariant — *provided the direction of `h` is unchanged*.
+It generally is not: `h` mixes the embedding, scaling as `alpha`, with the
+attention and MLP branches, scaling as `alpha^2`, and attention scores scale as
+`alpha^2` too, so the softmax pattern itself changes. The residual-to-branch
+ratio therefore moves with `alpha`.
+
+This is mechanistic motivation for why greedy identities *may* change, and is the
+interpretive control of §6: a substantial change in `q_i` across `alpha` means
+scaling has altered the logit geometry beyond one common positive factor. It is
+**not** a prediction, and no test encodes it.
+
+### Lightweight diagnostics
+
+Two read-only diagnostics accompany each scale condition.
+
+**Raw logits.** Mean and standard deviation over the *finite eligible* logits, plus
+per-position standard deviation and `max - median` quantiles. Taken from the
+eligible entries only: ineligible tokens are masked to `-inf` before the softmax,
+so a moment computed over the unmasked tensor would be meaningless. They describe
+`z`, never `z / T`, so they are temperature-independent and stored once per
+initialization rather than once per temperature. No full logit tensor is kept.
+
+**Cross-alpha greedy comparison** (`analysis/scale_comparison.py`), reporting
+four things and deliberately keeping the first two apart:
+
+* position-wise agreement `mean_d [greedy_alpha(d) == greedy_1(d)]`;
+* distributional `TV(q_alpha, q_1)`;
+* effective-support change;
+* zero-frequency-fraction change.
+
+Agreement and TV are not interchangeable. Two conditions can have nearly
+identical marginal guess distributions while choosing differently at many
+individual positions — the signature of reorganized preferences under a
+preserved distribution shape. Under pure logit rescaling agreement would be
+exactly 1, so any shortfall means the intervention changed the logit geometry.
+Position-wise agreement needs per-position greedy identities, which only the
+gradient analysis persists; when they are absent that is reported rather than
+approximated from marginal counts.
+
+### Deferred
+
+A layerwise gradient-stability study is **not** implemented. Two transformer
+blocks are too shallow to support a depth-propagation claim, so it waits for a
+deeper model. Compact cross-scale figures are also deferred: three complete
+figure sets are produced first, and comparative visualizations are designed only
+after inspecting them.
+
 ---
 
 ## 5e. Gradient magnitude versus guessing bias
