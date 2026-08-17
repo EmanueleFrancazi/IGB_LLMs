@@ -1703,7 +1703,8 @@ def plot_temperature_gradient_vs_guess_bias(
     directory: str | Path,
     *,
     panel_temperatures: Sequence[float] | None = None,
-    x_limits: str = "auto",
+    x_limits: str = "per_panel",
+    y_transform: str = "count_log",
 ) -> list[Path]:
     """Figure 10 -- gradient magnitude vs. a *fixed* guessing bias, across temperature.
 
@@ -1743,10 +1744,8 @@ def plot_temperature_gradient_vs_guess_bias(
             "This record carries no temperature-conditioned gradient analysis, so "
             "figure 10 has nothing to draw."
         )
-    if x_limits not in ("auto", "shared", "per_panel"):
-        raise ValueError(
-            f"x_limits must be 'auto', 'shared', or 'per_panel'; got {x_limits!r}."
-        )
+    if x_limits not in ("shared", "per_panel"):
+        raise ValueError(f"x_limits must be 'shared' or 'per_panel'; got {x_limits!r}.")
 
     grid = list(record.gradient_temperature_grid)
     chosen = (
@@ -1767,21 +1766,52 @@ def plot_temperature_gradient_vs_guess_bias(
     one_guess = 1.0 / float(tables[0]["num_positions"])
 
     norms = [table["mean_gradient_norm"][plotted] for table in tables]
-    positive = [values[values > 0] for values in norms]
-    lower = min(float(values.min()) for values in positive if values.size)
-    upper = max(float(values.max()) for values in positive if values.size)
-    # Shared limits only while every panel still resolves: if the panels occupy
-    # very different decades, one shared range squeezes each into a sliver.
-    spans = [
-        float(values.max() / values.min()) for values in positive if values.size
-    ]
-    share_x = x_limits == "shared" or (
-        x_limits == "auto" and (upper / lower) <= 50.0 * max(spans)
-    )
+
+    # -- y: a count-aware, zero-preserving display transform -----------------
+    #
+    # q(i) = k(i) / D with k an integer guess count, and the distribution is
+    # strongly zero-inflated. A logarithmic axis deletes the zeros outright, and
+    # symlog keeps them but still spends most of the height on the few tokens
+    # with large k. Plotting log10(1 + k) instead maps q = 0 to exactly 0, puts a
+    # full 0.30 of height between "never guessed" and "guessed once", expands the
+    # low counts where nearly all tokens live, and compresses the tail.
+    #
+    # It is monotone and exactly invertible, so it reorders nothing and discards
+    # nothing. The axis still *reads* as q(i): the ticks are labelled k/D.
+    counts = np.asarray(tables[0]["greedy_guess_count"][plotted], dtype=np.float64)
+    if y_transform not in ("count_log", "symlog"):
+        raise ValueError(
+            f"y_transform must be 'count_log' or 'symlog'; got {y_transform!r}."
+        )
+    use_count_log = y_transform == "count_log"
+    y_values = np.log10(1.0 + counts) if use_count_log else guesses
+
+    # -- x: limits from each temperature's own distribution -------------------
+    #
+    # G(i, T) sits at a different location for every T -- the explicit 1/T alone
+    # moves the median by an order of magnitude across the grid -- so one shared
+    # range leaves every cloud in a sliver of its panel. Each panel therefore
+    # gets limits derived from its own finite values, padded slightly, covering
+    # the full range so nothing is clipped.
+    #
+    # The cost is that horizontal position is no longer comparable between
+    # panels, which the figure states rather than leaves to be inferred.
+    finite = [values[np.isfinite(values) & (values > 0)] for values in norms]
+    if any(values.size == 0 for values in finite):
+        raise ValueError("Every panel needs at least one positive gradient norm.")
+    if x_limits == "shared":
+        lower = min(float(values.min()) for values in finite)
+        upper = max(float(values.max()) for values in finite)
+        panel_limits = [(lower / 1.15, upper * 1.15)] * len(chosen)
+    else:
+        panel_limits = [
+            (float(values.min()) / 1.15, float(values.max()) * 1.15) for values in finite
+        ]
+    share_x = x_limits == "shared"
 
     columns = 3
     rows = int(np.ceil(len(chosen) / columns))
-    figure = _new_figure(width=4.6 * columns, height=3.9 * rows)
+    figure = _new_figure(width=4.8 * columns, height=4.1 * rows)
     panels = figure.subplots(rows, columns, squeeze=False, sharey=True)
     norm = LogNorm(
         vmin=float(corpus[coloured].min()), vmax=float(corpus[coloured].max())
@@ -1793,28 +1823,33 @@ def plot_temperature_gradient_vs_guess_bias(
         values = norms[panel_index]
         marks = axes.scatter(
             values[coloured],
-            guesses[coloured],
+            y_values[coloured],
             c=corpus[coloured],
-            s=6,
-            alpha=0.55,
+            s=9,
+            alpha=0.45,
             cmap="viridis",
             norm=norm,
             edgecolors="none",
             rasterized=True,
         )
-        axes.axhline(one_guess, color="#888888", linewidth=0.8, linestyle=":", zorder=0)
         axes.set_xscale("log")
-        axes.set_yscale("symlog", linthresh=one_guess, linscale=0.6)
-        axes.set_ylim(bottom=0.0)
-        if share_x:
-            axes.set_xlim(lower, upper)
+        axes.set_xlim(*panel_limits[panel_index])
+        if use_count_log:
+            # A hairline above zero, so the never-guessed population reads as a
+            # population rather than as the axis frame.
+            axes.axhline(0.0, color="#bbbbbb", linewidth=0.7, linestyle="-", zorder=0)
+        else:
+            axes.axhline(one_guess, color="#888888", linewidth=0.8, linestyle=":", zorder=0)
+            axes.set_yscale("symlog", linthresh=one_guess, linscale=0.6)
+            axes.set_ylim(bottom=0.0)
         axes.grid(True, which="both", alpha=0.20)
 
         row = summary["rows"][grid.index(temperature)]
         rho = row["spearman_gradient_vs_guess"]
+        low, high = panel_limits[panel_index]
         axes.set_title(
-            f"T = {temperature:g}" + ("" if share_x else "   (own x range)"),
-            fontsize=10,
+            f"T = {temperature:g}\nG in [{low:.3g}, {high:.3g}]",
+            fontsize=9.5,
         )
         axes.text(
             0.03,
@@ -1827,12 +1862,39 @@ def plot_temperature_gradient_vs_guess_bias(
             bbox=_ANNOTATION_BOX,
         )
 
+    if use_count_log:
+        # Ticks at meaningful guess counts, labelled as the fraction they are.
+        ladder = [0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+        largest = int(counts.max())
+        selected = [value for value in ladder if value <= largest]
+        # Add the true maximum only when it is far enough from the last ladder
+        # tick to be legible; otherwise the two labels overprint each other.
+        if largest and largest not in selected:
+            gap = np.log10(1.0 + largest) - np.log10(1.0 + selected[-1])
+            if gap > 0.25:
+                selected.append(largest)
+        top = float(np.log10(1.0 + max(largest, 1)))
+        for row_index in range(rows):
+            for column in range(columns):
+                axes = panels[row_index][column]
+                axes.set_yticks(np.log10(1.0 + np.asarray(selected, dtype=np.float64)))
+                axes.set_yticklabels(
+                    ["0"] + [f"{value}/D" for value in selected[1:]], fontsize=7.5
+                )
+                axes.set_ylim(-0.045 * top, top * 1.06)
+
     for panel_index in range(len(chosen), rows * columns):
         panels[panel_index // columns][panel_index % columns].set_visible(False)
-    # One figure-level label per axis. Repeating them per row overlaps at this
-    # panel height, and the axes are shared anyway, so the label is shared too.
     figure.supxlabel("mean gradient norm  G(i, T)   [log scale]", fontsize=10)
-    figure.supylabel("greedy guess fraction  q(i)   [symlog below 1/D]", fontsize=10)
+    figure.supylabel(
+        "greedy guess fraction  q(i) = k/D"
+        + (
+            f"   [axis: log10(1 + k), D = {int(tables[0]['num_positions']):,}]"
+            if use_count_log
+            else "   [symlog below 1/D]"
+        ),
+        fontsize=10,
+    )
 
     # One colorbar for the whole figure: the colour means the same thing in every
     # panel, and six of them would imply six different scales.
@@ -1844,7 +1906,10 @@ def plot_temperature_gradient_vs_guess_bias(
         "so only the gradient moves"
     )
     if not share_x:
-        note += "   |   x limits differ per panel"
+        note += (
+            "   |   x limits are per-panel: horizontal position is NOT comparable "
+            "between panels"
+        )
     if dropped:
         note += f"   |   omitted, no corpus mass: {_format_count(dropped)}"
     figure.suptitle(

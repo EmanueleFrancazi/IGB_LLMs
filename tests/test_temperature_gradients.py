@@ -344,7 +344,7 @@ def test_figure_ten_has_six_panels(tmp_path) -> None:
     ]
 
 
-def test_every_panel_plots_the_same_guess_fractions(tmp_path) -> None:
+def test_every_panel_plots_the_same_guess_values(tmp_path) -> None:
     """q(i) is temperature-invariant, so the y coordinates must be identical."""
 
     panels, _ = _panels_from(_record(), tmp_path)
@@ -355,14 +355,28 @@ def test_every_panel_plots_the_same_guess_fractions(tmp_path) -> None:
     assert (reference == 0.0).any()  # zero-guess tokens are retained
 
 
-def test_the_y_axis_is_shared_and_symlog(tmp_path) -> None:
+def test_every_panel_shares_one_y_transform_and_range(tmp_path) -> None:
+    """q(i) is identical across temperature, so its axis must be too."""
+
     panels, _ = _panels_from(_record(), tmp_path)
 
-    limits = {axes.get_ylim() for axes in panels}
-    assert len(limits) == 1
+    assert len({axes.get_ylim() for axes in panels}) == 1
+    assert len({axes.get_yscale() for axes in panels}) == 1
+    assert len({tuple(axes.get_yticks()) for axes in panels}) == 1
     for axes in panels:
-        assert axes.get_yscale() == "symlog"
-        assert axes.get_ylim()[0] <= 0.0
+        assert axes.get_ylim()[0] <= 0.0  # q = 0 is on the axis, not at the frame
+
+    # A shared y axis blanks the inner panels' labels by design, so the drawn
+    # text lives on the left column; the ticks themselves are shared above.
+    labels = [label.get_text() for label in panels[0].get_yticklabels()]
+    assert labels[0] == "0"
+    assert all(label.endswith("/D") for label in labels[1:])
+
+
+def test_the_symlog_representation_remains_selectable(tmp_path) -> None:
+    panels, _ = _panels_from(_record(), tmp_path, y_transform="symlog")
+
+    assert all(axes.get_yscale() == "symlog" for axes in panels)
 
 
 def test_one_shared_colour_normalization_and_one_colorbar(tmp_path) -> None:
@@ -398,17 +412,87 @@ def test_exactly_one_colorbar_is_drawn(tmp_path) -> None:
     assert len(created) == 1
 
 
-def test_x_limits_can_be_shared_or_per_panel(tmp_path) -> None:
-    """Shared when readable; otherwise per panel, and the titles say so."""
+def test_each_panel_gets_limits_from_its_own_gradient_distribution(tmp_path) -> None:
+    """G(i, T) sits at a different place for every T, so the limits follow it.
 
-    panels, _ = _panels_from(_record(), tmp_path, x_limits="shared")
-    assert len({axes.get_xlim() for axes in panels}) == 1
-    assert all("own x range" not in axes.get_title() for axes in panels)
+    Shared limits leave every cloud in a sliver of its panel, which is a display
+    failure rather than a scientific one. The transformation stays the same in
+    all six; only the limits differ.
+    """
 
-    panels, _ = _panels_from(_record(), tmp_path, x_limits="per_panel")
-    assert all("own x range" in axes.get_title() for axes in panels)
+    record = _record()
+    panels, _ = _panels_from(record, tmp_path)
+
+    limits = [axes.get_xlim() for axes in panels]
+    assert len(set(limits)) == len(panels)  # genuinely per panel
+    assert all(axes.get_xscale() == "log" for axes in panels)
+
+    for axes, temperature in zip(panels, PANELS):
+        table = temperature_gradient_table(record, temperature)
+        values = table["mean_gradient_norm"][table["target_occurrence_count"] > 0]
+        finite = values[np.isfinite(values) & (values > 0)]
+        low, high = axes.get_xlim()
+        # Derived from this temperature's own data, and covering all of it.
+        assert low < float(finite.min()) <= float(finite.max()) < high
+        assert f"{low:.3g}" in axes.get_title()
+
+
+def test_no_point_falls_outside_its_panel_limits(tmp_path) -> None:
+    """Nothing is clipped: every plotted marker lies inside the axes."""
+
+    panels, _ = _panels_from(_record(), tmp_path)
+
     for axes in panels:
-        assert axes.get_xscale() == "log"
+        offsets = axes.collections[0].get_offsets()
+        low, high = axes.get_xlim()
+        bottom, top = axes.get_ylim()
+        assert offsets[:, 0].min() >= low and offsets[:, 0].max() <= high
+        assert offsets[:, 1].min() >= bottom and offsets[:, 1].max() <= top
+
+
+def test_shared_x_limits_remain_available(tmp_path) -> None:
+    panels, _ = _panels_from(_record(), tmp_path, x_limits="shared")
+
+    assert len({axes.get_xlim() for axes in panels}) == 1
+
+
+def test_the_count_transform_maps_zero_exactly_and_is_monotonic(tmp_path) -> None:
+    """log10(1 + k) sends q = 0 to exactly 0 and reorders nothing.
+
+    A logarithmic axis would delete the zero-guess tokens, which are most of
+    them; this keeps every one and separates "never guessed" from "guessed once"
+    by a visible 0.30 of height.
+    """
+
+    record = _record()
+    panels, _ = _panels_from(record, tmp_path)
+    table = temperature_gradient_table(record, PANELS[0])
+    plotted = table["target_occurrence_count"] > 0
+    counts = table["greedy_guess_count"][plotted]
+
+    drawn = panels[0].collections[0].get_offsets()[:, 1]
+    expected = np.log10(1.0 + counts)
+    assert np.allclose(drawn, expected)
+    assert np.all(drawn[counts == 0] == 0.0)
+    order = np.argsort(counts)
+    assert np.all(np.diff(drawn[order]) >= 0.0)
+    # Never-guessed tokens are a real population here, not a rounding artefact.
+    assert (counts == 0).sum() > 0
+
+
+def test_the_original_guess_fractions_are_untouched_by_the_display(tmp_path) -> None:
+    """The transform is display only: q(i) in the data is unchanged."""
+
+    record = _record()
+    before = temperature_gradient_table(record, 1.00)["greedy_guess_fraction"].copy()
+    _panels_from(record, tmp_path)
+    after = temperature_gradient_table(record, 1.00)["greedy_guess_fraction"]
+
+    assert np.array_equal(before, after)
+    counts = record.greedy_counts[0]
+    assert np.array_equal(
+        after, counts.astype(np.float64) / float(record.gradient_position_norms.shape[0])
+    )
 
 
 def test_a_record_without_temperature_gradients_refuses_figure_ten(tmp_path) -> None:

@@ -729,11 +729,24 @@ and validation asserts it equals the stored canonical array.
 `figure10_temperature_gradient_vs_initial_guess_bias.svg`: six panels, one per
 sweep temperature, each a token scatter of `G_i(T)` against the *fixed* `q_i`,
 coloured by `p_i` on one shared logarithmic colour scale with a single colorbar.
-The y axis is shared and keeps the symlog treatment with its linear region ending
-at `1/D`, so never-guessed tokens stay on the axis. The x axis uses shared limits
-when every panel remains readable within them and per-panel limits otherwise, in
-which case each title says so — a silent rescaling would invent a comparison the
-figure cannot support.
+
+**The y axis is a count transform, shared by all six panels.** Since
+`q_i = k_i / D` with `k_i` an integer guess count, the axis plots `log10(1 + k_i)`:
+`q = 0` maps to exactly 0, a full 0.30 of height separates "never guessed" from
+"guessed once", the low counts where nearly all tokens live are expanded, and the
+tail is compressed. It is monotone and exactly invertible, so it reorders nothing
+and discards nothing, and the ticks are labelled `k/D` so the axis still reads as
+a fraction. This replaced symlog, which kept the zeros but still spent most of the
+height on the few tokens with large `k`: at the real scale about 94% of tokens
+have `q_i = 0` and formed one indistinguishable line.
+
+**The x limits are per panel.** `G_i(T)` sits at a different place for every
+temperature — the explicit `1/T` alone moves the median by an order of magnitude
+across the grid — so shared limits leave every cloud in a sliver of its panel. The
+transformation stays logarithmic in all six; only the limits differ, each covering
+its own full range with modest padding so nothing is clipped. Every panel states
+its interval in its title, and the figure says in words that horizontal position
+is **not** comparable between panels.
 
 The single-temperature scatter remains available as
 `supplementary_t1_gradient_vs_initial_guess_bias.svg`, and older records that
