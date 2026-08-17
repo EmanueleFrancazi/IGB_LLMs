@@ -119,8 +119,10 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "log", "linear"],
         default="auto",
         help=(
-            "Probability/gradient axis scale for whichever of figures 8, 9 or 10 "
-            "is drawn. 'auto' follows the observed dynamic range."
+            "Probability axis scale for whichever of figures 8, 9, 11, 12, 14 or "
+            "the supplementary gradient scatter is drawn. 'auto' follows the "
+            "observed dynamic range. Figure 10 is unaffected: it selects its own "
+            "per-panel limits."
         ),
     )
     return parser.parse_args()
@@ -418,12 +420,17 @@ def main() -> None:
                 f"({required} is false), so it cannot be drawn from it."
             )
         function = getattr(figure_module, FIGURES[args.only])
-        # Each of the three newer figures exposes exactly one scale knob, under
-        # the name its own axis uses.
+        # Each of these figures exposes exactly one scale knob, under the name
+        # its own axis uses.
+        #
+        # Figure 10 is deliberately absent. Its only axis keyword is
+        # ``x_limits``, which takes 'shared' or 'per_panel' -- a different
+        # vocabulary from --scale's auto/log/linear. Passing --scale into it
+        # raised ValueError on every invocation, so the figure is drawn with its
+        # own default, the per-panel limits its design requires.
         scale_argument = {
             "figure8": "y_scale",
             "figure9": "x_scale",
-            "figure10": "x_limits",
             "supplementary-gradient": "x_scale",
             "figure11": "y_scale",
             "figure14": "y_scale",

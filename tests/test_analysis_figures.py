@@ -512,3 +512,78 @@ def test_the_new_figures_render_at_a_subword_vocabulary(tmp_path) -> None:
     for path in written:
         assert path.stat().st_size > 0
         assert path.suffix == ".svg"
+
+
+# -- temperature colour identity ---------------------------------------------
+#
+# Colour is bound to the temperature value rather than to a curve's position in
+# the list. Spreading a colormap across ``len(temperatures)`` gave the same
+# temperature a different colour whenever the number of curves differed -- the
+# six-temperature nucleus sweep of figure 5 against the seven-temperature
+# confidence grid of figures 11 and 14 -- so a reader could not carry a colour
+# from one figure to the next.
+
+
+def _viridis_at(count: int) -> list:
+    """The historical ordinal mapping, recomputed independently of the module."""
+
+    from matplotlib import cm
+
+    return [cm.viridis(value) for value in np.linspace(0.05, 0.92, count)]
+
+
+def test_the_canonical_grid_keeps_the_colours_the_seven_curve_figures_had() -> None:
+    """Figures 11 and 14 must be pixel-identical to their previous rendering."""
+
+    from llm_behavior_lab.analysis.figures import (
+        _CANONICAL_TEMPERATURES,
+        _temperature_colours,
+    )
+
+    assert list(_CANONICAL_TEMPERATURES) == [0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20]
+    assert _temperature_colours(_CANONICAL_TEMPERATURES) == _viridis_at(7)
+
+
+def test_a_shared_temperature_gets_one_colour_whatever_the_curve_count() -> None:
+    """The defect this mapping exists to fix, stated as an equality.
+
+    Figure 5 draws six temperatures and figures 11/14 draw seven. Under the old
+    ordinal mapping only the two endpoints agreed; every interior temperature
+    moved.
+    """
+
+    from llm_behavior_lab.analysis.figures import _temperature_colours
+
+    seven = [0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20]
+    six = [0.12, 0.24, 0.36, 0.48, 0.60, 1.20]
+
+    palette = dict(zip(seven, _temperature_colours(seven)))
+    assert _temperature_colours(six) == [palette[value] for value in six]
+
+    # The old mapping genuinely disagreed, so this test can fail.
+    assert _temperature_colours(six) != _viridis_at(6)
+
+
+def test_a_non_canonical_grid_falls_back_to_the_ordinal_mapping() -> None:
+    """Historical and custom grids keep exactly their previous appearance."""
+
+    from llm_behavior_lab.analysis.figures import _temperature_colours
+
+    for temperatures in ([0.5, 0.9], [0.1, 0.2, 0.3, 0.4], [0.7]):
+        assert _temperature_colours(temperatures) == _viridis_at(len(temperatures))
+
+    # A canonical grid with one extra value is not the canonical grid.
+    extended = [0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20, 1.50]
+    assert _temperature_colours(extended) == _viridis_at(8)
+
+
+def test_a_near_miss_temperature_is_not_snapped_onto_a_canonical_key() -> None:
+    """Lookup is exact: no tolerance contract exists for temperature keys.
+
+    Snapping would silently claim two different temperatures are the same
+    condition, which is a scientific statement a colour helper must not make.
+    """
+
+    from llm_behavior_lab.analysis.figures import _temperature_colours
+
+    assert _temperature_colours([0.1200001, 0.24]) == _viridis_at(2)

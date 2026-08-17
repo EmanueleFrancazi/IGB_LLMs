@@ -38,7 +38,6 @@ from llm_behavior_lab.analysis.aggregation import (
     effective_support,
     ranked_profile_with_error,
     paired_condition_distances,
-    effective_support,
     effective_supports,
     eligible_view,
     mean_with_sem,
@@ -88,6 +87,21 @@ FIGURE_FORMATS = ("svg",)
 #: Above this eligible-support size the figures switch to large-vocabulary
 #: rendering: logarithmic rank axis, plain lines, rasterized scatter.
 LARGE_VOCAB_THRESHOLD = 2000
+
+#: Stable visual identities for the already-established temperature conditions:
+#: private, and a presentation key only.
+#:
+#: This defines **no** temperature grid. ``CONFIDENCE_TEMPERATURES`` and
+#: ``GRADIENT_TEMPERATURES`` in :mod:`llm_behavior_lab.evaluation` remain the
+#: authoritative definitions for what an experiment measures; this tuple only
+#: says which colour each already-measured condition is drawn in, so a reader
+#: can carry a temperature's colour from one figure to the next.
+#:
+#: Deliberately a literal copy rather than an import: the analysis layer stays
+#: free of :mod:`llm_behavior_lab.evaluation`, so a finished record remains
+#: re-analyzable with NumPy and matplotlib alone. A temperature absent from this
+#: tuple simply falls back to the ordinal mapping; it is never rejected.
+_CANONICAL_TEMPERATURES = (0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20)
 
 #: One colour per policy, reused across every figure so curves stay comparable.
 POLICY_STYLES = {
@@ -712,16 +726,63 @@ def _sweep_context(record: Any):
     return summary, list(summary["temperatures"])
 
 
-def _temperature_colours(count: int) -> list:
-    """Perceptually ordered colours so the sweep reads as a progression.
+def _ordinal_temperature_colours(count: int) -> list:
+    """Colours spread by position within ``count`` curves.
 
-    Sequential and colour-blind safe; deliberately not a rainbow, where hue
-    ordering carries no perceptual ordering.
+    The historical mapping, kept as the fallback for any temperature sequence
+    that is not the canonical grid.
     """
 
     from matplotlib import cm
 
     return [cm.viridis(value) for value in np.linspace(0.05, 0.92, count)]
+
+
+def _canonical_temperature_palette() -> dict:
+    """Bind each canonical temperature to a fixed colour.
+
+    Built from ``linspace(0.05, 0.92, 7)`` over the canonical grid, so the seven
+    colours are exactly the ones the ordinal mapping already produced for the
+    seven-temperature figures. Figures 11 and 14 are therefore unchanged.
+    """
+
+    return dict(
+        zip(
+            _CANONICAL_TEMPERATURES,
+            _ordinal_temperature_colours(len(_CANONICAL_TEMPERATURES)),
+        )
+    )
+
+
+def _temperature_colours(temperatures: Sequence[float]) -> list:
+    """Perceptually ordered colours, keyed by temperature *value*.
+
+    Sequential and colour-blind safe; deliberately not a rainbow, where hue
+    ordering carries no perceptual ordering.
+
+    Colour is bound to the temperature itself rather than to its position in the
+    list. Spreading a colormap across ``len(temperatures)`` gives the same
+    temperature a different colour whenever the number of curves differs -- the
+    six-temperature nucleus sweep of figure 5 against the seven-temperature
+    confidence grid of figures 11 and 14 -- so a reader cannot carry a colour
+    from one figure to the next. Keying by value fixes each temperature's
+    identity across the whole family.
+
+    The lookup is **exact**, not tolerant: canonical temperatures reach here as
+    the module constants they were defined as, or as parsed literals of the same
+    values, so they compare equal. A near-miss must fall back visibly rather
+    than be snapped onto a key it does not equal.
+
+    A sequence carrying any non-canonical temperature -- a historical record, or
+    a custom grid -- falls back to the ordinal mapping for that whole sequence,
+    preserving exactly the previous appearance.
+    """
+
+    values = [float(temperature) for temperature in temperatures]
+    palette = _canonical_temperature_palette()
+    if all(value in palette for value in values):
+        return [palette[value] for value in values]
+    return _ordinal_temperature_colours(len(values))
 
 
 def plot_temperature_ranked_profiles(record: Any, directory: str | Path) -> list[Path]:
@@ -750,7 +811,7 @@ def plot_temperature_ranked_profiles(record: Any, directory: str | Path) -> list
     )
     sweep = eligible_view(record, _sweep_fractions(record, "real"))
     for index, (temperature, colour) in enumerate(
-        zip(temperatures, _temperature_colours(len(temperatures)))
+        zip(temperatures, _temperature_colours(temperatures))
     ):
         profile = ranked_profile_with_error(sweep[:, index, :])
         axes.plot(
@@ -1206,8 +1267,8 @@ def plot_gradient_vs_guess_bias(
 
     if not record.has_position_gradients:
         raise ValueError(
-            "This record carries no per-position gradient analysis, so figure 8 "
-            "has nothing to draw."
+            "This record carries no per-position gradient analysis, so the "
+            "supplementary T = 1 gradient scatter has nothing to draw."
         )
     if x_scale not in ("auto", "log", "linear"):
         raise ValueError(f"x_scale must be 'auto', 'log', or 'linear'; got {x_scale!r}.")
@@ -1373,14 +1434,6 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     return written
 
 
-def _temperature_colours(count: int) -> list:
-    """Cool-to-warm ordering so a sharpening sequence reads as a sequence."""
-
-    import matplotlib.cm as cm
-
-    return [cm.viridis(value) for value in np.linspace(0.05, 0.92, count)]
-
-
 def plot_temperature_ranked_predictive_probabilities(
     record: Any,
     directory: str | Path,
@@ -1419,7 +1472,7 @@ def plot_temperature_ranked_predictive_probabilities(
     ranks = profiles["ranks"]
     uniform = record.uniform_probability
     large = _is_large(record)
-    colours = _temperature_colours(len(temperatures))
+    colours = _temperature_colours(temperatures)
 
     figure = _new_figure(width=8.5, height=5.8)
     axes = figure.subplots()
@@ -1490,10 +1543,12 @@ def plot_temperature_max_predictive_probability(
 ) -> list[Path]:
     """Figure 12 -- the greedy winner's confidence, one ECDF panel per temperature.
 
-    The same representation as figure 9, repeated across the six sweep
-    temperatures so the panels are directly comparable, with the canonical
-    ``T = 1`` median marked in each as a fixed reference. Axis limits are shared
-    across panels, so apparent sharpening is the data rather than a rescaling.
+    The same representation as figure 9, repeated across the six non-canonical
+    confidence-grid temperatures so the panels are directly comparable. These
+    come from the temperature-confidence grid, not from the nucleus sweep:
+    nothing here is sampled or truncated. The canonical ``T = 1`` median is
+    marked in each panel as a fixed reference. Axis limits are shared across
+    panels, so apparent sharpening is the data rather than a rescaling.
 
     Kept as an ECDF: the question is "how large is the greedy winner's
     probability at a typical position", which is a quantile question.
@@ -1977,7 +2032,7 @@ def plot_ranked_mean_token_probabilities(
     ranks = profile["ranks"]
     uniform = record.uniform_probability
     large = _is_large(record)
-    colours = _temperature_colours(len(temperatures))
+    colours = _temperature_colours(temperatures)
 
     figure = _new_figure(width=8.5, height=5.8)
     axes = figure.subplots()
