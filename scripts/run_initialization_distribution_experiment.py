@@ -73,6 +73,7 @@ from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     measure_initialization,
 )
 from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    DEFAULT_SKETCH_DIMENSION,
     compute_position_gradient_norms,
 )
 from llm_behavior_lab.experiment import ExperimentRun, experiment_settings_from_config  # noqa: E402
@@ -227,6 +228,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--gradient-sketch",
+        action="store_true",
+        help=(
+            "Also record a deterministic count sketch of every position's T = 1 "
+            "gradient, so directional clustering by token subgroup can be "
+            "measured afterwards. Adds no backward pass; persists one compact "
+            "vector per position (about 67 MB at D = 32768, K = 512)."
+        ),
+    )
+    parser.add_argument(
+        "--sketch-dimension",
+        type=int,
+        default=DEFAULT_SKETCH_DIMENSION,
+        metavar="K",
+        help="Width of that sketch.",
+    )
+    parser.add_argument(
         "--gradient-windows",
         type=int,
         default=None,
@@ -374,6 +392,14 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         # attribute is read defensively, the same way initialization_scale is.
         # Reaching for it directly turns every older caller into an
         # AttributeError that has nothing to do with what it was doing.
+        "gradient_sketch": (
+            bool(gradients.get("sketch", False))
+            or bool(getattr(args, "gradient_sketch", False))
+        ),
+        "sketch_dimension": int(
+            getattr(args, "sketch_dimension", None)
+            or gradients.get("sketch_dimension", DEFAULT_SKETCH_DIMENSION)
+        ),
         "gradient_vector_split": (
             bool(gradients.get("vector_split", False))
             or bool(getattr(args, "gradient_vector_split", False))
@@ -654,6 +680,8 @@ def main() -> None:
                 eligible_token_ids=eligible_token_ids,
                 num_windows=protocol["gradient_num_windows"],
                 vector_split=protocol["gradient_vector_split"],
+                gradient_sketch=protocol["gradient_sketch"],
+                sketch_dimension=protocol["sketch_dimension"],
             )
             if gradient_result.vector_split is not None:
                 split = gradient_result.vector_split
@@ -919,6 +947,11 @@ def main() -> None:
             None
             if gradient_result is None
             else gradient_result.temperature_gradient_norms.numpy()
+        ),
+        gradient_position_sketches=(
+            None
+            if gradient_result is None or gradient_result.gradient_sketches is None
+            else gradient_result.gradient_sketches.numpy()
         ),
         uniform_null=(
             {}

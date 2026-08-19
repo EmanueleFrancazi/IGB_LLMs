@@ -43,7 +43,7 @@ __all__ = [
 #: exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 9
+RECORD_VERSION = 10
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -151,6 +151,19 @@ _GRADIENT_TEMPERATURE_ARRAY_NAMES = (
 #: against roughly 50 GiB for the full ``[I, N_T, D, V]`` tensor, which is never
 #: formed.
 _MEAN_TOKEN_ARRAY_NAME = "predictive_temperature_mean_token_probabilities"
+
+#: Version 10 addition: ``[D_g, K]`` count sketch of every evaluated position's
+#: canonical-temperature parameter gradient.
+#:
+#: Direction only is the question, so a projection that preserves inner products
+#: is enough and the exact ``[D_g, P]`` matrix -- about 1.1 PB at experiment
+#: scale -- is never formed. About 67 MB at ``D_g = 32768, K = 512`` in float32,
+#: which is why it is stored at that precision: the count sketch's own
+#: ``1/sqrt(K)`` error dominates float32 rounding by orders of magnitude.
+#:
+#: Optional, like every array added since version 5: a record written without it
+#: stays valid and every figure that does not need it still renders.
+_GRADIENT_SKETCH_ARRAY_NAME = "gradient_position_sketches"
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -274,6 +287,7 @@ class InitializationExperimentRecord:
     predictive_target_losses: np.ndarray | None = None
     #: ``[I, N_T, V]`` mean probability at fixed token identity (figure 14).
     predictive_temperature_mean_token_probabilities: np.ndarray | None = None
+    gradient_position_sketches: np.ndarray | None = None
     #: ``[N_T]`` temperatures at which the loss itself was defined.
     gradient_temperatures: np.ndarray | None = None
     #: ``[N_T, D_g]`` exact full-parameter gradient norm at each temperature.
@@ -698,6 +712,7 @@ class InitializationExperimentRecord:
 
         self._validate_position_gradients(vocab_size, num_inits)
         self._validate_predictive_probabilities(num_inits)
+        self._validate_gradient_sketches()
         self._validate_temperature_confidence(num_inits)
         self._validate_temperature_gradients()
         self._validate_mean_token_probabilities(num_inits, vocab_size)
@@ -765,6 +780,27 @@ class InitializationExperimentRecord:
                 f"gradient_analysis.initialization_index {recorded} is outside the "
                 f"{num_inits} recorded initializations."
             )
+
+    def _validate_gradient_sketches(self) -> None:
+        """The sketch must describe exactly the gradient-evaluated positions."""
+
+        if self.gradient_position_sketches is None:
+            return
+        if self.gradient_position_norms is None:
+            raise ValueError(
+                "gradient_position_sketches was given without the per-position "
+                "gradient analysis it projects."
+            )
+        sketches = np.asarray(self.gradient_position_sketches)
+        if sketches.ndim != 2:
+            raise ValueError("gradient_position_sketches must be [positions, K].")
+        if sketches.shape[0] != int(self.gradient_position_norms.shape[0]):
+            raise ValueError(
+                "gradient_position_sketches must have one row per gradient-"
+                "evaluated position."
+            )
+        if not np.all(np.isfinite(sketches)):
+            raise ValueError("gradient_position_sketches must be finite.")
 
     def _validate_predictive_probabilities(self, num_inits: int) -> None:
         """Check the optional raw-predictive-probability statistics.
@@ -1100,7 +1136,7 @@ class InitializationExperimentRecord:
             + _PROBABILITY_ARRAY_NAMES
             + _TEMPERATURE_ARRAY_NAMES
             + _GRADIENT_TEMPERATURE_ARRAY_NAMES
-            + (_MEAN_TOKEN_ARRAY_NAME,)
+            + (_MEAN_TOKEN_ARRAY_NAME, _GRADIENT_SKETCH_ARRAY_NAME)
         ):
             values = getattr(self, optional_name)
             if values is not None:
@@ -1152,7 +1188,7 @@ class InitializationExperimentRecord:
                 + _PROBABILITY_ARRAY_NAMES
                 + _TEMPERATURE_ARRAY_NAMES
                 + _GRADIENT_TEMPERATURE_ARRAY_NAMES
-                + (_MEAN_TOKEN_ARRAY_NAME,)
+                + (_MEAN_TOKEN_ARRAY_NAME, _GRADIENT_SKETCH_ARRAY_NAME)
             )
             if name in arrays
         }
@@ -1203,6 +1239,7 @@ class InitializationExperimentRecord:
         gradient_temperatures: np.ndarray | None = None,
         gradient_temperature_position_norms: np.ndarray | None = None,
         predictive_temperature_mean_token_probabilities: np.ndarray | None = None,
+        gradient_position_sketches: np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -1278,6 +1315,9 @@ class InitializationExperimentRecord:
             gradient_temperatures=_optional_array(gradient_temperatures, np.float64),
             gradient_temperature_position_norms=_optional_array(
                 gradient_temperature_position_norms, np.float64
+            ),
+            gradient_position_sketches=_optional_array(
+                gradient_position_sketches, np.float32
             ),
             predictive_temperature_mean_token_probabilities=_optional_array(
                 predictive_temperature_mean_token_probabilities, np.float64

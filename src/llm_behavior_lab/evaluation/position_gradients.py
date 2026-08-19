@@ -61,6 +61,7 @@ __all__ = [
     "GRADIENT_DEFINITION",
     "GRADIENT_TEMPERATURES",
     "PositionGradientResult",
+    "DEFAULT_SKETCH_DIMENSION",
     "compute_position_gradient_norms",
     "evenly_spaced_indices",
     "masked_evaluation_logits",
@@ -91,6 +92,13 @@ GRADIENT_TEMPERATURES = (0.12, 0.24, 0.36, 0.48, 0.60, 1.00, 1.20)
 
 #: The canonical baseline inside that grid.
 CANONICAL_GRADIENT_TEMPERATURE = 1.00
+
+#: Width of the per-position gradient sketch. 512 buckets keep the persisted
+#: array to about 67 MB at D = 32768 in float32, and a count sketch preserves
+#: inner products with a relative error of order ``1/sqrt(K)`` -- roughly 4% here
+#: -- which is fine for comparing group means but not for trusting any single
+#: pairwise cosine. Validated rather than assumed: see the sketch tests.
+DEFAULT_SKETCH_DIMENSION = 512
 
 
 @dataclass(frozen=True)
@@ -130,6 +138,11 @@ class PositionGradientResult:
     #: Scalars of the canonical-temperature correct-vs-wrong vector split, or
     #: ``None`` when the diagnostic was not requested.
     vector_split: dict[str, Any] | None = None
+    #: ``[D_g, K]`` count sketch of each position's canonical gradient, or
+    #: ``None`` when sketching was not requested.
+    gradient_sketches: torch.Tensor | None = None
+    #: Provenance of that projection, or ``None``.
+    sketch_protocol: dict[str, Any] | None = None
 
     @property
     def canonical_index(self) -> int:
@@ -165,8 +178,79 @@ class PositionGradientResult:
         }
         if self.vector_split is not None:
             payload["vector_split"] = dict(self.vector_split)
+        if self.sketch_protocol is not None:
+            payload["gradient_sketch"] = dict(self.sketch_protocol)
         payload.update(extra)
         return payload
+
+
+class _GradientSketcher:
+    """Deterministic count sketch of a full parameter gradient.
+
+    The whole point is that ``g_d`` cannot be kept. At 8.6M parameters and 32768
+    positions the exact matrix is about 1.1 PB, so directional structure has to
+    be measured through a projection that is cheap to apply and preserves the
+    only thing being asked about: inner products between gradients.
+
+    A count sketch does exactly that. Every parameter coordinate is assigned,
+    once, a bucket ``h(i) in [0, K)`` and a sign ``s(i) in {-1, +1}``, and the
+    sketch is ``sketch[h(i)] += s(i) * g[i]``. The signs make the estimator
+    unbiased: for any two gradients ``E<sketch(a), sketch(b)> = <a, b>``, with a
+    variance that falls as ``1/K``. Cosines computed from sketches are therefore
+    unbiased in the inner product and accurate enough for class-level means,
+    which is what the clustering analysis consumes.
+
+    Why not a dense Gaussian projection: it would need a ``[P, K]`` matrix, about
+    17 GB at ``P = 8.6M, K = 512``. The sketch needs two ``[P]`` tables instead
+    and applies in one scatter-add.
+
+    Determinism is structural. Buckets and signs come from a
+    :class:`torch.Generator` seeded once from ``seed``, drawn per parameter
+    tensor in a fixed order, and never touched again -- so two runs of the same
+    experiment produce bitwise the same projection. It draws from its own
+    generator and never from the global RNG, so enabling the sketch cannot shift
+    any sampling stream in the experiment around it.
+    """
+
+    def __init__(
+        self,
+        parameters: Sequence[torch.Tensor],
+        *,
+        dimension: int = DEFAULT_SKETCH_DIMENSION,
+        seed: int = 20240917,
+    ) -> None:
+        if dimension < 1:
+            raise ValueError(f"sketch dimension must be positive; got {dimension}.")
+        self.dimension = int(dimension)
+        self.seed = int(seed)
+        self.buckets: list[torch.Tensor] = []
+        self.signs: list[torch.Tensor] = []
+        for index, parameter in enumerate(parameters):
+            # One generator per tensor, seeded from the run seed and the tensor's
+            # position, so the tables do not depend on how many tensors precede
+            # it and stay stable if an unrelated buffer is ever added.
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(self.seed + 1000003 * index)
+            count = parameter.numel()
+            self.buckets.append(
+                torch.randint(
+                    0, self.dimension, (count,), generator=generator, dtype=torch.long
+                ).to(parameter.device)
+            )
+            signs = torch.randint(
+                0, 2, (count,), generator=generator, dtype=torch.int8
+            ).to(parameter.device)
+            self.signs.append(signs.double() * 2.0 - 1.0)
+
+    def project(self, grads: Sequence[torch.Tensor]) -> torch.Tensor:
+        """Sketch one gradient set into a ``[dimension]`` float64 vector."""
+
+        sketch = torch.zeros(
+            self.dimension, dtype=torch.float64, device=self.signs[0].device
+        )
+        for gradient, bucket, sign in zip(grads, self.buckets, self.signs):
+            sketch.index_add_(0, bucket, gradient.detach().double().reshape(-1) * sign)
+        return sketch
 
 
 class _VectorSplitAccumulator:
@@ -427,6 +511,9 @@ def compute_position_gradient_norms(
     num_windows: int | None = None,
     temperatures: Sequence[float] = GRADIENT_TEMPERATURES,
     vector_split: bool = False,
+    gradient_sketch: bool = False,
+    sketch_dimension: int = DEFAULT_SKETCH_DIMENSION,
+    sketch_seed: int = 20240917,
     progress: Callable[[int, int], None] | None = None,
 ) -> PositionGradientResult:
     """Measure ``g_d`` exactly, one evaluation position at a time.
@@ -454,6 +541,13 @@ def compute_position_gradient_norms(
             it reuses each gradient set already computed for the norm -- but
             holds two float64 parameter-shaped buffers, about 131 MiB at 8.6M
             parameters.
+        gradient_sketch: Also record a deterministic count sketch of every
+            position's canonical gradient, so directional structure can be
+            measured afterwards. Off by default. Adds no backward pass.
+        sketch_dimension: Width ``K`` of that sketch.
+        sketch_seed: Seed of the projection. Fixed across runs so two
+            experiments produce comparable sketches; drawn from its own
+            generator, never the global RNG.
         progress: Optional ``callback(windows_done, windows_total)``.
 
     Returns:
@@ -505,6 +599,16 @@ def compute_position_gradient_norms(
     gradient_norms = torch.empty((len(grid), total_positions), dtype=torch.float64)
     losses = torch.empty((len(grid), total_positions), dtype=torch.float64)
     split = _VectorSplitAccumulator(parameters) if vector_split else None
+    sketcher = (
+        _GradientSketcher(parameters, dimension=sketch_dimension, seed=sketch_seed)
+        if gradient_sketch
+        else None
+    )
+    sketches = (
+        torch.empty((total_positions, sketch_dimension), dtype=torch.float64)
+        if gradient_sketch
+        else None
+    )
     canonical_temperature_index = grid.index(CANONICAL_GRADIENT_TEMPERATURE)
 
     was_training = model.training
@@ -563,6 +667,10 @@ def compute_position_gradient_norms(
 
                     gradient_norms[index, cursor] = squared.sqrt().cpu()
                     losses[index, cursor] = loss.detach().double().cpu()
+                    if sketcher is not None and index == canonical_temperature_index:
+                        # Same gradient set the norm came from; no second
+                        # backward pass and nothing full-sized is retained.
+                        sketches[cursor] = sketcher.project(grads).cpu()
                     if split is not None and index == canonical_temperature_index:
                         # The same gradient set the norm was taken from, before
                         # it is released. No second backward pass.
@@ -593,6 +701,19 @@ def compute_position_gradient_norms(
         gradient_norms=gradient_norms[canonical],
         losses=losses[canonical],
         vector_split=None if split is None else split.summary(),
+        gradient_sketches=sketches,
+        sketch_protocol=(
+            None
+            if sketcher is None
+            else {
+                "dimension": sketcher.dimension,
+                "seed": sketcher.seed,
+                "temperature": CANONICAL_GRADIENT_TEMPERATURE,
+                "projection": "count_sketch_signed_feature_hashing",
+                "preserves": "inner_products_in_expectation",
+                "parameter_count": sum(p.numel() for p in parameters),
+            }
+        ),
         parameter_count=sum(parameter.numel() for parameter in parameters),
         num_parameter_tensors=len(parameters),
         num_windows=len(window_indices),
