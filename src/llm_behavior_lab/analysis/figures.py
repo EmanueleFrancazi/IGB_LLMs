@@ -2758,3 +2758,207 @@ def plot_initial_logit_correction(record: Any, directory: str | Path) -> list[Pa
                 ha="center", fontsize=7.5, color="#444444")
     figure.subplots_adjust(wspace=0.28, top=0.80)
     return save_figure(figure, directory, "figure19_initial_logit_correction")
+
+
+def plot_gradient_directional_clustering(
+    record: Any,
+    directory: str | Path,
+    *,
+    display_classes: int = 40,
+    min_support: int = 2,
+) -> list[Path]:
+    """Figure 20 -- do gradients cluster by token subgroup?
+
+    The heatmap is the figure. Cell ``(i, j)`` is the mean cosine between the
+    gradients of class ``i`` and class ``j``, and the **diagonal is a
+    measurement**: the mean cosine over distinct pairs *within* a class, not the
+    trivial 1 a self-similarity convention would put there. Clustering, if it
+    exists, is a visibly warmer diagonal against a near-zero field.
+
+    The colormap diverges about zero because the sign is the finding. Cosines
+    near zero mean gradients are near-orthogonal -- the default expectation in
+    high dimension -- while systematic negative values would mean subgroups
+    actively oppose one another, which is a different claim from "no structure"
+    and must not be allowed to look like it.
+
+    Only the most frequent classes are drawn, deterministically and with the
+    count stated. That is a readability limit on the *display*: the analysis
+    itself runs over every class meeting ``min_support``, and the summary panel
+    reports those pooled numbers rather than the drawn subset's.
+
+    The design is deliberately not initialization-specific. At initialization
+    almost every position is a failure and the greedy grouping may be nearly
+    degenerate; the same three panels become more informative as training
+    separates the subgroups, which is what this diagnostic is for.
+    """
+
+    from llm_behavior_lab.analysis.gradient_clustering import gradient_clustering
+
+    target = gradient_clustering(
+        record, grouping="target", min_support=min_support, max_classes=display_classes
+    )
+    greedy = gradient_clustering(
+        record, grouping="greedy", min_support=min_support, max_classes=display_classes
+    )
+
+    figure = _new_figure(width=14.0, height=5.2)
+    grid = figure.add_gridspec(1, 3, width_ratios=[1.25, 1.0, 1.0], wspace=0.45)
+    heat, bars, coherence = (figure.add_subplot(grid[0, index]) for index in range(3))
+
+    matrix = target["matrix"]
+    finite = matrix[np.isfinite(matrix)]
+    extent = float(np.abs(finite).max()) if finite.size else 1.0
+    image = heat.imshow(
+        matrix, cmap="RdBu_r", vmin=-extent, vmax=extent, interpolation="nearest"
+    )
+    heat.set_title(
+        f"(a) mean cosine, target grouping\n{target['classes'].size} most frequent classes",
+        fontsize=10,
+    )
+    heat.set_xlabel("token class")
+    heat.set_ylabel("token class")
+    heat.tick_params(labelsize=6)
+    # Token strings would be unreadable at this count; ranks are honest labels.
+    step = max(1, target["classes"].size // 8)
+    ticks = np.arange(0, target["classes"].size, step)
+    heat.set_xticks(ticks)
+    heat.set_yticks(ticks)
+    heat.set_xticklabels([str(int(target["classes"][i])) for i in ticks], rotation=90)
+    heat.set_yticklabels([str(int(target["classes"][i])) for i in ticks])
+    colourbar = figure.colorbar(image, ax=heat, fraction=0.046, pad=0.03)
+    colourbar.set_label("mean cosine similarity", fontsize=8)
+    colourbar.ax.tick_params(labelsize=7)
+
+    labels = ["target\nwithin", "target\nbetween", "greedy\nwithin", "greedy\nbetween",
+              "permuted\nwithin", "permuted\nbetween"]
+    values = [
+        target["observed"]["within"], target["observed"]["between"],
+        greedy["observed"]["within"], greedy["observed"]["between"],
+        target["permuted"]["within"], target["permuted"]["between"],
+    ]
+    colours = ["#1f77b4", "#aec7e8", "#2ca02c", "#98df8a", "#7f7f7f", "#c7c7c7"]
+    bars.bar(range(len(values)), values, color=colours)
+    bars.axhline(0.0, color="#333333", linewidth=0.8)
+    bars.set_xticks(range(len(values)))
+    bars.set_xticklabels(labels, fontsize=6.5, rotation=30, ha="right")
+    bars.set_ylabel("mean cosine similarity")
+    bars.set_title("(b) within vs between, with a label-permutation null", fontsize=10)
+    bars.grid(True, axis="y", alpha=0.20)
+    bars.text(
+        0.02, 0.97,
+        f"delta target   = {target['observed']['delta']:+.5f}\n"
+        f"delta greedy   = {greedy['observed']['delta']:+.5f}\n"
+        f"delta permuted = {target['permuted']['delta']:+.5f}",
+        transform=bars.transAxes, fontsize=7.5, va="top", ha="left",
+        bbox=_ANNOTATION_BOX, family="monospace",
+    )
+
+    within = target["within_by_class"]
+    measurable = np.isfinite(within)
+    coherence.scatter(
+        target["counts"][measurable], within[measurable],
+        s=8, alpha=0.5, color="#1f77b4", edgecolors="none", rasterized=True,
+    )
+    coherence.axhline(
+        target["observed"]["between"], color="#d62728", linewidth=1.0, linestyle="--",
+        label="pooled between-class",
+    )
+    coherence.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":")
+    coherence.set_xscale("log")
+    coherence.set_xlabel("class support  n(i)   [log]")
+    coherence.set_ylabel("within-class mean cosine")
+    coherence.set_title("(c) per-token coherence vs support", fontsize=10)
+    coherence.legend(loc="upper right", fontsize=7.5, frameon=True)
+    coherence.grid(True, which="both", alpha=0.20)
+
+    figure.suptitle(
+        "Directional clustering of per-position gradients (T = 1, sketch "
+        f"K = {target['sketch_dimension']})",
+        fontsize=12,
+    )
+    figure.text(
+        0.5, 0.925,
+        f"analysis over all classes with n >= {min_support}: "
+        f"{target['observed']['num_classes']:,} target, "
+        f"{greedy['observed']['num_classes']:,} greedy   |   "
+        f"diagonal is within-class over DISTINCT pairs, not self-similarity   |   "
+        "cosines are sketch estimates: reliable pooled, noisy per pair",
+        ha="center", fontsize=7.5, color="#444444",
+    )
+    figure.subplots_adjust(top=0.82)
+    return save_figure(figure, directory, "figure20_gradient_directional_clustering")
+
+
+def plot_correction_provenance(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 21 -- where does the corrective signal come from?
+
+    Figure 19 already relates ``A`` to ``S``, shows the suppression side's
+    provenance through ``S_FP / S``, and plots the net correction. What it never
+    shows is the **target side**: ``A = A_TP + A_FN`` is computed and then only
+    reported numerically. That is the gap this fills, and it is the reason this
+    is one figure rather than a dashboard.
+
+    Panel (a) is the provenance itself. Panel (b) puts the two sides beside each
+    other, so the question "is the correction driven by missed targets or by
+    false-positive wins" is answered on one axis pair.
+
+    At initialization ``A_FN / A`` is close to 1 almost everywhere, because
+    almost nothing is correct. That is not a defect of the figure: it is the
+    measurement, and the same panels become informative as ``TP`` grows during
+    training.
+    """
+
+    from llm_behavior_lab.analysis.initial_gradients import (
+        class_frequency_table,
+        logit_correction,
+    )
+
+    freq = class_frequency_table(record, 1.0)
+    logit = logit_correction(record, 1.0)
+    support = freq["target_count"]
+
+    figure = _new_figure(width=11.0, height=4.6)
+    panels = figure.subplots(1, 2)
+
+    a = panels[0]
+    represented = support > 0
+    _initial_scatter(
+        a, freq["soft_bias"][represented],
+        logit["failed_attraction_fraction"][represented], size_by=support[represented],
+    )
+    _symlog_x(a, freq["soft_bias"][represented])
+    a.axhline(1.0, color="#d62728", linewidth=0.9, linestyle="--",
+              label="all attraction from missed targets")
+    a.set_ylim(-0.02, 1.05)
+    a.set_xlabel("soft bias  b_soft(i) = pbar(i) - f(i)   [symlog]")
+    a.set_ylabel("A_FN(i) / A(i)")
+    a.set_title("(a) target-side provenance: attraction from failures", fontsize=10)
+    a.legend(loc="lower left", fontsize=7.5, frameon=True)
+
+    b = panels[1]
+    both = represented & (freq["guess_count"] > 0)
+    _initial_scatter(
+        b, logit["failed_attraction_fraction"][both],
+        logit["false_positive_suppression_fraction"][both], size_by=support[both],
+    )
+    b.set_xlabel("A_FN(i) / A(i)   target side")
+    b.set_ylabel("S_FP(i) / S(i)   suppression side")
+    b.set_title("(b) the two provenances against each other", fontsize=10)
+
+    for axes in panels:
+        axes.grid(True, which="both", alpha=0.20)
+        axes.tick_params(labelsize=8)
+
+    total_attraction = float(logit["attraction"].sum())
+    figure.suptitle(
+        "Provenance of the initial cross-entropy correction (T = 1)", fontsize=12
+    )
+    figure.text(
+        0.5, 0.90,
+        f"A = A_TP + A_FN with A_TP / A = "
+        f"{float(logit['attraction_true_positive'].sum()) / total_attraction:.6f}   |   "
+        "TP/FN partitions positions by target; FP/other is a non-target view",
+        ha="center", fontsize=7.5, color="#444444",
+    )
+    figure.subplots_adjust(top=0.80, wspace=0.26)
+    return save_figure(figure, directory, "figure21_correction_provenance")
