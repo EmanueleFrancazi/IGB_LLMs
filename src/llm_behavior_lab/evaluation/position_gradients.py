@@ -28,7 +28,7 @@ Two properties make the measurement affordable and safe.
 its own window, so one forward pass per window serves every position in that
 window; the graph is retained and re-differentiated once per position. Nothing
 shaped ``[num_positions, num_parameters]`` is ever materialized -- at ``D=32768``
-over 8.6M parameters that would be about 1.1 PB. Live at any instant are one
+over 8.6M parameters that would be about 1.1 TB in float32. Live at any instant are one
 window's graph and one gradient set; only ``[D_g]``-sized vectors survive.
 
 *Safe*: gradients are taken with :func:`torch.autograd.grad`, which returns them
@@ -98,6 +98,12 @@ CANONICAL_GRADIENT_TEMPERATURE = 1.00
 #: inner products with a relative error of order ``1/sqrt(K)`` -- roughly 4% here
 #: -- which is fine for comparing group means but not for trusting any single
 #: pairwise cosine. Validated rather than assumed: see the sketch tests.
+#:
+#: Runtime cost is **not yet measured**. Each position adds one scatter-add over
+#: every parameter on top of a backward pass that already dominates it, so the
+#: overhead is expected to be small relative to the roughly 2027 s the gradient
+#: analysis took at D = 32768 -- but that expectation stands until the matched
+#: baseline and sketch smokes are timed on the cluster.
 DEFAULT_SKETCH_DIMENSION = 512
 
 
@@ -188,7 +194,7 @@ class _GradientSketcher:
     """Deterministic count sketch of a full parameter gradient.
 
     The whole point is that ``g_d`` cannot be kept. At 8.6M parameters and 32768
-    positions the exact matrix is about 1.1 PB, so directional structure has to
+    positions the exact matrix is about 1.1 TB in float32, so directional structure has to
     be measured through a projection that is cheap to apply and preserves the
     only thing being asked about: inner products between gradients.
 
@@ -595,7 +601,7 @@ def compute_position_gradient_norms(
     greedy_ids = torch.empty(total_positions, dtype=torch.long)
     # [N_T, D_g] scalars only. A [D_g, N_T, parameters] tensor is never formed:
     # at 32768 positions, 7 temperatures and 8.6M parameters that would be about
-    # 7.9 PB. One gradient set exists at a time and is reduced to a scalar.
+    # 7.9 TB in float32. One gradient set exists at a time and is reduced to a scalar.
     gradient_norms = torch.empty((len(grid), total_positions), dtype=torch.float64)
     losses = torch.empty((len(grid), total_positions), dtype=torch.float64)
     split = _VectorSplitAccumulator(parameters) if vector_split else None

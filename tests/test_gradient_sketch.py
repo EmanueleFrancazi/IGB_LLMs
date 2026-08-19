@@ -281,3 +281,55 @@ def test_clustering_recovers_planted_structure_from_real_gradients() -> None:
     # Within-class must exceed between-class for both classes.
     assert matrix[0, 0] > matrix[0, 1]
     assert matrix[1, 1] > matrix[0, 1]
+
+
+def test_sketched_aggregates_match_the_exact_vector_split() -> None:
+    """Cross-check the sketch against the exact correct/wrong aggregate vectors.
+
+    The vector-split diagnostic already computes ``||g_correct||``,
+    ``||g_wrong||``, ``||g_correct + g_wrong||``, their dot product and cosine
+    from the true gradients. Summing the *sketches* over the same two groups must
+    reproduce all five within the projection's error, which is the most direct
+    evidence available that the sketch carries the geometry it claims to.
+
+    The sketch is linear, so ``sum_d sketch(g_d) = sketch(sum_d g_d)``: the
+    comparison is between one sketch of an aggregate and that aggregate's exact
+    norm, and its error scale is the usual ``1/sqrt(K)``.
+    """
+
+    import numpy as np
+
+    model = TinyModel()
+    positions = _positions()
+
+    result = compute_position_gradient_norms(
+        model, positions, vocab_size=VOCAB,
+        gradient_sketch=True, sketch_dimension=2048, vector_split=True,
+    )
+    exact = result.vector_split
+    assert exact is not None
+
+    # Sketches are stored scaled by nothing; rebuild the group aggregates.
+    sketches = result.gradient_sketches.double().numpy()
+    correct = np.asarray(result.greedy_ids) == np.asarray(result.target_ids)
+    left = sketches[correct].sum(axis=0)
+    right = sketches[~correct].sum(axis=0)
+
+    estimates = {
+        "norm_correct": float(np.linalg.norm(left)),
+        "norm_wrong": float(np.linalg.norm(right)),
+        "norm_total": float(np.linalg.norm(left + right)),
+        "dot": float(left @ right),
+    }
+    scale = max(estimates["norm_correct"], estimates["norm_wrong"], 1e-30)
+    for key in ("norm_correct", "norm_wrong", "norm_total"):
+        relative = abs(estimates[key] - exact[key]) / max(abs(exact[key]), 1e-30)
+        assert relative < 0.15, (key, estimates[key], exact[key])
+    # The dot product is the noisiest of the five; compare on the norm scale.
+    assert abs(estimates["dot"] - exact["dot"]) / (scale ** 2) < 0.15
+
+    if exact["cosine"] is not None:
+        estimated_cosine = estimates["dot"] / (
+            estimates["norm_correct"] * estimates["norm_wrong"]
+        )
+        assert abs(estimated_cosine - exact["cosine"]) < 0.15

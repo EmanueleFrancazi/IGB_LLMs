@@ -2829,27 +2829,39 @@ def plot_gradient_directional_clustering(
     colourbar.set_label("mean cosine similarity", fontsize=8)
     colourbar.ax.tick_params(labelsize=7)
 
-    labels = ["target\nwithin", "target\nbetween", "greedy\nwithin", "greedy\nbetween",
-              "permuted\nwithin", "permuted\nbetween"]
-    values = [
-        target["observed"]["within"], target["observed"]["between"],
-        greedy["observed"]["within"], greedy["observed"]["between"],
-        target["permuted"]["within"], target["permuted"]["between"],
-    ]
-    colours = ["#1f77b4", "#aec7e8", "#2ca02c", "#98df8a", "#7f7f7f", "#c7c7c7"]
-    bars.bar(range(len(values)), values, color=colours)
+    # The observed delta of each grouping against its own permutation null, drawn
+    # as an interval rather than a single shuffled value: one permutation says
+    # nothing about how much a delta of this size varies by chance.
+    entries = [("target", target, "#1f77b4"), ("greedy", greedy, "#2ca02c")]
+    for index, (name, result, colour) in enumerate(entries):
+        null = result["null"]
+        bars.bar(index, result["observed"]["delta"], width=0.55, color=colour,
+                 label="observed delta" if index == 0 else None)
+        bars.errorbar(
+            index, null["delta_mean"],
+            yerr=[[null["delta_mean"] - null["delta_low"]],
+                  [null["delta_high"] - null["delta_mean"]]],
+            fmt="o", color="#333333", markersize=4, capsize=5, linewidth=1.2,
+            label="permutation null, 2.5-97.5%" if index == 0 else None,
+        )
     bars.axhline(0.0, color="#333333", linewidth=0.8)
-    bars.set_xticks(range(len(values)))
-    bars.set_xticklabels(labels, fontsize=6.5, rotation=30, ha="right")
-    bars.set_ylabel("mean cosine similarity")
-    bars.set_title("(b) within vs between, with a label-permutation null", fontsize=10)
+    bars.set_xticks(range(len(entries)))
+    bars.set_xticklabels([name for name, _, _ in entries], fontsize=9)
+    bars.set_ylabel("delta = within - between")
+    bars.set_title("(b) clustering effect against its permutation null", fontsize=10)
     bars.grid(True, axis="y", alpha=0.20)
+    bars.legend(loc="upper right", fontsize=7, frameon=True)
+    lines = []
+    for name, result, _ in entries:
+        null = result["null"]
+        lines.append(
+            f"{name:<7}obs {result['observed']['delta']:+.5f}  "
+            f"null {null['delta_mean']:+.5f} "
+            f"[{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
+        )
     bars.text(
-        0.02, 0.97,
-        f"delta target   = {target['observed']['delta']:+.5f}\n"
-        f"delta greedy   = {greedy['observed']['delta']:+.5f}\n"
-        f"delta permuted = {target['permuted']['delta']:+.5f}",
-        transform=bars.transAxes, fontsize=7.5, va="top", ha="left",
+        0.02, 0.02, "\n".join(lines) + f"\nM = {target['null']['permutations']}",
+        transform=bars.transAxes, fontsize=6.5, va="bottom", ha="left",
         bbox=_ANNOTATION_BOX, family="monospace",
     )
 

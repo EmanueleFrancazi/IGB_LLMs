@@ -39,7 +39,12 @@ def _unit(rows: np.ndarray) -> np.ndarray:
     return rows / np.linalg.norm(rows, axis=1, keepdims=True)
 
 
-def _record(sketches: np.ndarray, targets: np.ndarray, greedy: np.ndarray):
+def _record(
+    sketches: np.ndarray,
+    targets: np.ndarray,
+    greedy: np.ndarray,
+    norms: np.ndarray | None = None,
+):
     """A record carrying gradient sketches and the two label vectors."""
 
     positions = targets.size
@@ -69,7 +74,11 @@ def _record(sketches: np.ndarray, targets: np.ndarray, greedy: np.ndarray):
         gradient_position_indices=np.arange(positions),
         gradient_position_target_ids=targets,
         gradient_position_greedy_ids=greedy,
-        gradient_position_norms=np.ones(positions),
+        # The exact norms are the divisor. Unit norms make u_d equal the
+        # sketch, which keeps the planted geometry easy to reason about.
+        gradient_position_norms=(
+            np.ones(positions) if norms is None else np.asarray(norms, dtype=float)
+        ),
         gradient_position_sketches=sketches,
     )
 
@@ -171,7 +180,7 @@ def test_planted_clustering_is_detected() -> None:
     assert result["observed"]["within"] > result["observed"]["between"]
     assert result["observed"]["delta"] > 0.2
     # And the permutation reference must not reproduce it.
-    assert abs(result["permuted"]["delta"]) < 0.05
+    assert abs(result["null"]["delta_mean"]) < 0.05
 
 
 def test_unstructured_gradients_show_no_clustering() -> None:
@@ -183,7 +192,12 @@ def test_unstructured_gradients_show_no_clustering() -> None:
     result = gradient_clustering(record, grouping="target")
 
     assert abs(result["observed"]["delta"]) < 0.05
-    assert abs(result["observed"]["delta"] - result["permuted"]["delta"]) < 0.08
+    # Within noise of the null. Deliberately not "inside the 95% interval": with
+    # no planted structure the observed delta is itself a draw from that null, so
+    # it falls outside a 95% interval about one time in twenty and such an
+    # assertion would flake by construction.
+    null = result["null"]
+    assert abs(result["observed"]["delta"] - null["delta_mean"]) < 4.0 * null["delta_std"]
 
 
 def test_opposing_subgroups_give_a_negative_delta() -> None:
@@ -248,7 +262,7 @@ def test_the_analysis_is_deterministic() -> None:
 
     assert np.array_equal(first["matrix"], second["matrix"], equal_nan=True)
     assert first["observed"] == second["observed"]
-    assert first["permuted"] == second["permuted"]
+    assert first["null"] == second["null"]
 
 
 def test_the_permutation_null_preserves_class_sizes() -> None:
@@ -257,20 +271,83 @@ def test_the_permutation_null_preserves_class_sizes() -> None:
 
     result = gradient_clustering(record, grouping="target")
 
-    assert result["permuted"]["num_within_pairs"] == result["observed"]["num_within_pairs"]
-    assert result["permuted"]["num_classes"] == result["observed"]["num_classes"]
+    assert result["null"]["permutations"] == 256
+    assert result["null"]["delta_low"] <= result["null"]["delta_mean"]
+    assert result["null"]["delta_mean"] <= result["null"]["delta_high"]
 
 
-def test_sketches_are_normalized_before_comparison() -> None:
-    """Direction only: magnitude must not influence any similarity."""
+def test_gradient_magnitude_divides_out() -> None:
+    """Direction only: scaling a gradient must not change any similarity.
+
+    Scaling ``g_d`` scales its sketch by the same factor, and the divisor is the
+    exact norm, so the two move together and every cosine is unchanged. That is
+    the invariance the implemented definition actually has -- scaling the sketch
+    *alone* would change the answer, and should.
+    """
 
     unit, labels = _clustered(num_classes=3, per_class=6, alignment=0.7)
-    scaled = unit * np.linspace(0.1, 50.0, unit.shape[0])[:, None]
+    factors = np.linspace(0.1, 50.0, unit.shape[0])
 
     plain = gradient_clustering(_record(unit, labels, labels), grouping="target")
-    rescaled = gradient_clustering(_record(scaled, labels, labels), grouping="target")
+    rescaled = gradient_clustering(
+        _record(unit * factors[:, None], labels, labels, norms=factors),
+        grouping="target",
+    )
 
     assert np.allclose(plain["matrix"], rescaled["matrix"], atol=1e-10, equal_nan=True)
+
+
+def test_the_diagonal_subtracts_measured_self_norms_not_the_class_count() -> None:
+    """The rows are not unit length, so ``n_i`` is the wrong self term.
+
+    Sketch rows are ``sketch(g_d) / ||g_d||``; their lengths scatter around 1
+    rather than equalling it. Planted far from 1 here on purpose, so an
+    implementation subtracting ``n_i`` instead of ``sum_d ||u_d||^2`` gives a
+    visibly different diagonal and this test fails.
+    """
+
+    from llm_behavior_lab.analysis.gradient_clustering import _class_sums
+
+    generator = np.random.default_rng(23)
+    rows = _unit(generator.normal(size=(8, K)))
+    rows = rows * np.array([0.3, 0.4, 0.5, 0.6, 2.0, 2.5, 3.0, 3.5])[:, None]
+    labels = np.array([ELIGIBLE[0]] * 4 + [ELIGIBLE[1]] * 4, dtype=np.int64)
+    classes = np.unique(labels)
+
+    result = class_similarity_matrix(rows, labels, classes)
+
+    for index, token in enumerate(classes):
+        members = np.flatnonzero(labels == token)
+        expected = float(np.mean([
+            rows[a] @ rows[b] for a in members for b in members if a != b
+        ]))
+        assert result["matrix"][index, index] == pytest.approx(expected, abs=1e-12)
+
+    # The wrong estimator must be genuinely different, or this has no teeth.
+    sums, counts, self_squared = _class_sums(rows, labels, classes)
+    wrong = (np.einsum("ij,ij->i", sums, sums) - counts) / (counts * (counts - 1))
+    assert not np.allclose(self_squared, counts)
+    assert not np.allclose(wrong, np.diag(result["matrix"]), atol=1e-6)
+
+
+def test_the_pooled_summary_agrees_with_the_matrix_route() -> None:
+    """The O(C K) pooled identity must equal the O(C^2 K) matrix computation."""
+
+    from llm_behavior_lab.analysis.gradient_clustering import (
+        _class_sums,
+        _pooled_from_blocks,
+        _summary_from_matrix,
+    )
+
+    unit, labels = _clustered(num_classes=5, per_class=7, alignment=0.6)
+    classes = np.unique(labels)
+
+    matrix_route = _summary_from_matrix(class_similarity_matrix(unit, labels, classes))
+    sums, counts, self_squared = _class_sums(unit, labels, classes)
+    within, between = _pooled_from_blocks(sums, counts, self_squared)
+
+    assert within == pytest.approx(matrix_route["within"], abs=1e-12)
+    assert between == pytest.approx(matrix_route["between"], abs=1e-12)
 
 
 def test_min_support_and_display_limits_are_reported_not_silent() -> None:

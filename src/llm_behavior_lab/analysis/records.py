@@ -156,8 +156,8 @@ _MEAN_TOKEN_ARRAY_NAME = "predictive_temperature_mean_token_probabilities"
 #: canonical-temperature parameter gradient.
 #:
 #: Direction only is the question, so a projection that preserves inner products
-#: is enough and the exact ``[D_g, P]`` matrix -- about 1.1 PB at experiment
-#: scale -- is never formed. About 67 MB at ``D_g = 32768, K = 512`` in float32,
+#: is enough and the exact ``[D_g, P]`` matrix -- about 1.1 TB in float32 at
+#: experiment scale -- is never formed. About 67 MB at ``D_g = 32768, K = 512`` in float32,
 #: which is why it is stored at that precision: the count sketch's own
 #: ``1/sqrt(K)`` error dominates float32 rounding by orders of magnitude.
 #:
