@@ -46,6 +46,8 @@ __all__ = [
     "gradient_guess_correlations",
     "gradient_guess_table",
     "gradient_observable_summary",
+    "mean_probability_gradient_table",
+    "nucleus_gradient_table",
     "temperature_gradient_summary",
     "temperature_gradient_table",
     "spearman_rho",
@@ -416,6 +418,146 @@ def temperature_gradient_table(record: Any, temperature: float) -> dict[str, Any
     table["mean_gradient_norm"] = means
     table["temperature"] = float(temperature)
     table["is_canonical"] = float(temperature) == 1.0
+    return table
+
+
+def _require_paired_position_set(record: Any, what: str) -> None:
+    """Refuse to pair a whole-experiment statistic with a subset gradient table.
+
+    ``mean_gradient_norm`` and figure 10's ``q_i`` are both computed over the
+    *gradient-evaluated* positions, which may be a subset. The realized nucleus
+    counts and the mean token probabilities are accumulated over **every**
+    evaluation position, because they come from the main measurement loop rather
+    than from the gradient pass. The two describe the same positions only when
+    the gradient analysis covered all of them.
+
+    Pairing them regardless would put a subset quantity on one axis and a
+    whole-experiment quantity on the other and say nothing about it, which is
+    exactly the silent mismatch ``gradient_guess_table`` was written to avoid.
+    """
+
+    if not _covers_all_positions(record):
+        raise ValueError(
+            f"{what} is accumulated over every evaluation position, but this "
+            "record's gradient analysis covered only a subset, so the two axes "
+            "would describe different position sets. Rerun with the gradient "
+            "analysis covering all positions to produce this figure."
+        )
+
+
+def nucleus_gradient_table(record: Any, temperature: float) -> dict[str, Any]:
+    """Figure 15's table: ``G_i(T)`` against the *realized* nucleus fraction.
+
+    The stochastic-decoding sibling of figure 10. The y quantity is
+
+    ``q_i^nuc(T) = (1/D) * sum_d 1[sampled(d, T) == i]``
+
+    where ``sampled(d, T)`` is the single nucleus draw the experiment already
+    made at that position and temperature, under the recorded ``top_p``, the
+    recorded sampling seed, and the common-random-number protocol. Nothing is
+    resampled here and no random number is drawn: the counts are read straight
+    out of the persisted sweep, so this is the realized decision, not the
+    expected nucleus distribution.
+
+    Exactly one draw exists per position per temperature, so the counts sum to
+    the position total.
+
+    Raises:
+        ValueError: If the record carries no sweep, or the gradient analysis
+            covered only a subset of positions.
+        KeyError: If the sweep never ran at this gradient temperature.
+    """
+
+    _require_temperature_gradients(record)
+    if not record.has_temperature_sweep:
+        raise ValueError(
+            "This record carries no nucleus temperature sweep, so the realized "
+            "nucleus guess fractions figure 15 needs were never measured."
+        )
+    _require_paired_position_set(record, "The realized nucleus count")
+
+    # R = 1 is part of the definition, not an incidental property of the runs so
+    # far. The statistic counts *one* realized stochastic decision per evaluation
+    # position; with several replicates there is no single realized decision to
+    # count, and every way of producing one -- averaging them, pooling them, or
+    # picking one -- would silently answer a different question than the figure
+    # asks. Refusing is the only honest option.
+    replicates = record.num_replicates
+    if replicates != 1:
+        raise ValueError(
+            f"Figure 15 measures one realized nucleus decision per evaluation "
+            f"position and is defined only for R = 1; this record carries "
+            f"R = {replicates} replicates. Averaging, pooling, or selecting one "
+            "of them would change the statistic, so the figure is not drawn."
+        )
+
+    grid = record.sweep_temperatures
+    value = float(temperature)
+    if value not in grid:
+        raise KeyError(
+            f"Temperature {value:g} is not in the nucleus sweep grid {grid}. The "
+            "sweep grid is configured independently of the gradient grid, so a "
+            "gradient temperature need not have been sampled."
+        )
+
+    table = dict(temperature_gradient_table(record, temperature))
+    # Row of the initialization the gradients were measured on -- never row 0 by
+    # assumption, so the two axes cannot come from different weights.
+    initialization = record.gradient_initialization_index
+    counts = np.asarray(
+        record.sweep_counts("real")[initialization, grid.index(value)], dtype=np.int64
+    )
+    total = float(counts.sum())
+    if total <= 0:
+        raise ValueError("The realized nucleus counts for this temperature are empty.")
+
+    table["nucleus_guess_count"] = counts
+    table["nucleus_guess_fraction"] = counts.astype(np.float64) / total
+    table["nucleus_num_positions"] = int(total)
+    table["nucleus_source"] = "realized_sweep_draw_one_per_position"
+    return table
+
+
+def mean_probability_gradient_table(record: Any, temperature: float) -> dict[str, Any]:
+    """Figure 16's table: ``G_i(T)`` against the mean predictive probability.
+
+    The continuous sibling of figures 10 and 15. The y quantity is
+
+    ``pbar_i(T) = (1/D) * sum_d softmax(z_d / T)_i``
+
+    averaged at **fixed token identity** over the same real-input positions --
+    before top-p truncation and before any sampling decision. It is a global
+    preference for a token identity, not a target-conditional confidence, and it
+    is not averaged across initializations: the row of the initialization the
+    gradients were measured on is used.
+
+    This reuses the statistic figure 14 already persists rather than storing a
+    second copy of the same numbers.
+
+    Raises:
+        ValueError: If the record carries no mean token probabilities, or the
+            gradient analysis covered only a subset of positions.
+        KeyError: If the confidence grid never included this gradient temperature.
+    """
+
+    _require_temperature_gradients(record)
+    if not record.has_mean_token_probabilities:
+        raise ValueError(
+            "This record carries no identity-preserving mean token probabilities, "
+            "so figure 16 has nothing to draw."
+        )
+    _require_paired_position_set(record, "The mean predictive probability")
+
+    # Raises KeyError naming the recorded grid when the temperature is absent.
+    index = record.temperature_index(temperature)
+    initialization = record.gradient_initialization_index
+
+    table = dict(temperature_gradient_table(record, temperature))
+    table["mean_predictive_probability"] = np.asarray(
+        record.predictive_temperature_mean_token_probabilities[initialization, index],
+        dtype=np.float64,
+    )
+    table["mean_probability_source"] = "predictive_temperature_mean_token_probabilities"
     return table
 
 

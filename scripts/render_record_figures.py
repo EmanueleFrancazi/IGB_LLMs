@@ -62,6 +62,8 @@ FIGURES = {
     "figure12": "plot_temperature_max_predictive_probability",
     "figure13": "plot_greedy_confidence_vs_temperature",
     "figure14": "plot_ranked_mean_token_probabilities",
+    "figure15": "plot_gradient_vs_nucleus_guess_bias",
+    "figure16": "plot_gradient_vs_mean_probability",
 }
 
 #: Figures that exist only when the record carries the analysis behind them.
@@ -74,6 +76,8 @@ CONDITIONAL_FIGURES = {
     "figure12": "has_temperature_confidence_analysis",
     "figure13": "has_temperature_confidence_analysis",
     "figure14": "has_mean_token_probabilities",
+    "figure15": "has_temperature_gradient_analysis",
+    "figure16": "has_temperature_gradient_analysis",
 }
 
 
@@ -119,8 +123,8 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "log", "linear"],
         default="auto",
         help=(
-            "Probability axis scale for whichever of figures 8, 9, 11, 12, 14 or "
-            "the supplementary gradient scatter is drawn. 'auto' follows the "
+            "Probability axis scale for whichever of figures 8, 9, 11, 12, 14, 15, 16 "
+            "or the supplementary gradient scatter is drawn. 'auto' follows the "
             "observed dynamic range. Figure 10 is unaffected: it selects its own "
             "per-panel limits."
         ),
@@ -435,6 +439,8 @@ def main() -> None:
             "figure11": "y_scale",
             "figure14": "y_scale",
             "figure12": "x_scale",
+            "figure15": "y_scale",
+            "figure16": "y_scale",
         }
         keyword = scale_argument.get(args.only)
         written = (

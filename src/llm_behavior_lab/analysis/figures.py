@@ -60,6 +60,8 @@ __all__ = [
     "escape_token_label",
     "generate_all_figures",
     "plot_gradient_vs_guess_bias",
+    "plot_gradient_vs_mean_probability",
+    "plot_gradient_vs_nucleus_guess_bias",
     "plot_greedy_confidence_vs_temperature",
     "plot_max_predictive_probability",
     "plot_ranked_mean_token_probabilities",
@@ -1431,7 +1433,27 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
         written.extend(plot_greedy_confidence_vs_temperature(record, directory))
     if record.has_mean_token_probabilities:
         written.extend(plot_ranked_mean_token_probabilities(record, directory))
+    # Figures 15 and 16 pair whole-experiment statistics with the gradient
+    # table, so they exist only when the gradient analysis covered every
+    # position. A subset run draws figures 0-14 and simply omits these two.
+    if record.has_temperature_gradient_analysis and _covers_all_gradient_positions(record):
+        # R != 1 leaves figure 15 undefined; the rest of the set still renders.
+        if record.has_temperature_sweep and record.num_replicates == 1:
+            written.extend(plot_gradient_vs_nucleus_guess_bias(record, directory))
+        if record.has_mean_token_probabilities:
+            written.extend(plot_gradient_vs_mean_probability(record, directory))
     return written
+
+
+def _covers_all_gradient_positions(record: Any) -> bool:
+    """Whether the gradient analysis spanned every evaluation position."""
+
+    from llm_behavior_lab.analysis.gradients import _covers_all_positions
+
+    try:
+        return _covers_all_positions(record)
+    except ValueError:
+        return False
 
 
 def plot_temperature_ranked_predictive_probabilities(
@@ -1892,6 +1914,7 @@ def plot_temperature_gradient_vs_guess_bias(
         )
         axes.set_xscale("log")
         axes.set_xlim(*panel_limits[panel_index])
+        _configure_gradient_panel_x_axis(axes, *panel_limits[panel_index])
         if use_count_log:
             # A hairline above zero, so the never-guessed population reads as a
             # population rather than as the axis frame.
@@ -1943,6 +1966,8 @@ def plot_temperature_gradient_vs_guess_bias(
 
     for panel_index in range(len(chosen), rows * columns):
         panels[panel_index // columns][panel_index % columns].set_visible(False)
+    # Row 2's two-line titles otherwise sit on row 1's tick labels.
+    figure.subplots_adjust(hspace=0.34)
     figure.supxlabel("mean gradient norm  G(i, T)   [log scale]", fontsize=10)
     figure.supylabel(
         "greedy guess fraction  q(i) = k/D"
@@ -2099,3 +2124,637 @@ def plot_ranked_mean_token_probabilities(
         bbox=_ANNOTATION_BOX,
     )
     return save_figure(figure, directory, "figure14_ranked_mean_token_probabilities")
+
+
+def _common_probability_axis(panels: list[np.ndarray], requested: str) -> bool:
+    """One axis transformation for every panel of a temperature comparison.
+
+    Decided once from the pooled values, never per panel: the panels of figure 16
+    show the *same physical quantity* at different temperatures, and letting one
+    panel go logarithmic while another stayed linear would make a change of axis
+    look like a change in the data.
+
+    ``auto`` requires the pooled values to be **strictly positive** before
+    choosing a logarithmic axis. ``_probability_scale`` drops non-positive
+    entries before measuring the range, which is right for a ranked profile whose
+    tail is padding but wrong here: ``pbar_i(T)`` can underflow to exactly zero at
+    low temperature, and that is a measured outcome about a token the model gives
+    no mass to. A logarithmic axis would delete precisely those tokens.
+    """
+
+    if requested == "log":
+        return True
+    if requested == "linear":
+        return False
+    pooled = np.concatenate([np.asarray(values, dtype=np.float64) for values in panels])
+    if pooled.size == 0 or not np.all(pooled > 0.0):
+        return False
+    return float(pooled.max() / pooled.min()) >= 10.0
+
+
+def _configure_gradient_panel_x_axis(axes: Any, low: float, high: float) -> None:
+    """Shared x-tick convention for the three gradient scatter figures.
+
+    Presentation only: the scale stays logarithmic, the data are untouched, and
+    the per-panel limits passed in are exactly the ones the panel already uses.
+
+    The default log ticker is the problem these panels have. Per-panel ``G``
+    limits routinely span well under a decade, and in that regime matplotlib
+    subdivides the axis finely and labels the minor ticks, so a panel ends up
+    with ``10^1 1.2x10^1 1.4x10^1 ...`` running into its neighbour's labels.
+    Restricting ``subs`` does not help: the sub-decade fallback ignores it.
+
+    So the ticks are chosen explicitly from a 1-2-5 decade ladder clipped to the
+    panel's own range, capped at four labels, and written as plain significant
+    figures -- over a range like 0.33 to 18, ``0.5  1  2  5  10`` is simply
+    easier to read than scientific notation. If the ladder lands fewer than two
+    ticks inside a very narrow range, three geometrically spaced values are used
+    instead, so no panel is ever left unlabelled.
+    """
+
+    from matplotlib.ticker import FixedFormatter, FixedLocator
+
+    if not (np.isfinite(low) and np.isfinite(high)) or low <= 0.0 or high <= low:
+        return
+
+    decades = range(int(np.floor(np.log10(low))), int(np.ceil(np.log10(high))) + 1)
+    ladder = [
+        base * 10.0**decade for decade in decades for base in (1.0, 2.0, 5.0)
+    ]
+    ticks = [value for value in ladder if low <= value <= high]
+
+    if len(ticks) < 2:
+        ticks = list(np.geomspace(low, high, 3))
+    elif len(ticks) > 4:
+        step = int(np.ceil(len(ticks) / 4))
+        ticks = ticks[::step]
+
+    def label(value: float) -> str:
+        if value >= 1000 or value < 0.001:
+            return f"{value:.0e}".replace("e-0", "e-").replace("e+0", "e")
+        text = f"{value:.3g}"
+        return text
+
+    axes.xaxis.set_major_locator(FixedLocator(ticks))
+    axes.xaxis.set_major_formatter(FixedFormatter([label(value) for value in ticks]))
+    axes.xaxis.set_minor_locator(FixedLocator([]))
+    axes.tick_params(axis="x", which="both", labelsize=7.5)
+
+
+def _gradient_panel_temperatures(
+    record: Any, panel_temperatures: Sequence[float] | None
+) -> list[float]:
+    """The six displayed gradient temperatures: the grid without the canonical.
+
+    Figure 10's convention, shared by its two siblings so the three are read as
+    one controlled sequence.
+    """
+
+    grid = list(record.gradient_temperature_grid)
+    chosen = (
+        [value for value in grid if value != 1.0]
+        if panel_temperatures is None
+        else [float(value) for value in panel_temperatures]
+    )
+    if not chosen:
+        raise ValueError("No panel temperatures are available in this record.")
+    return chosen
+
+
+def _plot_gradient_against(
+    record: Any,
+    directory: str | Path,
+    *,
+    tables: list[dict[str, Any]],
+    chosen: list[float],
+    y_key: str,
+    count_key: str | None,
+    count_total_key: str | None,
+    y_label: str,
+    title: str,
+    note: str,
+    stem: str,
+    y_scale: str,
+    panel_statistic,
+) -> list[Path]:
+    """Draw one six-panel gradient scatter, figure 10's geometry reused.
+
+    Figures 15 and 16 differ from figure 10 only in the y quantity and in the
+    axis treatment that quantity needs. Everything else -- per-panel x limits
+    from each temperature's own finite values, the shared ``LogNorm`` colour over
+    ``p_i``, the single figure-wide colorbar, the token set, the panel grid -- is
+    the same, because the three are meant to be compared.
+
+    Figure 10 itself is not routed through this helper: it stays exactly as it
+    was written and validated.
+    """
+
+    from matplotlib.colors import LogNorm
+
+    plotted = tables[0]["target_occurrence_count"] > 0
+    corpus = tables[0]["corpus_fraction"][plotted]
+    coloured = corpus > 0
+    dropped = int((~coloured).sum())
+
+    norms = [table["mean_gradient_norm"][plotted] for table in tables]
+    finite = [values[np.isfinite(values) & (values > 0)] for values in norms]
+    if any(values.size == 0 for values in finite):
+        raise ValueError("Every panel needs at least one positive gradient norm.")
+    panel_limits = [
+        (float(values.min()) / 1.15, float(values.max()) * 1.15) for values in finite
+    ]
+
+    raw = [np.asarray(table[y_key], dtype=np.float64)[plotted] for table in tables]
+    if count_key is not None:
+        # Figure 10's zero-preserving count transform, reused verbatim so the
+        # three figures' y axes are read the same way. A logarithmic probability
+        # axis would delete every token the decoder never emitted -- a measured
+        # outcome, and most of them.
+        counts = [
+            np.asarray(table[count_key], dtype=np.float64)[plotted] for table in tables
+        ]
+        y_values = [np.log10(1.0 + values) for values in counts]
+        use_log_y = False
+    else:
+        y_values = raw
+        use_log_y = _common_probability_axis(y_values, y_scale)
+
+    columns = 3
+    rows = int(np.ceil(len(chosen) / columns))
+    figure = _new_figure(width=4.8 * columns, height=4.1 * rows)
+    panels = figure.subplots(rows, columns, squeeze=False, sharey=True)
+    norm = LogNorm(vmin=float(corpus[coloured].min()), vmax=float(corpus[coloured].max()))
+    marks = None
+
+    for panel_index, temperature in enumerate(chosen):
+        axes = panels[panel_index // columns][panel_index % columns]
+        marks = axes.scatter(
+            norms[panel_index][coloured],
+            y_values[panel_index][coloured],
+            c=corpus[coloured],
+            s=9,
+            alpha=0.45,
+            cmap="viridis",
+            norm=norm,
+            edgecolors="none",
+            rasterized=True,
+        )
+        axes.set_xscale("log")
+        axes.set_xlim(*panel_limits[panel_index])
+        _configure_gradient_panel_x_axis(axes, *panel_limits[panel_index])
+        if count_key is not None:
+            # A hairline above zero, so the never-emitted population reads as a
+            # population rather than as the axis frame.
+            axes.axhline(0.0, color="#bbbbbb", linewidth=0.7, linestyle="-", zorder=0)
+        elif use_log_y:
+            axes.set_yscale("log")
+        axes.grid(True, which="both", alpha=0.20)
+
+        low, high = panel_limits[panel_index]
+        axes.set_title(f"T = {temperature:g}\nG in [{low:.3g}, {high:.3g}]", fontsize=9.5)
+        axes.text(
+            0.03,
+            0.97,
+            panel_statistic(tables[panel_index], y_values[panel_index]),
+            transform=axes.transAxes,
+            fontsize=7,
+            va="top",
+            ha="left",
+            bbox=_ANNOTATION_BOX,
+        )
+
+    if count_key is not None:
+        # Ticks at meaningful counts, labelled as the fraction they are, exactly
+        # as figure 10 labels its own count axis.
+        ladder = [0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+        largest = int(max(float(values.max()) for values in counts))
+        selected = [value for value in ladder if value <= largest]
+        if largest and largest not in selected:
+            gap = np.log10(1.0 + largest) - np.log10(1.0 + selected[-1])
+            if gap > 0.25:
+                selected.append(largest)
+        top = float(np.log10(1.0 + max(largest, 1)))
+        for row_index in range(rows):
+            for column in range(columns):
+                axes = panels[row_index][column]
+                axes.set_yticks(np.log10(1.0 + np.asarray(selected, dtype=np.float64)))
+                axes.set_yticklabels(
+                    ["0"] + [f"{value}/D" for value in selected[1:]], fontsize=7.5
+                )
+                axes.set_ylim(-0.045 * top, top * 1.06)
+
+    for panel_index in range(len(chosen), rows * columns):
+        panels[panel_index // columns][panel_index % columns].set_visible(False)
+
+    # Row 2's two-line titles otherwise sit on row 1's tick labels.
+    figure.subplots_adjust(hspace=0.34)
+    figure.supxlabel("mean gradient norm  G(i, T)   [log scale]", fontsize=10)
+    if count_key is not None:
+        figure.supylabel(
+            f"{y_label}   [axis: log10(1 + k), D = {int(tables[0][count_total_key]):,}]",
+            fontsize=10,
+        )
+    else:
+        figure.supylabel(
+            f"{y_label}   [{'log' if use_log_y else 'linear'} scale]", fontsize=10
+        )
+    colourbar = figure.colorbar(marks, ax=panels, pad=0.02, fraction=0.03)
+    colourbar.set_label("Whole-corpus empirical token frequency  p(i)", fontsize=9)
+
+    full_note = note + (
+        "   |   x limits are per-panel: horizontal position is NOT comparable "
+        "between panels"
+    )
+    if dropped:
+        full_note += f"   |   omitted, no corpus mass: {_format_count(dropped)}"
+    figure.suptitle(title, fontsize=12)
+    figure.text(0.5, 0.945, full_note, ha="center", fontsize=7.5, color="#444444")
+    return save_figure(figure, directory, stem)
+
+
+def plot_gradient_vs_nucleus_guess_bias(
+    record: Any,
+    directory: str | Path,
+    *,
+    panel_temperatures: Sequence[float] | None = None,
+    y_scale: str = "auto",
+) -> list[Path]:
+    """Figure 15 -- gradient magnitude vs. the *realized* nucleus guess fraction.
+
+    Figure 10's stochastic sibling. Figure 10 asks the question of a
+    deterministic decoder: are tokens the model would *greedily* emit associated
+    with different gradient magnitudes when they occur as targets? This asks it
+    of the decoder actually used to sample, at the same temperatures, on the same
+    initialization, over the same positions.
+
+    The y quantity is the fraction of positions at which the single realized
+    nucleus draw produced token ``i``. There is exactly one draw per position per
+    temperature -- ``R`` remains 1 -- and those draws are the ones the experiment
+    already made under the recorded ``top_p`` and sampling seed. Nothing is
+    resampled to draw this figure.
+
+    Unlike figure 10's ``q_i``, this y quantity **does** move with temperature:
+    sampling is not argmax, so raising ``T`` genuinely changes which tokens are
+    emitted. Both axes therefore vary across panels, which is the difference
+    between the two figures rather than an inconsistency.
+    """
+
+    from llm_behavior_lab.analysis.gradients import nucleus_gradient_table
+
+    chosen = _gradient_panel_temperatures(record, panel_temperatures)
+    tables = [nucleus_gradient_table(record, value) for value in chosen]
+
+    def statistic(table: dict[str, Any], values: np.ndarray) -> str:
+        emitted = int((values > 0).sum())
+        return (
+            f"tokens ever emitted: {_format_count(emitted)}\n"
+            f"D = {_format_count(table['nucleus_num_positions'])} draws"
+        )
+
+    return _plot_gradient_against(
+        record,
+        directory,
+        tables=tables,
+        chosen=chosen,
+        y_key="nucleus_guess_fraction",
+        count_key="nucleus_guess_count",
+        count_total_key="nucleus_num_positions",
+        y_label="realized nucleus guess fraction  q_nuc(i, T) = k/D",
+        title=(
+            "Gradient magnitude vs. realized nucleus guessing bias, "
+            "across loss temperature"
+        ),
+        note=(
+            "y is the REALIZED one-sample-per-position nucleus fraction at each T, "
+            "not the expected nucleus distribution"
+        ),
+        stem="figure15_temperature_gradient_vs_nucleus_guess_bias",
+        y_scale=y_scale,
+        panel_statistic=statistic,
+    )
+
+
+def plot_gradient_vs_mean_probability(
+    record: Any,
+    directory: str | Path,
+    *,
+    panel_temperatures: Sequence[float] | None = None,
+    y_scale: str = "auto",
+) -> list[Path]:
+    """Figure 16 -- gradient magnitude vs. mean predictive probability by token.
+
+    The continuous end of the sequence. Figures 10 and 15 both put a *decision*
+    on the y axis -- one deterministic, one sampled. This one removes the
+    decision entirely and uses the predictive mass the decision would have been
+    made from: ``pbar_i(T)``, the mean over positions of ``softmax(z/T)_i`` at
+    fixed token identity, before top-p and before sampling.
+
+    Reading the three together separates a gradient's relationship with what the
+    model *emits* from its relationship with what the model *prefers*. A token
+    can carry appreciable mean probability without ever winning a draw, and those
+    tokens are exactly the ones the two decision figures cannot place.
+
+    The statistic is the one figure 14 already persists, so this figure adds no
+    measurement and no storage.
+    """
+
+    from llm_behavior_lab.analysis.gradients import mean_probability_gradient_table
+
+    chosen = _gradient_panel_temperatures(record, panel_temperatures)
+    tables = [mean_probability_gradient_table(record, value) for value in chosen]
+
+    def statistic(table: dict[str, Any], values: np.ndarray) -> str:
+        return (
+            f"median pbar {float(np.median(values)):.3g}\n"
+            f"max pbar {float(values.max()):.3g}"
+        )
+
+    return _plot_gradient_against(
+        record,
+        directory,
+        tables=tables,
+        chosen=chosen,
+        y_key="mean_predictive_probability",
+        count_key=None,
+        count_total_key=None,
+        y_label="mean predictive probability  pbar(i, T)",
+        title=(
+            "Gradient magnitude vs. mean predictive probability by token, "
+            "across loss temperature"
+        ),
+        note=(
+            "y is the mean softmax(z/T) at fixed token identity, before top-p and "
+            "before sampling"
+        ),
+        stem="figure16_temperature_gradient_vs_mean_probability",
+        y_scale=y_scale,
+        panel_statistic=statistic,
+    )
+
+
+def _initial_scatter(axes: Any, x, y, *, size_by=None, colour=None, cmap="viridis"):
+    """One class-wise scatter with support encoded by marker size."""
+
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    keep = np.isfinite(x) & np.isfinite(y)
+    sizes = 6.0
+    if size_by is not None:
+        support = np.asarray(size_by, dtype=np.float64)[keep]
+        sizes = 3.0 + 14.0 * np.log1p(support) / max(np.log1p(support).max(), 1e-12)
+    marks = axes.scatter(
+        x[keep], y[keep], s=sizes,
+        c=None if colour is None else np.asarray(colour, dtype=np.float64)[keep],
+        cmap=None if colour is None else cmap,
+        color=None if colour is not None else "#1f77b4",
+        alpha=0.45, edgecolors="none", rasterized=True,
+    )
+    return marks, int(keep.sum())
+
+
+def _symlog_x(axes: Any, values) -> None:
+    """Symmetric-log x axis sized to the data, so zero stays on the axis."""
+
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.abs(values[np.isfinite(values) & (values != 0)])
+    axes.set_xscale("symlog", linthresh=float(finite.min()) if finite.size else 1e-6)
+    axes.axvline(0.0, color="#999999", linewidth=0.8, linestyle=":", zorder=0)
+
+
+def plot_initial_performance_and_bias(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 17 -- initial guessing bias against initial correctness.
+
+    The null is the **marginal-preserving independence** expectation, not
+    ``1/K``. Keeping both observed marginals, ``P(greedy=i | y=i) = q_i``, so a
+    class earns recall simply by being guessed often; ``DeltaR_i = R_i - q_i`` is
+    what remains after that mechanical part is removed. Panel (d) is the bridge
+    to the cross-entropy error: only ``b_soft`` enters the mean logit gradient,
+    and its relation to the realized argmax bias ``b_hard`` is empirical.
+    """
+
+    from llm_behavior_lab.analysis.initial_gradients import (
+        class_frequency_table,
+        correctness_table,
+    )
+
+    freq = class_frequency_table(record, 1.0)
+    corr = correctness_table(record, 1.0)
+    n = freq["target_count"]
+    represented = n > 0
+
+    figure = _new_figure(width=11.0, height=8.6)
+    panels = figure.subplots(2, 2)
+
+    a = panels[0][0]
+    _initial_scatter(a, freq["target_fraction"][represented], corr["recall"][represented],
+                     size_by=n[represented])
+    order = np.argsort(freq["target_fraction"][represented])
+    a.plot(freq["target_fraction"][represented][order],
+           freq["guess_fraction"][represented][order],
+           color="#d62728", linewidth=0.9, linestyle="--",
+           label="independence expectation  R = q(i)")
+    a.set_xscale("log")
+    a.set_xlabel("target frequency  f(i)   [log]")
+    a.set_ylabel("recall  R(i)")
+    a.set_title("(a) recall vs target frequency", fontsize=10)
+    a.legend(loc="upper left", fontsize=7.5, frameon=True)
+
+    b = panels[0][1]
+    _initial_scatter(b, freq["hard_bias"][represented], corr["delta_recall"][represented],
+                     size_by=n[represented])
+    _symlog_x(b, freq["hard_bias"][represented])
+    b.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":", zorder=0)
+    b.set_xlabel("hard bias  b_hard(i) = q(i) - f(i)   [symlog]")
+    b.set_ylabel("DeltaR(i) = R(i) - q(i)")
+    b.set_title("(b) recognition beyond the independence null", fontsize=10)
+
+    c = panels[1][0]
+    guessed = freq["guess_count"] > 0
+    _initial_scatter(c, freq["hard_bias"][guessed], corr["delta_precision"][guessed],
+                     size_by=freq["guess_count"][guessed])
+    _symlog_x(c, freq["hard_bias"][guessed])
+    c.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":", zorder=0)
+    c.set_xlabel("hard bias  b_hard(i)   [symlog]")
+    c.set_ylabel("DeltaP(i) = P(i) - f(i)")
+    c.set_title("(c) precision beyond the independence null", fontsize=10)
+
+    d = panels[1][1]
+    _initial_scatter(d, freq["hard_bias"], freq["soft_bias"], size_by=n)
+    limit = float(np.nanmax(np.abs(np.concatenate([freq["hard_bias"], freq["soft_bias"]]))))
+    d.plot([-limit, limit], [-limit, limit], color="#d62728", linewidth=0.9,
+           linestyle="--", label="b_soft = b_hard")
+    _symlog_x(d, freq["hard_bias"])
+    d.set_yscale("symlog", linthresh=1e-6)
+    d.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":", zorder=0)
+    d.set_xlabel("hard bias  b_hard(i)   [symlog]")
+    d.set_ylabel("soft bias  b_soft(i) = pbar(i) - f(i)   [symlog]")
+    d.set_title("(d) realized argmax bias vs probability-mass bias", fontsize=10)
+    d.legend(loc="upper left", fontsize=7.5, frameon=True)
+
+    for axes in (a, b, c, d):
+        axes.grid(True, which="both", alpha=0.20)
+        axes.tick_params(labelsize=8)
+
+    figure.suptitle(
+        "Initial guessing bias and initial correctness  (alpha = 1, T = 1, "
+        f"initialization {freq['initialization_index']})", fontsize=12)
+    figure.text(0.5, 0.945,
+                f"marker size ~ support n(i)   |   {corr['num_represented']:,} classes "
+                f"represented, {corr['num_guessed']:,} guessed, "
+                f"{corr['num_true_positive_classes']} with TP > 0",
+                ha="center", fontsize=7.5, color="#444444")
+    figure.subplots_adjust(hspace=0.30, wspace=0.24)
+    return save_figure(figure, directory, "figure17_initial_performance_and_bias")
+
+
+def plot_initial_gradient_split(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 18 -- per-example gradient intensity for failed assignments.
+
+    At initialization almost every position is a failed assignment, so the
+    TP side of the split is reported as a count rather than drawn as a
+    distribution: ``G^TP`` exists for a single class and cannot support a
+    comparison. What the data do support is how the *failed* intensity
+    ``G_i^FN`` varies with support, bias and target confidence.
+
+    Intensity is a mean per-example norm; the norm mass ``M`` printed in the
+    annotation is a sum over the group and is **not** an SGD update magnitude.
+    """
+
+    from llm_behavior_lab.analysis.initial_gradients import (
+        class_frequency_table,
+        confidence_split,
+        gradient_correctness_split,
+    )
+
+    freq = class_frequency_table(record, 1.0)
+    grad = gradient_correctness_split(record, 1.0)
+    conf = confidence_split(record, 1.0)
+    n = freq["target_count"]
+    defined = np.isfinite(grad["intensity_false_negative"])
+
+    figure = _new_figure(width=13.5, height=4.4)
+    panels = figure.subplots(1, 3)
+
+    a = panels[0]
+    _initial_scatter(a, n[defined], grad["intensity_false_negative"][defined],
+                     size_by=n[defined])
+    tp = np.isfinite(grad["intensity_true_positive"])
+    if tp.any():
+        a.scatter(n[tp], grad["intensity_true_positive"][tp], s=40, marker="*",
+                  color="#d62728", zorder=5, label="the single TP class")
+        a.legend(loc="upper right", fontsize=7.5, frameon=True)
+    a.set_xscale("log")
+    a.set_xlabel("target support  n(i)   [log]")
+    a.set_ylabel("G_FN(i)  mean gradient norm, failed targets")
+    a.set_title("(a) failed-target intensity vs support", fontsize=10)
+
+    b = panels[1]
+    _initial_scatter(b, freq["hard_bias"][defined],
+                     grad["intensity_false_negative"][defined], size_by=n[defined])
+    _symlog_x(b, freq["hard_bias"][defined])
+    b.set_xlabel("hard bias  b_hard(i)   [symlog]")
+    b.set_ylabel("G_FN(i)")
+    b.set_title("(b) failed-target intensity vs hard bias", fontsize=10)
+
+    c = panels[2]
+    both = defined & np.isfinite(conf["confidence_false_negative"])
+    _initial_scatter(c, conf["confidence_false_negative"][both],
+                     grad["intensity_false_negative"][both], size_by=n[both])
+    c.set_xscale("log")
+    c.set_xlabel("C_FN(i)  mean target confidence on failures   [log]")
+    c.set_ylabel("G_FN(i)")
+    c.set_title("(c) intensity vs target confidence", fontsize=10)
+
+    for axes in panels:
+        axes.grid(True, which="both", alpha=0.20)
+        axes.tick_params(labelsize=8)
+
+    total = grad["total_mass_true_positive"] + grad["total_mass_false_negative"]
+    figure.suptitle(
+        "Gradient intensity of failed assignments at initialization "
+        "(alpha = 1, T = 1)", fontsize=12)
+    figure.text(0.5, 0.905,
+                f"G_TP defined for {grad['num_intensity_true_positive']} class, "
+                f"G_FN for {grad['num_intensity_false_negative']:,}   |   "
+                f"norm mass M_FN / (M_TP + M_FN) = "
+                f"{grad['total_mass_false_negative']/total:.6f}   "
+                "(norm mass, not an SGD update magnitude)",
+                ha="center", fontsize=7.5, color="#444444")
+    figure.subplots_adjust(wspace=0.28, top=0.80)
+    return save_figure(figure, directory, "figure18_initial_gradient_split")
+
+
+def plot_initial_logit_correction(record: Any, directory: str | Path) -> list[Path]:
+    """Figure 19 -- where the initial cross-entropy correction comes from.
+
+    ``A_i`` is the upward pull accumulated where ``i`` is the target and ``S_i``
+    the downward pressure accumulated where it is not. Their difference is the
+    exact mean logit correction, so this figure asks the *provenance* question
+    instead: which positions generate each force.
+
+    The identity ``A_i - S_i = -b_soft(i)/T`` is not drawn -- it is algebra, and
+    is enforced as a numerical invariant in the tests. Panel (c) instead relates
+    the net correction to the **hard** bias, which is not an identity and shows
+    how far the realized argmax bias predicts the actual corrective force.
+    """
+
+    from llm_behavior_lab.analysis.initial_gradients import (
+        class_frequency_table,
+        logit_correction,
+    )
+
+    freq = class_frequency_table(record, 1.0)
+    logit = logit_correction(record, 1.0)
+    n = freq["target_count"]
+
+    figure = _new_figure(width=13.5, height=4.4)
+    panels = figure.subplots(1, 3)
+
+    a = panels[0]
+    both = (logit["attraction"] > 0) & (logit["suppression"] > 0)
+    _initial_scatter(a, logit["attraction"][both], logit["suppression"][both],
+                     size_by=n[both])
+    lo = float(min(logit["attraction"][both].min(), logit["suppression"][both].min()))
+    hi = float(max(logit["attraction"][both].max(), logit["suppression"][both].max()))
+    a.plot([lo, hi], [lo, hi], color="#d62728", linewidth=0.9, linestyle="--",
+           label="A = S  (no net force)")
+    a.set_xscale("log")
+    a.set_yscale("log")
+    a.set_xlabel("target attraction  A(i)   [log]")
+    a.set_ylabel("non-target suppression  S(i)   [log]")
+    a.set_title("(a) attraction against suppression", fontsize=10)
+    a.legend(loc="upper left", fontsize=7.5, frameon=True)
+
+    b = panels[1]
+    fp = np.isfinite(logit["false_positive_suppression_fraction"]) & (freq["guess_count"] > 0)
+    _initial_scatter(b, freq["hard_bias"][fp],
+                     logit["false_positive_suppression_fraction"][fp],
+                     size_by=freq["guess_count"][fp])
+    _symlog_x(b, freq["hard_bias"][fp])
+    b.set_xlabel("hard bias  b_hard(i)   [symlog]")
+    b.set_ylabel("S_FP(i) / S(i)")
+    b.set_title("(b) suppression generated by false-positive wins", fontsize=10)
+
+    c = panels[2]
+    _initial_scatter(c, freq["hard_bias"], logit["net_correction"], size_by=n)
+    _symlog_x(c, freq["hard_bias"])
+    c.set_yscale("symlog", linthresh=1e-9)
+    c.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":", zorder=0)
+    c.set_xlabel("hard bias  b_hard(i)   [symlog]")
+    c.set_ylabel("net correction  A(i) - S(i)   [symlog]")
+    c.set_title("(c) net descent correction vs hard bias", fontsize=10)
+
+    for axes in panels:
+        axes.grid(True, which="both", alpha=0.20)
+        axes.tick_params(labelsize=8)
+
+    figure.suptitle(
+        "Class-wise cross-entropy correction at initialization (alpha = 1, T = 1)",
+        fontsize=12)
+    figure.text(0.5, 0.905,
+                "A - S is the gradient-DESCENT correction; S - A is the mean logit "
+                "gradient component.   TP/FN partitions positions by target; "
+                "FP/other is a non-target view.",
+                ha="center", fontsize=7.5, color="#444444")
+    figure.subplots_adjust(wspace=0.28, top=0.80)
+    return save_figure(figure, directory, "figure19_initial_logit_correction")
