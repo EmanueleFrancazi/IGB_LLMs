@@ -46,6 +46,7 @@ __all__ = [
     "gradient_guess_correlations",
     "gradient_guess_table",
     "gradient_observable_summary",
+    "gradient_vector_split",
     "mean_probability_gradient_table",
     "nucleus_gradient_table",
     "temperature_gradient_summary",
@@ -419,6 +420,36 @@ def temperature_gradient_table(record: Any, temperature: float) -> dict[str, Any
     table["temperature"] = float(temperature)
     table["is_canonical"] = float(temperature) == 1.0
     return table
+
+
+def gradient_vector_split(record: Any) -> dict[str, Any] | None:
+    """The canonical-temperature correct-vs-wrong vector split, if recorded.
+
+    ``None`` when the record predates the diagnostic or the run did not request
+    it. This is an optional metadata block, not a persisted array: every record
+    from version 1 onward remains valid without it, and no schema version was
+    consumed to add it.
+
+    The scalars answer what the norm-mass split cannot. ``M^TP`` and ``M^FN``
+    describe how much gradient magnitude each group generates, but the first
+    optimizer step follows ``g_correct + g_wrong``, and
+    ``||g_correct + g_wrong||`` can be anywhere between
+    ``| ||g_correct|| - ||g_wrong|| |`` and ``||g_correct|| + ||g_wrong||``
+    depending on how the two aggregates align. ``cosine`` is that alignment:
+    positive means the groups reinforce, negative that they oppose, near zero
+    that they are largely independent directions.
+
+    ``cosine`` is ``None`` when either aggregate vanishes -- with no direction
+    there is no angle, and reporting ``0.0`` would assert an orthogonality that
+    was never measured.
+    """
+
+    if not record.has_position_gradients:
+        return None
+    split = record.gradient_analysis.get("vector_split")
+    if not split:
+        return None
+    return dict(split)
 
 
 def _require_paired_position_set(record: Any, what: str) -> None:

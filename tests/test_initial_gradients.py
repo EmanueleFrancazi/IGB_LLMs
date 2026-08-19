@@ -556,3 +556,80 @@ def test_canonical_token_alignment_is_preserved() -> None:
         for key, value in table.items():
             if isinstance(value, np.ndarray) and value.ndim == 1 and value.size > D:
                 assert value.size == VOCAB, key
+
+
+# -- the vector-split accessor (no torch: reads persisted metadata only) ------
+
+
+def test_the_vector_split_is_absent_from_a_record_that_never_measured_it() -> None:
+    """Old records must stay valid; absence is None, never a fabricated zero."""
+
+    from llm_behavior_lab.analysis import gradient_vector_split
+
+    assert gradient_vector_split(_record()) is None
+
+
+def test_the_vector_split_is_returned_when_the_block_is_present() -> None:
+    from llm_behavior_lab.analysis import gradient_vector_split
+
+    record = _record()
+    metadata = {
+        **record.metadata,
+        "analysis": {
+            **record.metadata["analysis"],
+            "gradient_analysis": {
+                **record.metadata["analysis"]["gradient_analysis"],
+                "vector_split": {
+                    "temperature": 1.0,
+                    "norm_correct": 2.0,
+                    "norm_wrong": 3.0,
+                    "norm_total": 4.0,
+                    "dot": 1.5,
+                    "cosine": 0.25,
+                    "num_correct": 7,
+                    "num_wrong": D - 7,
+                },
+            },
+        },
+    }
+    carried = InitializationExperimentRecord.build(
+        corpus_counts=record.corpus_counts,
+        selected_target_counts=record.selected_target_counts,
+        greedy_counts=record.greedy_counts,
+        nucleus_counts=record.nucleus_counts,
+        mean_predicted_probabilities=record.mean_predicted_probabilities,
+        model_seeds=record.model_seeds,
+        eligible_token_ids=record.eligible_token_ids,
+        metadata=metadata,
+        gradient_position_indices=record.gradient_position_indices,
+        gradient_position_target_ids=record.gradient_position_target_ids,
+        gradient_position_greedy_ids=record.gradient_position_greedy_ids,
+        gradient_position_norms=record.gradient_position_norms,
+        gradient_temperatures=record.gradient_temperatures,
+        gradient_temperature_position_norms=record.gradient_temperature_position_norms,
+    )
+
+    split = gradient_vector_split(carried)
+    assert split is not None
+    assert split["num_correct"] + split["num_wrong"] == D
+    assert split["temperature"] == 1.0
+    # A copy, so a caller cannot mutate the record's metadata through it.
+    split["norm_correct"] = -1.0
+    assert gradient_vector_split(carried)["norm_correct"] == 2.0
+
+
+def test_a_record_without_gradients_has_no_vector_split() -> None:
+    from llm_behavior_lab.analysis import gradient_vector_split
+
+    plain = InitializationExperimentRecord.build(
+        corpus_counts=np.bincount(TARGETS, minlength=VOCAB),
+        selected_target_counts=np.bincount(TARGETS, minlength=VOCAB),
+        greedy_counts=np.bincount(GREEDY, minlength=VOCAB)[None, :],
+        nucleus_counts=np.bincount(GREEDY, minlength=VOCAB)[None, None, :],
+        mean_predicted_probabilities=np.full((1, VOCAB), 1.0 / VOCAB),
+        model_seeds=[1000],
+        eligible_token_ids=ELIGIBLE,
+        metadata={},
+    )
+
+    assert gradient_vector_split(plain) is None

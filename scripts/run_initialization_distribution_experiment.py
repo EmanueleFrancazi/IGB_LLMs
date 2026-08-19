@@ -217,6 +217,16 @@ def parse_args() -> argparse.Namespace:
         help="Skip the per-position gradient analysis even if the config enables it.",
     )
     parser.add_argument(
+        "--gradient-vector-split",
+        action="store_true",
+        help=(
+            "Also accumulate the summed parameter gradients of correctly and "
+            "incorrectly assigned positions at T = 1, reporting their norms, dot "
+            "product and cosine. Adds no backward pass; holds two float64 "
+            "parameter-shaped buffers (about 131 MiB at 8.6M parameters)."
+        ),
+    )
+    parser.add_argument(
         "--gradient-windows",
         type=int,
         default=None,
@@ -359,7 +369,15 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         ),
         "shuffle_seed": int(structure.get("shuffle_seed", 60001)),
         "gaussian_seed": int(structure.get("gaussian_seed", 60002)),
-        # A config written before this analysis existed simply does not carry it.
+        # A config written before this analysis existed simply does not carry it,
+        # and neither does a namespace built before the flag was added -- so the
+        # attribute is read defensively, the same way initialization_scale is.
+        # Reaching for it directly turns every older caller into an
+        # AttributeError that has nothing to do with what it was doing.
+        "gradient_vector_split": (
+            bool(gradients.get("vector_split", False))
+            or bool(getattr(args, "gradient_vector_split", False))
+        ),
         "gradient_analysis_enabled": (
             (bool(gradients.get("enabled", False)) or args.gradient_analysis)
             and not args.no_gradient_analysis
@@ -635,7 +653,21 @@ def main() -> None:
                 vocab_size=tokenizer.vocab_size,
                 eligible_token_ids=eligible_token_ids,
                 num_windows=protocol["gradient_num_windows"],
+                vector_split=protocol["gradient_vector_split"],
             )
+            if gradient_result.vector_split is not None:
+                split = gradient_result.vector_split
+                cosine = split["cosine"]
+                print(
+                    f"    vector split (T = {split['temperature']:g}): "
+                    f"||g_correct|| = {split['norm_correct']:.6g} "
+                    f"({split['num_correct']:,} positions), "
+                    f"||g_wrong|| = {split['norm_wrong']:.6g} "
+                    f"({split['num_wrong']:,} positions)\n"
+                    f"      ||g_correct + g_wrong|| = {split['norm_total']:.6g}, "
+                    f"dot = {split['dot']:.6g}, "
+                    f"cos = {'undefined' if cosine is None else f'{cosine:.6f}'}"
+                )
             rate = gradient_result.num_positions / max(gradient_result.seconds, 1e-9)
             print(
                 f"    gradient analysis: {gradient_result.num_positions:,} positions "

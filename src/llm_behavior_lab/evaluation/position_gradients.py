@@ -127,6 +127,9 @@ class PositionGradientResult:
     seconds: float
     definition: str = GRADIENT_DEFINITION
     softmax_support: str = "eligible"
+    #: Scalars of the canonical-temperature correct-vs-wrong vector split, or
+    #: ``None`` when the diagnostic was not requested.
+    vector_split: dict[str, Any] | None = None
 
     @property
     def canonical_index(self) -> int:
@@ -160,8 +163,87 @@ class PositionGradientResult:
             "mean_gradient_norm": float(self.gradient_norms.mean().item()),
             "seconds": round(self.seconds, 3),
         }
+        if self.vector_split is not None:
+            payload["vector_split"] = dict(self.vector_split)
         payload.update(extra)
         return payload
+
+
+class _VectorSplitAccumulator:
+    """Streaming ``g_correct`` and ``g_wrong`` at the canonical temperature.
+
+    Norm mass answers "how much gradient magnitude does each group generate";
+    it cannot answer "where does the first update actually point", because
+    ``sum_d ||g_d||`` is not ``||sum_d g_d||`` and the difference is exactly
+    however much the individual gradients cancel. That needs the vector sums,
+    which is what this accumulates.
+
+    Two parameter-shaped buffers are held, nothing per position: each ``g_d``
+    is added into one of them and released with the gradient set that produced
+    it. Peak cost is therefore two copies of the parameters -- about 131 MiB at
+    8.6M parameters -- and is independent of ``D``.
+
+    float64 throughout, and deliberately with no float32 fallback. The quantity
+    is a sum over tens of thousands of terms whose cosine is the thing being
+    measured; cancellation is the signal, so accumulating it in the precision
+    that loses cancellation would quietly destroy the answer. If the memory ever
+    becomes a real problem it should be reported and decided on, not silently
+    traded away.
+
+    Only the canonical ``T = 1`` grid row is accumulated: that is the objective
+    training will actually use, and one buffer pair per temperature would cost
+    seven times the memory for a question nobody asked.
+    """
+
+    def __init__(self, parameters: Sequence[torch.Tensor]) -> None:
+        self.correct = [
+            torch.zeros_like(parameter, dtype=torch.float64) for parameter in parameters
+        ]
+        self.wrong = [
+            torch.zeros_like(parameter, dtype=torch.float64) for parameter in parameters
+        ]
+        self.num_correct = 0
+        self.num_wrong = 0
+
+    def add(self, grads: Sequence[torch.Tensor], *, is_correct: bool) -> None:
+        """Accumulate one position's gradient into the matching group."""
+
+        target = self.correct if is_correct else self.wrong
+        for buffer, gradient in zip(target, grads):
+            buffer.add_(gradient.detach().double())
+        if is_correct:
+            self.num_correct += 1
+        else:
+            self.num_wrong += 1
+
+    def summary(self) -> dict[str, Any]:
+        """Reduce the two buffers to the reported scalars."""
+
+        squared_correct = torch.zeros((), dtype=torch.float64)
+        squared_wrong = torch.zeros((), dtype=torch.float64)
+        squared_total = torch.zeros((), dtype=torch.float64)
+        dot = torch.zeros((), dtype=torch.float64)
+        for correct, wrong in zip(self.correct, self.wrong):
+            squared_correct += correct.pow(2).sum().cpu()
+            squared_wrong += wrong.pow(2).sum().cpu()
+            squared_total += (correct + wrong).pow(2).sum().cpu()
+            dot += (correct * wrong).sum().cpu()
+
+        norm_correct = float(squared_correct.sqrt())
+        norm_wrong = float(squared_wrong.sqrt())
+        product = norm_correct * norm_wrong
+        return {
+            "temperature": CANONICAL_GRADIENT_TEMPERATURE,
+            "norm_correct": norm_correct,
+            "norm_wrong": norm_wrong,
+            "norm_total": float(squared_total.sqrt()),
+            "dot": float(dot),
+            # Undefined when either group is empty or its sum vanishes; a cosine
+            # of 0.0 would claim orthogonality that was never measured.
+            "cosine": float(dot) / product if product > 0.0 else None,
+            "num_correct": self.num_correct,
+            "num_wrong": self.num_wrong,
+        }
 
 
 def evenly_spaced_indices(total: int, count: int | None = None) -> tuple[int, ...]:
@@ -344,6 +426,7 @@ def compute_position_gradient_norms(
     window_indices: Sequence[int] | None = None,
     num_windows: int | None = None,
     temperatures: Sequence[float] = GRADIENT_TEMPERATURES,
+    vector_split: bool = False,
     progress: Callable[[int, int], None] | None = None,
 ) -> PositionGradientResult:
     """Measure ``g_d`` exactly, one evaluation position at a time.
@@ -364,6 +447,13 @@ def compute_position_gradient_norms(
         window_indices: Explicit window subset. Defaults to every window.
         num_windows: Convenience alternative to ``window_indices``: keep this
             many evenly spaced windows. Ignored when ``window_indices`` is given.
+        vector_split: Also accumulate ``g_correct`` and ``g_wrong``, the summed
+            parameter gradients of correctly and incorrectly assigned positions
+            at the canonical temperature. Off by default, so every existing
+            caller keeps its exact cost and behaviour. Adds no backward pass --
+            it reuses each gradient set already computed for the norm -- but
+            holds two float64 parameter-shaped buffers, about 131 MiB at 8.6M
+            parameters.
         progress: Optional ``callback(windows_done, windows_total)``.
 
     Returns:
@@ -414,6 +504,8 @@ def compute_position_gradient_norms(
     # 7.9 PB. One gradient set exists at a time and is reduced to a scalar.
     gradient_norms = torch.empty((len(grid), total_positions), dtype=torch.float64)
     losses = torch.empty((len(grid), total_positions), dtype=torch.float64)
+    split = _VectorSplitAccumulator(parameters) if vector_split else None
+    canonical_temperature_index = grid.index(CANONICAL_GRADIENT_TEMPERATURE)
 
     was_training = model.training
     started = time.perf_counter()
@@ -471,6 +563,15 @@ def compute_position_gradient_norms(
 
                     gradient_norms[index, cursor] = squared.sqrt().cpu()
                     losses[index, cursor] = loss.detach().double().cpu()
+                    if split is not None and index == canonical_temperature_index:
+                        # The same gradient set the norm was taken from, before
+                        # it is released. No second backward pass.
+                        split.add(
+                            grads,
+                            is_correct=bool(
+                                int(greedy_ids[cursor]) == int(target_ids[cursor])
+                            ),
+                        )
                     del grads, squared, loss
                 cursor += 1
 
@@ -491,6 +592,7 @@ def compute_position_gradient_norms(
         temperatures=grid,
         gradient_norms=gradient_norms[canonical],
         losses=losses[canonical],
+        vector_split=None if split is None else split.summary(),
         parameter_count=sum(parameter.numel() for parameter in parameters),
         num_parameter_tensors=len(parameters),
         num_windows=len(window_indices),
