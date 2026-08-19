@@ -78,6 +78,13 @@ def _exact_gradients(model, positions) -> torch.Tensor:
 
 
 def _cosines(rows: torch.Tensor) -> torch.Tensor:
+    """Cosine matrix of **exact** gradients, where self-normalizing is correct.
+
+    Never apply this to sketches: production divides a raw sketch by the exact
+    gradient norm, and dividing by the sketch's own length instead gives the
+    biased ratio estimator that commit 779dd36 removed.
+    """
+
     unit = rows / rows.norm(dim=1, keepdim=True)
     return unit @ unit.T
 
@@ -92,8 +99,13 @@ def test_the_sketch_preserves_cosines_within_its_error_scale() -> None:
         model, positions, vocab_size=VOCAB, gradient_sketch=True,
         sketch_dimension=DEFAULT_SKETCH_DIMENSION,
     )
-    exact = _cosines(_exact_gradients(model, positions))
-    estimated = _cosines(result.gradient_sketches.double())
+    gradients = _exact_gradients(model, positions)
+    exact = _cosines(gradients)
+    # Production scales the raw sketch by the exact gradient norm, not by the
+    # sketch's own length; self-normalizing here would test a different, biased
+    # estimator than the one the analysis actually uses.
+    scaled = result.gradient_sketches.double() / gradients.norm(dim=1)[:, None]
+    estimated = scaled @ scaled.T
 
     off = ~torch.eye(D, dtype=torch.bool)
     error = (estimated[off] - exact[off]).abs()
@@ -111,13 +123,15 @@ def test_a_wider_sketch_is_more_accurate() -> None:
     exact = _cosines(_exact_gradients(model, positions))
     off = ~torch.eye(D, dtype=torch.bool)
 
+    norms = _exact_gradients(model, positions).norm(dim=1)
     errors = {}
     for dimension in (32, 1024):
         result = compute_position_gradient_norms(
             model, positions, vocab_size=VOCAB, gradient_sketch=True,
             sketch_dimension=dimension,
         )
-        estimated = _cosines(result.gradient_sketches.double())
+        scaled = result.gradient_sketches.double() / norms[:, None]
+        estimated = scaled @ scaled.T
         errors[dimension] = float((estimated[off] - exact[off]).abs().mean())
 
     assert errors[1024] < errors[32]
@@ -246,12 +260,29 @@ def test_sketching_leaves_model_state_and_rng_untouched() -> None:
     assert torch.equal(torch.get_rng_state(), rng_state)
 
 
-def test_clustering_recovers_planted_structure_from_real_gradients() -> None:
-    """End to end: identical targets should give more aligned gradients.
+def test_sketch_similarity_matches_exact_gradient_similarity() -> None:
+    """Implementation fidelity: does the sketch reproduce the exact geometry?
 
-    Positions sharing a target share a loss, so this is the weakest form of the
-    hypothesis the diagnostic exists to test -- and it must be visible through
-    the sketch, not only in the exact gradients.
+    This is the only end-to-end claim that is mathematically guaranteed. Whether
+    positions sharing a target have aligned gradients is the **empirical
+    hypothesis of the experiment**, not a property of a randomly initialized
+    model, so it is deliberately not asserted here: for
+
+        g_d = J_d^T (p_d - e_y)
+
+    two positions can share ``y`` and still have unrelated Jacobians and
+    predictive vectors. On this architecture the input token in fact dominates --
+    distinct inputs give orthogonal embedding-gradient rows -- and the sign of
+    within minus between flips with the seed. Encoding it as a unit-test
+    expectation would make the server gate depend on a coin flip.
+
+    What must hold is that the sketch estimates whatever geometry is there. So
+    the exact gradients are retained, their cosine geometry computed directly,
+    and the production estimator -- raw sketch divided by the **exact** gradient
+    norm, as ``unit_sketches`` does -- is required to agree with it.
+
+    ``within > between`` is asserted where it is planted and therefore true: the
+    synthetic NumPy tests in ``tests/test_gradient_clustering.py``.
     """
 
     import numpy as np
@@ -260,27 +291,88 @@ def test_clustering_recovers_planted_structure_from_real_gradients() -> None:
 
     model = TinyModel()
     base = _positions()
-    # Two target classes, each repeated across many positions.
     targets = base.target_ids.clone().reshape(-1)
     targets[: D // 2] = 3
     targets[D // 2 :] = 7
-    positions = dataclasses.replace(
-        base, target_ids=targets.reshape(WINDOWS, BLOCK)
+    positions = dataclasses.replace(base, target_ids=targets.reshape(WINDOWS, BLOCK))
+
+    dimension = 2048
+    result = compute_position_gradient_norms(
+        model, positions, vocab_size=VOCAB,
+        gradient_sketch=True, sketch_dimension=dimension,
     )
+
+    exact = _exact_gradients(model, positions)
+    exact_norms = exact.norm(dim=1)
+    # Production scaling, applied to both sides so only the projection differs.
+    exact_rows = (exact / exact_norms[:, None]).numpy()
+    sketch_rows = (
+        result.gradient_sketches.double() / exact_norms[:, None]
+    ).numpy()
+
+    # The persisted norms must be the ones used, so check they agree first.
+    assert torch.allclose(result.gradient_norms, exact_norms, rtol=1e-9, atol=0)
+
+    labels = targets.numpy()
+    classes = np.array([3, 7])
+    truth = class_similarity_matrix(exact_rows, labels, classes)["matrix"]
+    estimate = class_similarity_matrix(sketch_rows, labels, classes)["matrix"]
+
+    assert np.isfinite(truth).all() and np.isfinite(estimate).all()
+    error = np.abs(estimate - truth)
+    # A count sketch estimates a cosine with a standard error near 1/sqrt(K);
+    # at K = 2048 that is about 0.022, so these are roughly 2 and 8 sigma.
+    assert float(error.mean()) < 0.05, (estimate, truth)
+    assert float(error.max()) < 0.20, (estimate, truth)
+
+
+def test_identical_examples_give_identical_gradients_through_the_sketch() -> None:
+    """A guaranteed positive control, without relying on a random property.
+
+    Two positions with the same input *and* the same target produce exactly the
+    same gradient, so their cosine is 1 by construction rather than by
+    hypothesis. Class coherence must therefore come out at 1 for both the exact
+    gradients and the sketch, which is a real end-to-end clustering case that
+    cannot flip with the seed.
+    """
+
+    import numpy as np
+
+    from llm_behavior_lab.analysis.gradient_clustering import class_similarity_matrix
+
+    model = TinyModel()
+    base = _positions()
+    # Two windows repeated: window 0 duplicated, then window 1 duplicated.
+    inputs = base.input_ids.clone()
+    inputs[1] = inputs[0]
+    inputs[3] = inputs[2]
+    targets = base.target_ids.clone()
+    targets[0] = targets[1] = 3
+    targets[2] = targets[3] = 7
+    positions = dataclasses.replace(base, input_ids=inputs, target_ids=targets)
 
     result = compute_position_gradient_norms(
-        model, positions, vocab_size=VOCAB, gradient_sketch=True
+        model, positions, vocab_size=VOCAB,
+        gradient_sketch=True, sketch_dimension=2048,
     )
-    sketches = result.gradient_sketches.double().numpy()
-    unit = sketches / np.linalg.norm(sketches, axis=1, keepdims=True)
-    labels = targets.numpy()
+    exact_norms = result.gradient_norms
+    rows = (result.gradient_sketches.double() / exact_norms[:, None]).numpy()
 
-    matrix = class_similarity_matrix(unit, labels, np.array([3, 7]))["matrix"]
+    # Offset j of window 0 and offset j of window 1 are the same computation.
+    for offset in range(BLOCK):
+        first, second = offset, BLOCK + offset
+        cosine = float(
+            rows[first] @ rows[second]
+            / (np.linalg.norm(rows[first]) * np.linalg.norm(rows[second]))
+        )
+        assert cosine == pytest.approx(1.0, abs=1e-9)
 
+    labels = np.repeat([3, 3, 7, 7], BLOCK)
+    matrix = class_similarity_matrix(rows, labels, np.array([3, 7]))["matrix"]
+    # Duplicated pairs sit at 1; the class mean mixes them with distinct
+    # offsets, so only the guaranteed bound is asserted.
     assert np.isfinite(matrix).all()
-    # Within-class must exceed between-class for both classes.
-    assert matrix[0, 0] > matrix[0, 1]
-    assert matrix[1, 1] > matrix[0, 1]
+    assert matrix[0, 0] <= 1.0 + 1e-9 and matrix[1, 1] <= 1.0 + 1e-9
 
 
 def test_sketched_aggregates_match_the_exact_vector_split() -> None:
