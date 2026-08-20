@@ -41,7 +41,10 @@ __all__ = [
     "SENSITIVITY_DIMENSIONS",
     "count_sketch_matrix",
     "cosine_from_gram",
+    "SANITY_ARTIFACT",
     "fidelity_report",
+    "load_fidelity_artifact",
+    "sanity_artifact_path",
     "pair_type_breakdown",
     "subgroup_delta",
     "select_sanity_positions",
@@ -411,3 +414,76 @@ def fidelity_report(
             for name in ("target", "greedy")
         },
     }
+
+
+#: Where a run keeps its fidelity artifact, relative to the run root.
+SANITY_ARTIFACT = ("sanity", "countsketch_fidelity.npz")
+
+
+def sanity_artifact_path(record_dir) -> "Any":
+    """Resolve a run's fidelity artifact from its ``analyses`` directory.
+
+    The renderer is handed ``<run>/analyses`` because that is where the main
+    record lives, while this artifact sits beside it under ``<run>/sanity``.
+    Resolving from the run root keeps that relationship in one place instead of
+    spreading path arithmetic through the renderer.
+    """
+
+    from pathlib import Path
+
+    return Path(record_dir).parent.joinpath(*SANITY_ARTIFACT)
+
+
+def load_fidelity_artifact(path) -> dict[str, Any]:
+    """Rebuild the report the fidelity figure consumes from a saved artifact.
+
+    Only what the figure needs is reconstructed. The artifact deliberately holds
+    derived results rather than the full gradients, so nothing here recomputes a
+    projection or touches a model.
+    """
+
+    from pathlib import Path
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"No CountSketch fidelity artifact at {path}.")
+
+    with np.load(path) as data:
+        exact = np.asarray(data["exact_cosine_matrix"], dtype=np.float64)
+        production = np.asarray(data["production_cosine_matrix"], dtype=np.float64)
+        report: dict[str, Any] = {
+            "num_gradients": int(exact.shape[0]),
+            "gradient_dtype": "float32",
+            "accumulation_dtype": "float64",
+            "production_dimension": int(data["k_values"][
+                int(np.argmin(np.abs(np.asarray(data["k_values"]) - 512)))
+            ]) if "k_values" in data else 512,
+            "production_seed": 20240917,
+            "exact_cosines": exact,
+            "production_cosines": production,
+            "production": _errors(exact, production),
+            "selected_position_indices": np.asarray(data["selected_position_indices"]),
+            "selected_target_ids": np.asarray(data["selected_target_ids"]),
+            "selected_greedy_ids": np.asarray(data["selected_greedy_ids"]),
+            "sensitivity": [
+                {
+                    "dimension": int(dimension),
+                    "mean_absolute_error": float(mae),
+                    "rmse": float(rmse),
+                }
+                for dimension, mae, rmse in zip(
+                    data["k_values"], data["k_mae"], data["k_rmse"]
+                )
+            ] if "k_values" in data else [],
+        }
+        report["pair_types"] = pair_type_breakdown(
+            exact, production,
+            report["selected_target_ids"], report["selected_greedy_ids"],
+        )
+        for name in ("target", "greedy"):
+            key = f"{name}_delta_error"
+            if key in data:
+                report.setdefault("subgroup_deltas", {})[name] = {
+                    "delta_error": float(np.asarray(data[key]).reshape(-1)[0])
+                }
+    return report

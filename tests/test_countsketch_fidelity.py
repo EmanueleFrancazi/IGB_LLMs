@@ -325,3 +325,101 @@ def test_the_report_carries_exact_and_sketched_deltas_and_their_error() -> None:
         )
         # The realization-to-realization spread of that same statistic.
         assert len(report["alternate_delta_errors"][name]) == 3
+
+
+# -- renderer integration ----------------------------------------------------
+
+
+def _write_artifact(run_root, rows: int = 8):
+    """A compact synthetic artifact in the layout a real run produces."""
+
+    values, norms = _gradients(rows=rows)
+    targets = np.array([1, 1, 2, 2, 3, 4, 5, 6][:rows], dtype=np.int64)
+    greedy = np.array([9, 8, 9, 7, 6, 5, 4, 3][:rows], dtype=np.int64)
+    report = fidelity_report(
+        values, norms, targets, greedy,
+        production_dimension=512, production_seed=20240917,
+        alternate_seeds=(1, 2), sensitivity_dimensions=(128, 512),
+    )
+    destination = run_root / "sanity"
+    destination.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        destination / "countsketch_fidelity.npz",
+        selected_position_indices=np.arange(rows),
+        selected_target_ids=targets,
+        selected_greedy_ids=greedy,
+        exact_norms=norms,
+        exact_cosine_matrix=report["exact_cosines"],
+        production_cosine_matrix=report["production_cosines"],
+        k_values=np.asarray([entry["dimension"] for entry in report["sensitivity"]]),
+        k_mae=np.asarray(
+            [entry["mean_absolute_error"] for entry in report["sensitivity"]]
+        ),
+        k_rmse=np.asarray([entry["rmse"] for entry in report["sensitivity"]]),
+    )
+    return destination / "countsketch_fidelity.npz"
+
+
+def test_the_artifact_resolves_from_the_analyses_directory(tmp_path) -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import sanity_artifact_path
+
+    written = _write_artifact(tmp_path)
+
+    assert sanity_artifact_path(tmp_path / "analyses") == written
+    assert sanity_artifact_path(tmp_path / "analyses").is_file()
+
+
+def test_a_missing_artifact_raises_rather_than_returning_empty(tmp_path) -> None:
+    """The all-figures path catches this; --only must say what is wrong."""
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        load_fidelity_artifact,
+        sanity_artifact_path,
+    )
+
+    with pytest.raises(FileNotFoundError, match="fidelity artifact"):
+        load_fidelity_artifact(sanity_artifact_path(tmp_path / "analyses"))
+
+
+def test_the_loaded_report_reproduces_the_saved_matrices(tmp_path) -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import load_fidelity_artifact
+
+    written = _write_artifact(tmp_path)
+
+    report = load_fidelity_artifact(written)
+
+    assert report["num_gradients"] == 8
+    assert report["production_cosines"].shape == (8, 8)
+    assert report["accumulation_dtype"] == "float64"
+    # Errors are recomputed from the stored matrices, not re-projected.
+    assert report["production"]["num_pairs"] == 28
+    assert set(report["pair_types"]) == {
+        "same_target_and_greedy", "same_target_only",
+        "same_greedy_only", "different_both",
+    }
+
+
+def test_the_fidelity_figure_routes_to_sanity_checks(tmp_path) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.countsketch_fidelity import load_fidelity_artifact
+    from llm_behavior_lab.analysis.figures import plot_countsketch_fidelity
+
+    written = _write_artifact(tmp_path)
+    report = load_fidelity_artifact(written)
+
+    paths = plot_countsketch_fidelity(report, tmp_path / "figures")
+
+    assert len(paths) == 1
+    assert paths[0].parent.name == "sanity_checks"
+    assert paths[0].name == "figure23_countsketch_fidelity.svg"
+    assert paths[0].stat().st_size > 0
+
+
+def test_figure_23_is_categorised_as_a_sanity_check() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.figures import figure_category
+
+    assert figure_category("figure23_countsketch_fidelity") == "sanity_checks"
+    # And the existing routing is untouched.
+    assert figure_category("figure20_gradient_directional_clustering") == "main"
+    assert figure_category("figure0_sampling_adequacy") == "sanity_checks"

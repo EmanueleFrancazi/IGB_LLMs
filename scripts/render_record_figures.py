@@ -71,6 +71,7 @@ FIGURES = {
     "figure19": "plot_initial_logit_correction",
     "figure20": "plot_gradient_directional_clustering",
     "figure21": "plot_correction_provenance",
+    "figure23": "plot_countsketch_fidelity",
 }
 
 #: Figures that exist only when the record carries the analysis behind them.
@@ -448,6 +449,27 @@ def report_gradient_clustering(record: Any, *, display_classes: int = 40) -> dic
     return summaries
 
 
+
+def _render_countsketch_fidelity(figure_module, record_dir, figures_dir):
+    """Draw figure 23 from the run's fidelity artifact.
+
+    Figure 23 is the one figure not backed by the initialization-distribution
+    record: it consumes ``<run>/sanity/countsketch_fidelity.npz``, resolved from
+    the same run root the ``analyses`` directory sits in. Everything else about
+    it -- category routing, output directory, printed path -- follows the normal
+    conventions.
+    """
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        load_fidelity_artifact,
+        sanity_artifact_path,
+    )
+
+    artifact = sanity_artifact_path(record_dir)
+    report = load_fidelity_artifact(artifact)
+    return figure_module.plot_countsketch_fidelity(report, figures_dir)
+
+
 def main() -> None:
     """Report the available statistics and redraw the requested figures."""
 
@@ -490,6 +512,14 @@ def main() -> None:
 
     if args.only == "all":
         written = figure_module.generate_all_figures(record, figures_dir)
+        # Backed by a separate artifact, so it joins the set only when a sanity
+        # run actually produced one. Its absence must never break the rest.
+        try:
+            written = written + _render_countsketch_fidelity(
+                figure_module, args.record_dir, figures_dir
+            )
+        except FileNotFoundError:
+            pass
     else:
         required = CONDITIONAL_FIGURES.get(args.only)
         if required is not None and not getattr(record, required):
@@ -497,6 +527,14 @@ def main() -> None:
                 f"This record does not carry the analysis behind {args.only} "
                 f"({required} is false), so it cannot be drawn from it."
             )
+        if args.only == "figure23":
+            written = _render_countsketch_fidelity(
+                figure_module, args.record_dir, figures_dir
+            )
+            print()
+            for path in written:
+                print(f"Figure: {path}")
+            return
         function = getattr(figure_module, FIGURES[args.only])
         # Each of these figures exposes exactly one scale knob, under the name
         # its own axis uses.
