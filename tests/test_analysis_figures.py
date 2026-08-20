@@ -114,11 +114,11 @@ def test_rerunning_overwrites_rather_than_accumulating(tmp_path) -> None:
     """Deterministic filenames keep a run directory from filling with variants."""
 
     generate_all_figures(_record(), tmp_path)
-    first = sorted(path.name for path in tmp_path.iterdir())
+    first = sorted(path.name for path in tmp_path.rglob("*.svg"))
 
     generate_all_figures(_record(), tmp_path)
 
-    assert sorted(path.name for path in tmp_path.iterdir()) == first
+    assert sorted(path.name for path in tmp_path.rglob("*.svg")) == first
 
 
 def test_figures_do_not_touch_global_pyplot_state() -> None:
@@ -220,7 +220,7 @@ def test_large_vocabulary_output_stays_a_reasonable_size(tmp_path) -> None:
 
     generate_all_figures(_large_record(), tmp_path)
 
-    for path in tmp_path.glob("*.svg"):
+    for path in tmp_path.rglob("*.svg"):
         assert path.stat().st_size < 2_000_000, f"{path.name} is too large"
 
 
@@ -272,7 +272,8 @@ def test_only_svg_artifacts_are_written(tmp_path) -> None:
 
     generate_all_figures(_record(), tmp_path)
 
-    written = sorted(path.name for path in tmp_path.iterdir())
+    # Figures are routed into category subdirectories, so recurse.
+    written = sorted(path.name for path in tmp_path.rglob("*.svg"))
     assert written == [
         "figure0_sampling_adequacy.svg",
         "figure1_ranked_frequency_profiles.svg",
@@ -287,7 +288,7 @@ def test_no_png_is_produced(tmp_path) -> None:
     generate_all_figures(_record(), tmp_path)
 
     assert list(tmp_path.glob("*.png")) == []
-    assert len(list(tmp_path.glob("*.svg"))) == 4
+    assert len(list(tmp_path.rglob("*.svg"))) == 4
 
 
 def test_the_declared_format_list_is_svg_only() -> None:
@@ -302,7 +303,7 @@ def test_a_subword_figure_set_is_also_svg_only(tmp_path) -> None:
     generate_all_figures(_large_record(), tmp_path)
 
     assert list(tmp_path.glob("*.png")) == []
-    assert len(list(tmp_path.glob("*.svg"))) == 4
+    assert len(list(tmp_path.rglob("*.svg"))) == 4
 
 
 # --- Uniform null and input-structure figures -----------------------------
@@ -387,7 +388,9 @@ def test_figure_one_labels_the_null_interval_as_monte_carlo(tmp_path) -> None:
 
     plot_ranked_frequency_profiles(_record_with_extras(), tmp_path)
 
-    content = (tmp_path / "figure1_ranked_frequency_profiles.svg").read_text(encoding="utf-8")
+    content = (
+        tmp_path / "main" / "figure1_ranked_frequency_profiles.svg"
+    ).read_text(encoding="utf-8")
     assert "Monte" in content and "Carlo" in content
     assert "SEM" in content
 
@@ -500,7 +503,7 @@ def test_a_run_without_input_conditions_writes_four(tmp_path) -> None:
     written = generate_all_figures(_record(), tmp_path)
 
     assert len(written) == 4
-    assert not (tmp_path / "figure4_input_structure_profiles.svg").exists()
+    assert not (tmp_path / "main" / "figure4_input_structure_profiles.svg").exists()
 
 
 def test_the_new_figures_render_at_a_subword_vocabulary(tmp_path) -> None:

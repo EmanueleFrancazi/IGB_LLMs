@@ -28,6 +28,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+import numpy as np
 from typing import Any
 
 # Allow running from the repository root before editable installation.
@@ -386,6 +388,63 @@ def report_temperature_gradients(record: Any) -> dict[str, Any]:
     return summary
 
 
+def report_gradient_clustering(record: Any, *, display_classes: int = 40) -> dict[str, Any]:
+    """Print the figure-20 statistics for both groupings.
+
+    The population line and the display line are printed separately on purpose:
+    the pooled statistic covers every class with n >= 2, while the heatmap draws
+    only the most supported ones, and an earlier version of this analysis
+    conflated the two.
+    """
+
+    from llm_behavior_lab.analysis import gradient_clustering
+
+    print("\n== Gradient directional clustering (T = 1) ==")
+    summaries = {}
+    for grouping in ("target", "greedy"):
+        result = gradient_clustering(
+            record, grouping=grouping, display_classes=display_classes
+        )
+        summaries[grouping] = result
+        population, null, display = (
+            result["population"], result["null"], result["display"]
+        )
+        print(f"\n  -- grouped by {grouping} token --")
+        print(f"    represented classes            : {population['num_represented']:,}")
+        print(f"    classes with n >= {result['min_support']}            : "
+              f"{population['num_classes']:,}")
+        print(f"    classes displayed in heatmap   : {display['num_classes']:,}"
+              f"   ({display['selection']})")
+        print(f"    pooled within                  : {population['within']:+.8f}")
+        print(f"    pooled between                 : {population['between']:+.8f}")
+        print(f"    pooled delta                   : {population['delta']:+.8f}")
+        print(f"    permutation null mean          : {null['delta_mean']:+.8f}")
+        print(f"    permutation null std           : {null['delta_std']:.8f}")
+        print(f"    permutation null 2.5%          : {null['delta_low']:+.8f}")
+        print(f"    permutation null 97.5%         : {null['delta_high']:+.8f}")
+        print(f"    permutations                   : {null['permutations']}"
+              f"   (seed {result['permutation_seed']})")
+        print(f"    positions used                 : {result['num_positions']:,}"
+              f"   (excluded {result['num_positions_excluded']:,})")
+
+        # The most internally coherent displayed classes, as a diagnostic only.
+        coherence = display["within_by_class"]
+        finite = np.flatnonzero(np.isfinite(coherence))
+        if finite.size:
+            top = finite[np.argsort(-coherence[finite])[:8]]
+            tokens = getattr(record, "tokens", None)
+            print("    most coherent displayed classes:")
+            for index in top:
+                token_id = int(display["classes"][index])
+                text = (
+                    repr(tokens[token_id])[:16] if tokens and token_id < len(tokens)
+                    else "<no vocabulary>"
+                )
+                print(f"      id {token_id:>6}  n={int(display['counts'][index]):<6}"
+                      f" within={coherence[index]:+.6f}  {text}")
+    return summaries
+
+
 def main() -> None:
     """Report the available statistics and redraw the requested figures."""
 
@@ -409,6 +468,8 @@ def main() -> None:
         statistics["gradients"] = report_gradient_statistics(record)
     if record.has_temperature_gradient_analysis:
         statistics["temperature_gradients"] = report_temperature_gradients(record)
+    if record.has_gradient_position_sketches:
+        report_gradient_clustering(record)
     if statistics:
         if args.stats_json is not None:
             args.stats_json.parent.mkdir(parents=True, exist_ok=True)

@@ -177,8 +177,8 @@ def test_planted_clustering_is_detected() -> None:
 
     result = gradient_clustering(record, grouping="target")
 
-    assert result["observed"]["within"] > result["observed"]["between"]
-    assert result["observed"]["delta"] > 0.2
+    assert result["population"]["within"] > result["population"]["between"]
+    assert result["population"]["delta"] > 0.2
     # And the permutation reference must not reproduce it.
     assert abs(result["null"]["delta_mean"]) < 0.05
 
@@ -191,13 +191,13 @@ def test_unstructured_gradients_show_no_clustering() -> None:
 
     result = gradient_clustering(record, grouping="target")
 
-    assert abs(result["observed"]["delta"]) < 0.05
+    assert abs(result["population"]["delta"]) < 0.05
     # Within noise of the null. Deliberately not "inside the 95% interval": with
     # no planted structure the observed delta is itself a draw from that null, so
     # it falls outside a 95% interval about one time in twenty and such an
     # assertion would flake by construction.
     null = result["null"]
-    assert abs(result["observed"]["delta"] - null["delta_mean"]) < 4.0 * null["delta_std"]
+    assert abs(result["population"]["delta"] - null["delta_mean"]) < 4.0 * null["delta_std"]
 
 
 def test_opposing_subgroups_give_a_negative_delta() -> None:
@@ -218,8 +218,8 @@ def test_opposing_subgroups_give_a_negative_delta() -> None:
 
     result = gradient_clustering(record, grouping="target")
 
-    assert result["observed"]["within"] < 0.0
-    assert result["observed"]["delta"] < 0.0
+    assert result["population"]["within"] < 0.0
+    assert result["population"]["delta"] < 0.0
 
 
 def test_the_two_groupings_are_computed_independently() -> None:
@@ -241,8 +241,8 @@ def test_the_two_groupings_are_computed_independently() -> None:
     record = _record(unit, targets, greedy)
 
     summary = clustering_summary(record)
-    target_delta = summary["target"]["observed"]["delta"]
-    greedy_delta = summary["greedy"]["observed"]["delta"]
+    target_delta = summary["target"]["population"]["delta"]
+    greedy_delta = summary["greedy"]["population"]["delta"]
 
     assert target_delta > 0.5
     assert greedy_delta < 0.0
@@ -260,8 +260,8 @@ def test_the_analysis_is_deterministic() -> None:
     first = gradient_clustering(record, grouping="target")
     second = gradient_clustering(record, grouping="target")
 
-    assert np.array_equal(first["matrix"], second["matrix"], equal_nan=True)
-    assert first["observed"] == second["observed"]
+    assert np.array_equal(first["display"]["matrix"], second["display"]["matrix"], equal_nan=True)
+    assert first["population"]["delta"] == second["population"]["delta"]
     assert first["null"] == second["null"]
 
 
@@ -294,7 +294,7 @@ def test_gradient_magnitude_divides_out() -> None:
         grouping="target",
     )
 
-    assert np.allclose(plain["matrix"], rescaled["matrix"], atol=1e-10, equal_nan=True)
+    assert np.allclose(plain["display"]["matrix"], rescaled["display"]["matrix"], atol=1e-10, equal_nan=True)
 
 
 def test_the_diagonal_subtracts_measured_self_norms_not_the_class_count() -> None:
@@ -354,11 +354,11 @@ def test_min_support_and_display_limits_are_reported_not_silent() -> None:
     unit, labels = _clustered(num_classes=6, per_class=4, alignment=0.5)
     record = _record(unit, labels, labels)
 
-    limited = gradient_clustering(record, grouping="target", max_classes=3)
+    limited = gradient_clustering(record, grouping="target", display_classes=3)
 
-    assert limited["classes"].size == 3
+    assert limited["display"]["classes"].size == 3
     assert limited["min_support"] == 2
-    assert limited["observed"]["num_classes"] == 3
+    assert limited["population"]["num_classes"] > 3
 
 
 def test_a_record_without_sketches_is_refused() -> None:
@@ -419,9 +419,9 @@ def test_the_clustering_figure_renders_and_shows_the_planted_diagonal(tmp_path):
     assert written[0].name.startswith("figure20_")
 
     # The pattern the figure is supposed to reveal, asserted on the numbers it draws.
-    result = gradient_clustering(record, grouping="target", max_classes=6)
-    diagonal = np.diag(result["matrix"])
-    off = result["matrix"][~np.eye(6, dtype=bool)]
+    result = gradient_clustering(record, grouping="target", display_classes=6)
+    diagonal = np.diag(result["display"]["matrix"])
+    off = result["display"]["matrix"][~np.eye(6, dtype=bool)]
     assert np.nanmin(diagonal) > np.nanmax(off)
 
 
@@ -437,5 +437,200 @@ def test_the_clustering_figure_renders_when_there_is_no_structure(tmp_path):
     written = plot_gradient_directional_clustering(record, tmp_path, display_classes=5)
 
     assert len(written) == 1
-    result = gradient_clustering(record, grouping="target", max_classes=5)
-    assert abs(result["observed"]["delta"]) < 0.05
+    result = gradient_clustering(record, grouping="target", display_classes=5)
+    assert abs(result["population"]["delta"]) < 0.05
+
+
+# -- population versus display, the correction this phase makes ---------------
+
+
+def test_the_pooled_statistic_ignores_the_display_subset() -> None:
+    """Display selection must never move the population number.
+
+    An earlier version applied one argument to both, so the reported effect
+    silently shrank to whatever fitted on the axes. This is the regression guard.
+    """
+
+    unit, labels = _clustered(num_classes=8, per_class=6, alignment=0.7)
+    record = _record(unit, labels, labels)
+
+    full = gradient_clustering(record, grouping="target", display_classes=None)
+    tiny = gradient_clustering(record, grouping="target", display_classes=3)
+
+    assert full["population"]["delta"] == tiny["population"]["delta"]
+    assert full["population"]["num_classes"] == tiny["population"]["num_classes"] == 8
+    assert full["null"]["delta_mean"] == tiny["null"]["delta_mean"]
+    # ... while the drawn matrix really did shrink.
+    assert tiny["display"]["matrix"].shape == (3, 3)
+    assert full["display"]["matrix"].shape == (8, 8)
+
+
+def test_the_display_subset_takes_the_most_supported_classes() -> None:
+    """Deterministic selection, documented in the returned description."""
+
+    sizes = [2, 3, 4, 9, 10, 11]
+    rows, labels = [], []
+    generator = np.random.default_rng(3)
+    for index, size in enumerate(sizes):
+        rows.append(_unit(generator.normal(size=(size, K))))
+        labels.extend([ELIGIBLE[index]] * size)
+    record = _record(np.vstack(rows), np.asarray(labels), np.asarray(labels))
+
+    result = gradient_clustering(record, grouping="target", display_classes=3)
+
+    assert sorted(result["display"]["classes"]) == sorted(ELIGIBLE[3:6])
+    assert "3 most supported of 6 qualifying classes" in result["display"]["selection"]
+    assert result["population"]["num_classes"] == 6
+
+
+def test_both_groupings_share_the_gradients_and_differ_only_in_labels() -> None:
+    """Same sketches, same norms, same sketch realization; only labels change."""
+
+    unit, targets = _clustered(num_classes=4, per_class=8, alignment=0.8)
+    greedy = np.asarray(
+        [ELIGIBLE[index % 4] for index in range(targets.size)], dtype=np.int64
+    )
+    record = _record(unit, targets, greedy)
+
+    summary = clustering_summary(record)
+
+    # Identical inputs: the position count and sketch width cannot differ.
+    assert summary["target"]["num_positions"] == summary["greedy"]["num_positions"]
+    assert summary["target"]["sketch_dimension"] == summary["greedy"]["sketch_dimension"]
+    # But the labels genuinely differ, so the answers do too.
+    assert not np.array_equal(
+        record.gradient_position_target_ids, record.gradient_position_greedy_ids
+    )
+    assert summary["target"]["population"]["delta"] != summary["greedy"]["population"]["delta"]
+
+
+def test_sketch_rows_stay_aligned_with_both_label_arrays() -> None:
+    """Row d must be the same position across sketch, norm, target and greedy."""
+
+    unit, targets = _clustered(num_classes=4, per_class=5, alignment=0.6)
+    greedy = np.roll(targets, 3)
+    record = _record(unit, targets, greedy)
+
+    positions = targets.size
+    assert record.gradient_position_sketches.shape[0] == positions
+    assert record.gradient_position_norms.shape[0] == positions
+    assert record.gradient_position_target_ids.shape[0] == positions
+    assert record.gradient_position_greedy_ids.shape[0] == positions
+    assert np.array_equal(record.gradient_position_indices, np.arange(positions))
+    # And the scaled rows keep that order.
+    scaled, usable = unit_sketches(record)
+    assert scaled.shape[0] == positions and usable.all()
+
+
+# -- display labels ----------------------------------------------------------
+
+
+def test_invisible_and_special_tokens_get_readable_labels() -> None:
+    """No axis tick may render blank, and identity must survive decoding."""
+
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.figures import _token_axis_label
+
+    unit, labels = _clustered(num_classes=4, per_class=4, alignment=0.5)
+    record = _record(unit, labels, labels)
+    # A vocabulary whose awkward entries are exactly the ones that render blank
+    # or break an axis if passed through untouched.
+    vocabulary = [f"t{index}" for index in range(VOCAB)]
+    for token_id, text in ((2, "\n"), (3, " "), (4, "<0x0A>"), (5, ""), (6, "\t")):
+        vocabulary[token_id] = text
+    record.metadata["tokens"] = vocabulary
+
+    for token_id in (2, 3, 4, 5, 6):
+        label = _token_axis_label(record, token_id)
+        assert label.strip(), f"token {token_id} rendered blank"
+        assert "\n" not in label, "a raw newline would break the axis"
+
+    # Decoding is presentational: it must not change which class is which.
+    result = gradient_clustering(record, grouping="target", display_classes=4)
+    assert result["display"]["classes"].dtype.kind in "iu"
+    assert set(result["display"]["classes"]).issubset(set(labels))
+
+
+def test_a_record_without_a_vocabulary_falls_back_to_ids() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.figures import _token_axis_label
+
+    unit, labels = _clustered(num_classes=3, per_class=4, alignment=0.5)
+    record = _record(unit, labels, labels)
+    record.metadata.pop("tokens", None)
+
+    assert _token_axis_label(record, 7) == "7"
+
+
+# -- the two heatmaps must be directly comparable ----------------------------
+
+
+def test_both_heatmaps_share_one_colour_normalization(tmp_path) -> None:
+    """Independently rescaled panels would make any grouping look structured."""
+
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis import figures as module
+
+    unit, targets = _clustered(num_classes=5, per_class=6, alignment=0.8)
+    greedy = np.asarray(
+        [ELIGIBLE[index % 5] for index in range(targets.size)], dtype=np.int64
+    )
+    record = _record(unit, targets, greedy)
+
+    held = {}
+    original = module.save_figure
+
+    def spy(figure, *args, **kwargs):
+        held["figure"] = figure
+        return original(figure, *args, **kwargs)
+
+    module.save_figure = spy
+    try:
+        module.plot_gradient_directional_clustering(record, tmp_path, display_classes=5)
+    finally:
+        module.save_figure = original
+
+    images = [
+        image
+        for axes in held["figure"].axes
+        for image in axes.get_images()
+    ]
+    assert len(images) == 2
+    first, second = images
+    assert first.get_clim() == second.get_clim()
+    assert first.get_cmap().name == second.get_cmap().name
+    # Zero-centred.
+    low, high = first.get_clim()
+    assert low == pytest.approx(-high)
+
+
+# -- figure routing ----------------------------------------------------------
+
+
+def test_figures_route_into_their_category_folders(tmp_path) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.figures import figure_category
+
+    assert figure_category("figure0_sampling_adequacy") == "sanity_checks"
+    assert figure_category("figure20_gradient_directional_clustering") == "main"
+    assert figure_category("figure1_ranked") == "main"
+    assert figure_category("figure17_initial") == "diagnostics"
+    assert figure_category("figure21_correction") == "diagnostics"
+    # An unknown stem stays visible rather than being dropped.
+    assert figure_category("supplementary_t1_gradient") == "diagnostics"
+
+
+def test_save_figure_creates_the_category_subdirectory(tmp_path) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis import figures as module
+
+    unit, labels = _clustered(num_classes=4, per_class=5, alignment=0.7)
+    record = _record(unit, labels, labels)
+
+    written = module.plot_gradient_directional_clustering(
+        record, tmp_path, display_classes=4
+    )
+
+    assert written[0].parent.name == "main"
+    assert written[0].parent.parent == tmp_path
+    assert written[0].stat().st_size > 0

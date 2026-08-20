@@ -326,27 +326,41 @@ def gradient_clustering(
     *,
     grouping: str = "target",
     min_support: int = 2,
-    max_classes: int | None = None,
+    display_classes: int | None = None,
     permutations: int = DEFAULT_PERMUTATIONS,
     permutation_seed: int = 20240918,
 ) -> dict[str, Any]:
     """Directional clustering of gradients under one subgroup definition.
 
+    Two populations are kept strictly apart, and conflating them was a real
+    defect in an earlier version of this function.
+
+    The **analysis population** is every class with at least ``min_support``
+    members. Pooled within, pooled between, ``delta`` and the permutation null
+    are all computed over it, so they describe the experiment rather than a
+    plotting choice.
+
+    The **display subset** is the ``display_classes`` most supported classes,
+    chosen deterministically. It exists only so a heatmap is legible and it
+    **never** feeds the pooled statistic. Previously one argument controlled
+    both, which silently reduced the reported effect to whatever happened to fit
+    on the axes.
+
     Args:
         record: A record carrying per-position gradient sketches.
         grouping: ``"target"`` or ``"greedy"``.
-        min_support: Smallest class size kept. Two is the smallest that admits a
-            within-class pair at all; anything larger is a readability choice and
-            is reported, never silent.
-        max_classes: Optionally keep only the most frequent classes, which is
-            what makes the matrix drawable. ``None`` keeps every class above
-            ``min_support``.
+        min_support: Smallest class size in the analysis population. Two is the
+            smallest that admits a within-class pair at all.
+        display_classes: How many of the most supported classes to build the
+            heatmap matrix from. ``None`` builds it over the whole population,
+            which is only sensible when that population is small.
         permutations: Draws in the label-permutation null.
         permutation_seed: Seed of that null.
 
     Returns:
-        The matrix, the per-class coherence, the pooled summary, and the null
-        distribution of ``delta`` under label permutation.
+        ``population`` -- the pooled statistic over every qualifying class;
+        ``null`` -- the permutation null over that same population;
+        ``display`` -- the matrix and per-class coherence of the drawn subset.
     """
 
     unit, usable = unit_sketches(record)
@@ -358,29 +372,53 @@ def gradient_clustering(
     labels = labels[usable]
     unit = unit[usable]
 
-    tokens, counts = np.unique(labels, return_counts=True)
-    keep = counts >= int(min_support)
-    tokens, counts = tokens[keep], counts[keep]
-    if max_classes is not None and tokens.size > max_classes:
-        order = np.argsort(-counts, kind="stable")[: int(max_classes)]
-        order = np.sort(order)
-        tokens, counts = tokens[order], counts[order]
+    represented, represented_counts = np.unique(labels, return_counts=True)
+    keep = represented_counts >= int(min_support)
+    tokens, counts = represented[keep], represented_counts[keep]
     if tokens.size < 2:
         raise ValueError(
             f"Only {tokens.size} class(es) reach min_support={min_support}; a "
             "between-class comparison needs at least two."
         )
 
-    observed = class_similarity_matrix(unit, labels, tokens)
+    # -- population: every qualifying class, no display limit anywhere near it
+    sums, population_counts, self_squared = _class_sums(unit, labels, tokens)
+    within, between = _pooled_from_blocks(sums, population_counts, self_squared)
+    population = {
+        "classes": tokens,
+        "counts": population_counts,
+        "num_classes": int(tokens.size),
+        "num_represented": int(represented.size),
+        "within": within,
+        "between": between,
+        "delta": within - between,
+        "num_within_pairs": int((population_counts * (population_counts - 1)).sum()),
+    }
 
-    # The null needs only the rows that belong to a kept class, in any order.
     keep_rows = np.isin(labels, tokens)
     null = _permutation_null(
-        unit[keep_rows],
-        observed["counts"],
-        permutations=permutations,
-        seed=permutation_seed,
+        unit[keep_rows], population_counts,
+        permutations=permutations, seed=permutation_seed,
     )
+
+    # -- display: a legible subset, deterministic, and statistically inert
+    shown = tokens
+    if display_classes is not None and tokens.size > display_classes:
+        order = np.argsort(-counts, kind="stable")[: int(display_classes)]
+        shown = np.sort(tokens[order])
+    drawn = class_similarity_matrix(unit, labels, shown)
+    display = {
+        "classes": shown,
+        "counts": drawn["counts"],
+        "matrix": drawn["matrix"],
+        "within_by_class": drawn["within"],
+        "num_classes": int(shown.size),
+        "selection": (
+            "all qualifying classes"
+            if shown.size == tokens.size
+            else f"{shown.size} most supported of {tokens.size} qualifying classes"
+        ),
+    }
 
     return {
         "grouping": grouping,
@@ -388,24 +426,22 @@ def gradient_clustering(
         "num_positions": int(usable.sum()),
         "num_positions_excluded": int((~usable).sum()),
         "sketch_dimension": int(unit.shape[1]),
-        "classes": tokens,
-        "counts": counts,
-        "matrix": observed["matrix"],
-        "within_by_class": observed["within"],
-        "observed": _summary_from_matrix(observed),
+        "population": population,
         "null": null,
+        "display": display,
         "permutation_seed": int(permutation_seed),
     }
 
 
 def clustering_summary(
-    record: Any, *, min_support: int = 2, max_classes: int | None = None
+    record: Any, *, min_support: int = 2, display_classes: int | None = None
 ) -> dict[str, Any]:
     """Both groupings side by side, with their permutation references."""
 
     return {
         grouping: gradient_clustering(
-            record, grouping=grouping, min_support=min_support, max_classes=max_classes
+            record, grouping=grouping, min_support=min_support,
+            display_classes=display_classes,
         )
         for grouping in GROUPINGS
     }

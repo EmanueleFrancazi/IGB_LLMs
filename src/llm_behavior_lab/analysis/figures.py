@@ -52,7 +52,9 @@ from llm_behavior_lab.analysis.aggregation import (
 )
 
 __all__ = [
+    "FIGURE_CATEGORIES",
     "FIGURE_FORMATS",
+    "figure_category",
     "LARGE_VOCAB_THRESHOLD",
     "CONDITION_STYLES",
     "NULL_STYLE",
@@ -90,6 +92,43 @@ __all__ = [
 #: rasterized *inside* the SVG -- costs about the same as the PNG it replaces.
 #: A second raster file per figure was duplication, not a second format.
 FIGURE_FORMATS = ("svg",)
+
+#: Where each figure is written inside a run's ``figures/`` directory.
+#:
+#: The split is by communicative role, not by age or quality. ``main`` carries
+#: the scientific narrative; ``diagnostics`` holds figures that remain useful for
+#: inspection and for future training checkpoints but should not compete with it;
+#: ``sanity_checks`` holds methodological validation, which answers "is the
+#: measurement trustworthy" rather than "what did we find".
+#:
+#: Keyed by the ``figureN`` prefix of a stem, so figure numbers stay stable and
+#: nothing is renumbered. Anything unlisted falls to ``diagnostics``, which keeps
+#: a new figure visible rather than silently dropping it.
+FIGURE_CATEGORIES = {
+    "figure0": "sanity_checks",
+    "figure1": "main", "figure2": "main", "figure4": "main", "figure5": "main",
+    "figure6": "main", "figure7": "main", "figure8": "main", "figure9": "main",
+    "figure11": "main", "figure12": "main", "figure13": "main", "figure14": "main",
+    "figure20": "main",
+    "figure3": "diagnostics", "figure10": "diagnostics", "figure15": "diagnostics",
+    "figure16": "diagnostics", "figure17": "diagnostics", "figure18": "diagnostics",
+    "figure19": "diagnostics", "figure21": "diagnostics",
+}
+
+#: Used when a stem matches no known figure number.
+DEFAULT_FIGURE_CATEGORY = "diagnostics"
+
+
+def figure_category(stem: str) -> str:
+    """Which category subdirectory a figure stem belongs in."""
+
+    import re
+
+    match = re.match(r"(figure\d+)", stem)
+    if match is None:
+        return DEFAULT_FIGURE_CATEGORY
+    return FIGURE_CATEGORIES.get(match.group(1), DEFAULT_FIGURE_CATEGORY)
+
 
 #: Above this eligible-support size the figures switch to large-vocabulary
 #: rendering: logarithmic rank axis, plain lines, rasterized scatter.
@@ -217,14 +256,17 @@ def save_figure(
         figure: Figure to write.
         directory: Destination directory, created when missing.
         stem: Filename without extension. Deterministic, so reruns overwrite
-            rather than accumulate.
+            rather than accumulate. Its ``figureN`` prefix selects the
+            category subdirectory the file is written into.
         formats: Extensions to emit.
 
     Returns:
         The written paths, in the order requested.
     """
 
-    directory = Path(directory)
+    # Routed by category here rather than at every call site, so one rule covers
+    # the full-set path, the --only path and any explicit output directory.
+    directory = Path(directory) / figure_category(stem)
     directory.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for extension in formats:
@@ -2794,6 +2836,63 @@ def plot_initial_logit_correction(record: Any, directory: str | Path) -> list[Pa
     return save_figure(figure, directory, "figure19_initial_logit_correction")
 
 
+def _token_axis_label(record: Any, token_id: int, *, max_length: int = 9) -> str:
+    """A readable axis label for one token class.
+
+    Decoded text where the record carries a vocabulary, falling back to the bare
+    ID otherwise. Whitespace, newlines, byte fallbacks and structural tokens are
+    the ones that matter here: printed raw they are blank or actively break the
+    axis, and two different tokens can end up looking identical. ``repr`` makes
+    every one of them visible, so no tick is ever empty.
+    """
+
+    tokens = getattr(record, "tokens", None)
+    if not tokens or token_id >= len(tokens):
+        return str(int(token_id))
+    return f"{escape_token_label(tokens[int(token_id)], max_length=max_length)}"
+
+
+def _clustering_heatmap(
+    axes: Any, record: Any, result: dict[str, Any], title: str, *, extent: float
+) -> Any:
+    """One grouping's matrix, drawn on a normalization shared with its sibling."""
+
+    display = result["display"]
+    matrix = display["matrix"]
+    image = axes.imshow(
+        matrix, cmap="RdBu_r", vmin=-extent, vmax=extent, interpolation="nearest"
+    )
+    labels = [_token_axis_label(record, token) for token in display["classes"]]
+    positions = np.arange(display["classes"].size)
+    axes.set_xticks(positions)
+    axes.set_yticks(positions)
+    axes.set_xticklabels(labels, rotation=90, fontsize=4.5)
+    axes.set_yticklabels(labels, fontsize=4.5)
+    axes.set_title(title, fontsize=10)
+
+    return image
+
+
+def _population_annotation(result: dict[str, Any]) -> str:
+    """The population statistic, stated as covering every qualifying class.
+
+    Spelled out because this number is deliberately **not** the average of the
+    cells drawn above it: the display subset is a legibility choice and the
+    statistic is not, and an earlier version of this analysis let the former
+    silently determine the latter.
+    """
+
+    population = result["population"]
+    null = result["null"]
+    return (
+        f"All n>={result['min_support']} classes "
+        f"({population['num_classes']:,}):  delta = {population['delta']:+.5f}\n"
+        f"within {population['within']:+.5f}   between {population['between']:+.5f}\n"
+        f"Permutation null 95%: [{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
+        f"  (M = {null['permutations']})"
+    )
+
+
 def plot_gradient_directional_clustering(
     record: Any,
     directory: str | Path,
@@ -2803,137 +2902,97 @@ def plot_gradient_directional_clustering(
 ) -> list[Path]:
     """Figure 20 -- do gradients cluster by token subgroup?
 
-    The heatmap is the figure. Cell ``(i, j)`` is the mean cosine between the
-    gradients of class ``i`` and class ``j``, and the **diagonal is a
-    measurement**: the mean cosine over distinct pairs *within* a class, not the
-    trivial 1 a self-similarity convention would put there. Clustering, if it
-    exists, is a visibly warmer diagonal against a near-zero field.
+    Two heatmaps of the **same** gradients, the same exact norms and the same
+    single CountSketch realization. Only the grouping label changes: the left
+    panel groups positions by the true target token, the right by the token the
+    initialized model actually predicts. One is a shared loss, the other a shared
+    decision, and the comparison between them is the point of the figure.
 
-    The colormap diverges about zero because the sign is the finding. Cosines
-    near zero mean gradients are near-orthogonal -- the default expectation in
-    high dimension -- while systematic negative values would mean subgroups
-    actively oppose one another, which is a different claim from "no structure"
-    and must not be allowed to look like it.
+    Cell ``(i, j)`` is the estimated mean cosine between the full gradients of
+    classes ``i`` and ``j``. The **diagonal is a measurement**: the mean over
+    *distinct* pairs inside a class, never the trivial self-similarity of one.
+    Clustering, if present, is a visibly warmer diagonal.
 
-    Only the most frequent classes are drawn, deterministically and with the
-    count stated. That is a readability limit on the *display*: the analysis
-    itself runs over every class meeting ``min_support``, and the summary panel
-    reports those pooled numbers rather than the drawn subset's.
+    Both panels share one diverging normalization about zero and one colorbar,
+    so colour intensity is directly comparable between them. Neither is rescaled
+    to its own range -- doing so would make the two groupings look equally
+    structured whatever the data said. Zero is the centre because near-orthogonal
+    is the high-dimensional default, and systematic negative similarity is a
+    different claim from absence.
 
-    The design is deliberately not initialization-specific. At initialization
-    almost every position is a failure and the greedy grouping may be nearly
-    degenerate; the same three panels become more informative as training
-    separates the subgroups, which is what this diagnostic is for.
+    The annotation under each panel reports the population statistic over
+    **every** class with ``n >= min_support``, not over the classes drawn above
+    it. Display is a legibility choice; it does not enter the number.
+
+    Not initialization-specific by design: the same two panels apply unchanged at
+    training checkpoints, where the greedy grouping stops being near-degenerate.
     """
 
     from llm_behavior_lab.analysis.gradient_clustering import gradient_clustering
 
     target = gradient_clustering(
-        record, grouping="target", min_support=min_support, max_classes=display_classes
+        record, grouping="target", min_support=min_support,
+        display_classes=display_classes,
     )
     greedy = gradient_clustering(
-        record, grouping="greedy", min_support=min_support, max_classes=display_classes
+        record, grouping="greedy", min_support=min_support,
+        display_classes=display_classes,
     )
 
-    figure = _new_figure(width=14.0, height=5.2)
-    # Generous horizontal spacing: the heatmap's colourbar label and the next
-    # panel's y label are both long and otherwise collide.
-    grid = figure.add_gridspec(1, 3, width_ratios=[1.25, 1.0, 1.0], wspace=0.60)
-    heat, bars, coherence = (figure.add_subplot(grid[0, index]) for index in range(3))
+    # One normalization across both panels, from both panels' values.
+    values = np.concatenate([
+        target["display"]["matrix"][np.isfinite(target["display"]["matrix"])],
+        greedy["display"]["matrix"][np.isfinite(greedy["display"]["matrix"])],
+    ])
+    extent = float(np.abs(values).max()) if values.size else 1.0
 
-    matrix = target["matrix"]
-    finite = matrix[np.isfinite(matrix)]
-    extent = float(np.abs(finite).max()) if finite.size else 1.0
-    image = heat.imshow(
-        matrix, cmap="RdBu_r", vmin=-extent, vmax=extent, interpolation="nearest"
+    figure = _new_figure(width=13.0, height=6.2)
+    panels = figure.subplots(1, 2)
+    left = _clustering_heatmap(
+        panels[0], record, target,
+        "(a) grouped by ground-truth target token", extent=extent,
     )
-    heat.set_title(
-        f"(a) mean cosine, target grouping\n{target['classes'].size} most frequent classes",
-        fontsize=10,
+    _clustering_heatmap(
+        panels[1], record, greedy,
+        "(b) grouped by greedy-predicted token", extent=extent,
     )
-    heat.set_xlabel("token class")
-    heat.set_ylabel("token class")
-    heat.tick_params(labelsize=6)
-    # Token strings would be unreadable at this count; ranks are honest labels.
-    step = max(1, target["classes"].size // 8)
-    ticks = np.arange(0, target["classes"].size, step)
-    heat.set_xticks(ticks)
-    heat.set_yticks(ticks)
-    heat.set_xticklabels([str(int(target["classes"][i])) for i in ticks], rotation=90)
-    heat.set_yticklabels([str(int(target["classes"][i])) for i in ticks])
-    colourbar = figure.colorbar(image, ax=heat, fraction=0.046, pad=0.03)
-    colourbar.set_label("mean cosine", fontsize=8)
+    for axes in panels:
+        axes.set_xlabel("token class")
+    panels[0].set_ylabel("token class")
+
+    colourbar = figure.colorbar(
+        left, ax=panels, fraction=0.030, pad=0.03, aspect=30
+    )
+    colourbar.set_label("Estimated gradient cosine similarity", fontsize=9)
     colourbar.ax.tick_params(labelsize=7)
 
-    # The observed delta of each grouping against its own permutation null, drawn
-    # as an interval rather than a single shuffled value: one permutation says
-    # nothing about how much a delta of this size varies by chance.
-    entries = [("target", target, "#1f77b4"), ("greedy", greedy, "#2ca02c")]
-    for index, (name, result, colour) in enumerate(entries):
-        null = result["null"]
-        bars.bar(index, result["observed"]["delta"], width=0.55, color=colour,
-                 label="observed delta" if index == 0 else None)
-        bars.errorbar(
-            index, null["delta_mean"],
-            yerr=[[null["delta_mean"] - null["delta_low"]],
-                  [null["delta_high"] - null["delta_mean"]]],
-            fmt="o", color="#333333", markersize=4, capsize=5, linewidth=1.2,
-            label="permutation null, 2.5-97.5%" if index == 0 else None,
-        )
-    bars.axhline(0.0, color="#333333", linewidth=0.8)
-    bars.set_xticks(range(len(entries)))
-    bars.set_xticklabels([name for name, _, _ in entries], fontsize=9)
-    bars.set_ylabel("delta = within - between")
-    bars.set_title("(b) clustering effect against its permutation null", fontsize=10)
-    bars.grid(True, axis="y", alpha=0.20)
-    bars.legend(loc="upper right", fontsize=7, frameon=True)
-    lines = []
-    for name, result, _ in entries:
-        null = result["null"]
-        lines.append(
-            f"{name:<7}obs {result['observed']['delta']:+.5f}  "
-            f"null {null['delta_mean']:+.5f} "
-            f"[{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
-        )
-    bars.text(
-        0.02, 0.02, "\n".join(lines) + f"\nM = {target['null']['permutations']}",
-        transform=bars.transAxes, fontsize=6.5, va="bottom", ha="left",
-        bbox=_ANNOTATION_BOX, family="monospace",
-    )
-
-    within = target["within_by_class"]
-    measurable = np.isfinite(within)
-    coherence.scatter(
-        target["counts"][measurable], within[measurable],
-        s=8, alpha=0.5, color="#1f77b4", edgecolors="none", rasterized=True,
-    )
-    coherence.axhline(
-        target["observed"]["between"], color="#d62728", linewidth=1.0, linestyle="--",
-        label="pooled between-class",
-    )
-    coherence.axhline(0.0, color="#999999", linewidth=0.8, linestyle=":")
-    coherence.set_xscale("log")
-    coherence.set_xlabel("class support  n(i)   [log]")
-    coherence.set_ylabel("within-class mean cosine")
-    coherence.set_title("(c) per-token coherence vs support", fontsize=10)
-    coherence.legend(loc="upper right", fontsize=7.5, frameon=True)
-    coherence.grid(True, which="both", alpha=0.20)
-
     figure.suptitle(
-        "Directional clustering of per-position gradients (T = 1, sketch "
-        f"K = {target['sketch_dimension']})",
+        "Directional clustering of per-position gradients  "
+        f"(T = 1, CountSketch K = {target['sketch_dimension']})",
         fontsize=12,
     )
     figure.text(
-        0.5, 0.925,
-        f"analysis over all classes with n >= {min_support}: "
-        f"{target['observed']['num_classes']:,} target, "
-        f"{greedy['observed']['num_classes']:,} greedy   |   "
-        f"diagonal is within-class over DISTINCT pairs, not self-similarity   |   "
-        "cosines are sketch estimates: reliable pooled, noisy per pair",
-        ha="center", fontsize=7.5, color="#444444",
+        0.5, 0.90,
+        "same gradients, same exact norms, same sketch realization -- only the "
+        "grouping label differs   |   diagonal is within-class over DISTINCT "
+        "pairs, not self-similarity   |   "
+        f"displayed: {target['display']['selection']} (target), "
+        f"{greedy['display']['selection']} (greedy)",
+        ha="center", fontsize=7, color="#444444",
     )
-    figure.subplots_adjust(top=0.82)
+    figure.subplots_adjust(top=0.83, bottom=0.22, wspace=0.22)
+
+    # Anchored in figure coordinates from each panel's own box, so the statistic
+    # sits directly beneath its heatmap rather than at a fixed axes offset that
+    # leaves a gap once the rotated tick labels are laid out.
+    for axes, result in zip(panels, (target, greedy)):
+        box = axes.get_position()
+        figure.text(
+            box.x0 + box.width / 2.0, box.y0 - 0.145,
+            _population_annotation(result),
+            fontsize=6.5, ha="center", va="top", family="monospace",
+            bbox=_ANNOTATION_BOX,
+        )
     return save_figure(figure, directory, "figure20_gradient_directional_clustering")
 
 
