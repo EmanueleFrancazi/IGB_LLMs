@@ -335,6 +335,7 @@ def fidelity_report(
     production_seed: int,
     tensor_sizes: Sequence[int] | None = None,
     production_map: tuple[np.ndarray, np.ndarray] | None = None,
+    map_factory: Any = None,
     alternate_seeds: Sequence[int] = ALTERNATE_SKETCH_SEEDS,
     sensitivity_dimensions: Sequence[int] = SENSITIVITY_DIMENSIONS,
 ) -> dict[str, Any]:
@@ -343,7 +344,20 @@ def fidelity_report(
     No model execution of any kind happens here: the alternate seeds and the
     ``K`` sweep reuse the same captured gradients, which is the entire reason for
     capturing them.
+
+    ``map_factory(dimension, seed) -> (buckets, signs)`` decides what "another
+    realization" means, and it matters. Pass the production builder and the
+    alternate seeds and the ``K`` sweep answer *how much would this result move
+    under another draw of the production construction* -- which is the robustness
+    question. Leave it out and they fall back to a generic NumPy map, which is a
+    valid CountSketch experiment but a different question, and must not be
+    reported as production robustness.
     """
+
+    def build(dimension: int, seed: int):
+        if map_factory is None:
+            return None
+        return map_factory(dimension, seed)
 
     exact = cosine_from_gram(gradients, norms)
     # The production row must use the experiment's own map, not a re-derivation.
@@ -366,6 +380,7 @@ def fidelity_report(
     for seed in alternate_seeds:
         estimated = sketch_estimated_cosines(
             gradients, norms, dimension=production_dimension, seed=seed,
+            sketch_map=build(production_dimension, seed),
         )
         summary = _errors(exact, estimated)
         summary["seed"] = int(seed)
@@ -386,7 +401,8 @@ def fidelity_report(
             _errors(
                 exact,
                 sketch_estimated_cosines(
-                    gradients, norms, dimension=dimension, seed=seed
+                    gradients, norms, dimension=dimension, seed=seed,
+                    sketch_map=build(dimension, seed),
                 ),
             )
             for seed in alternate_seeds[:4]
@@ -410,6 +426,7 @@ def fidelity_report(
         "accumulation_dtype": "float64",
         "production_dimension": int(production_dimension),
         "production_seed": int(production_seed),
+        "map_semantics": "production" if map_factory is not None else "generic_numpy",
         "exact_cosines": exact,
         "production_cosines": production,
         "production": _errors(exact, production),

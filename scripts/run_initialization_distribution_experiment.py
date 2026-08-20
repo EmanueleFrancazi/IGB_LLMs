@@ -448,6 +448,7 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
     import numpy as np
 
     from llm_behavior_lab.analysis.countsketch_fidelity import fidelity_report
+    from llm_behavior_lab.evaluation.position_gradients import production_sketch_map
 
     gradients = gradient_result.exact_gradients.numpy()
     indices = gradient_result.exact_positions.numpy()
@@ -495,6 +496,12 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
         production_dimension=protocol["sketch_dimension"],
         production_seed=20240917,
         production_map=gradient_result.sketch_map,
+        # Alternate seeds and the K sweep must be other realizations of the
+        # production construction, not of a different RNG, or they answer a
+        # question nobody asked.
+        map_factory=lambda dimension, seed: production_sketch_map(
+            gradient_result.sketch_tensor_sizes, dimension, seed
+        ),
     )
     production = report["production"]
     print(
@@ -532,6 +539,7 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
         "k_rmse": np.asarray([entry["rmse"] for entry in report["sensitivity"]]),
         "norm_drift": np.asarray([drift]),
         "sketch_drift": np.asarray([sketch_drift]),
+        "map_semantics": np.asarray([report["map_semantics"]]),
     }
     for name, entry in report["subgroup_deltas"].items():
         for side in ("exact", "sketch"):

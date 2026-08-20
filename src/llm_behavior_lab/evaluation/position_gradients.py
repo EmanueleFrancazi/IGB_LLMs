@@ -61,7 +61,10 @@ __all__ = [
     "GRADIENT_DEFINITION",
     "GRADIENT_TEMPERATURES",
     "PositionGradientResult",
+    "DEFAULT_SANITY_POSITIONS",
     "DEFAULT_SKETCH_DIMENSION",
+    "production_sketch_map",
+    "production_sketch_tables",
     "compute_position_gradient_norms",
     "evenly_spaced_indices",
     "masked_evaluation_logits",
@@ -164,6 +167,9 @@ class PositionGradientResult:
     #: offline fidelity analysis projects with the map the run actually used
     #: rather than re-deriving one from a different RNG.
     sketch_map: tuple[Any, Any] | None = None
+    #: Parameter element counts in order, so an offline analysis can rebuild
+    #: another realization of the same production construction.
+    sketch_tensor_sizes: list[int] | None = None
 
     @property
     def canonical_index(self) -> int:
@@ -205,6 +211,61 @@ class PositionGradientResult:
         return payload
 
 
+def production_sketch_tables(
+    tensor_sizes: Sequence[int], dimension: int, seed: int
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """The production CountSketch map, as one (buckets, signs) pair per tensor.
+
+    This is the single definition of what "the production map" means. Both the
+    live sketcher and every offline robustness analysis go through it, so the
+    two can no longer drift apart -- which they did once already, when an offline
+    helper rebuilt the map with a different RNG and produced a structurally
+    unrelated projection.
+
+    A generator per parameter tensor, seeded ``seed + 1000003 * index``, drawing
+    buckets and then signs. The per-tensor seeding is what makes the map
+    independent of how many tensors precede a given one, so adding a buffer
+    somewhere else in the model cannot silently reshuffle it.
+
+    Torch's generator specifically. Varying only ``seed`` or ``dimension`` gives
+    another realization of *this* construction, which is the question a
+    robustness analysis is asking; a NumPy generator on the same seed would
+    answer a different one.
+    """
+
+    tables = []
+    for index, count in enumerate(tensor_sizes):
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed) + 1000003 * index)
+        buckets = torch.randint(
+            0, int(dimension), (int(count),), generator=generator, dtype=torch.long
+        )
+        signs = torch.randint(
+            0, 2, (int(count),), generator=generator, dtype=torch.int8
+        )
+        tables.append((buckets, signs.double() * 2.0 - 1.0))
+    return tables
+
+
+def production_sketch_map(
+    tensor_sizes: Sequence[int], dimension: int, seed: int
+) -> tuple[Any, Any]:
+    """The production map flattened into NumPy bucket and sign vectors.
+
+    Concatenated in parameter order, matching how a captured gradient is
+    flattened, so an offline projection lines up entry for entry with the
+    sketches the experiment produced.
+    """
+
+    import numpy as np
+
+    tables = production_sketch_tables(tensor_sizes, dimension, seed)
+    return (
+        np.concatenate([buckets.numpy() for buckets, _ in tables]),
+        np.concatenate([signs.numpy() for _, signs in tables]),
+    )
+
+
 class _GradientSketcher:
     """Deterministic count sketch of a full parameter gradient.
 
@@ -244,24 +305,18 @@ class _GradientSketcher:
             raise ValueError(f"sketch dimension must be positive; got {dimension}.")
         self.dimension = int(dimension)
         self.seed = int(seed)
-        self.buckets: list[torch.Tensor] = []
-        self.signs: list[torch.Tensor] = []
-        for index, parameter in enumerate(parameters):
-            # One generator per tensor, seeded from the run seed and the tensor's
-            # position, so the tables do not depend on how many tensors precede
-            # it and stay stable if an unrelated buffer is ever added.
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(self.seed + 1000003 * index)
-            count = parameter.numel()
-            self.buckets.append(
-                torch.randint(
-                    0, self.dimension, (count,), generator=generator, dtype=torch.long
-                ).to(parameter.device)
-            )
-            signs = torch.randint(
-                0, 2, (count,), generator=generator, dtype=torch.int8
-            ).to(parameter.device)
-            self.signs.append(signs.double() * 2.0 - 1.0)
+        self.tensor_sizes = [int(parameter.numel()) for parameter in parameters]
+        tables = production_sketch_tables(
+            self.tensor_sizes, self.dimension, self.seed
+        )
+        self.buckets = [
+            buckets.to(parameter.device)
+            for (buckets, _), parameter in zip(tables, parameters)
+        ]
+        self.signs = [
+            signs.to(parameter.device)
+            for (_, signs), parameter in zip(tables, parameters)
+        ]
 
     def numpy_map(self) -> tuple["Any", "Any"]:
         """Export this exact map as flat NumPy bucket and sign vectors.
@@ -774,6 +829,9 @@ def compute_position_gradient_norms(
             None
             if not captured
             else torch.stack([captured[key] for key in sorted(captured)])
+        ),
+        sketch_tensor_sizes=(
+            None if sketcher is None else list(sketcher.tensor_sizes)
         ),
         exact_positions=(
             None

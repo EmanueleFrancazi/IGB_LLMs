@@ -555,3 +555,77 @@ def test_capture_leaves_model_state_and_rng_untouched() -> None:
     assert torch.equal(model.output.weight.grad, sentinel)
     assert model.training is True
     assert torch.equal(torch.get_rng_state(), state)
+
+
+# -- one production-map definition, shared -----------------------------------
+
+
+def test_the_builder_reproduces_the_live_sketcher_map_exactly() -> None:
+    """The primitive and the sketcher must be the same definition, not two."""
+
+    import numpy as np
+
+    from llm_behavior_lab.evaluation.position_gradients import (
+        _GradientSketcher,
+        production_sketch_map,
+    )
+
+    model = TinyModel()
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    sizes = [int(p.numel()) for p in parameters]
+
+    sketcher = _GradientSketcher(parameters, dimension=64, seed=20240917)
+    live_buckets, live_signs = sketcher.numpy_map()
+    built_buckets, built_signs = production_sketch_map(sizes, 64, 20240917)
+
+    assert np.array_equal(live_buckets, built_buckets)
+    assert np.array_equal(live_signs, built_signs)
+    assert sketcher.tensor_sizes == sizes
+
+
+def test_changing_only_the_seed_changes_the_map_deterministically() -> None:
+    import numpy as np
+
+    from llm_behavior_lab.evaluation.position_gradients import production_sketch_map
+
+    sizes = [40, 17, 96]
+    first = production_sketch_map(sizes, 32, 20240917)
+    other = production_sketch_map(sizes, 32, 101)
+
+    assert not np.array_equal(first[0], other[0])
+    assert np.array_equal(production_sketch_map(sizes, 32, 101)[0], other[0])
+    assert set(np.unique(first[1])).issubset({-1.0, 1.0})
+
+
+def test_changing_k_keeps_the_production_construction() -> None:
+    """Same per-tensor seeding rule, only the bucket range moves."""
+
+    import numpy as np
+
+    from llm_behavior_lab.evaluation.position_gradients import (
+        production_sketch_map,
+        production_sketch_tables,
+    )
+
+    sizes = [40, 17, 96]
+    for dimension in (32, 128, 512):
+        buckets, signs = production_sketch_map(sizes, dimension, 20240917)
+        assert buckets.shape[0] == sum(sizes)
+        assert buckets.min() >= 0 and buckets.max() < dimension
+        # Signs are drawn after buckets from the same per-tensor generator, so
+        # they are independent of K only in distribution, not identity.
+        assert set(np.unique(signs)).issubset({-1.0, 1.0})
+
+    tables = production_sketch_tables(sizes, 64, 7)
+    assert [int(b.numel()) for b, _ in tables] == sizes
+
+
+def test_the_sanity_run_carries_the_tensor_sizes_needed_to_rebuild_maps() -> None:
+    result = compute_position_gradient_norms(
+        TinyModel(), _positions(), vocab_size=VOCAB,
+        gradient_sketch=True, sketch_dimension=64,
+        exact_gradient_positions=[1, 3],
+    )
+
+    assert result.sketch_tensor_sizes is not None
+    assert sum(result.sketch_tensor_sizes) == result.sketch_map[0].shape[0]

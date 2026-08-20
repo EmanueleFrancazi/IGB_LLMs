@@ -423,3 +423,76 @@ def test_figure_23_is_categorised_as_a_sanity_check() -> None:
     # And the existing routing is untouched.
     assert figure_category("figure20_gradient_directional_clustering") == "main"
     assert figure_category("figure0_sampling_adequacy") == "sanity_checks"
+
+
+# -- robustness must use production semantics ---------------------------------
+
+
+def test_the_map_factory_drives_alternates_and_the_k_sweep() -> None:
+    """Alternate seeds and K sensitivity must use the supplied construction."""
+
+    values, norms = _gradients(rows=6)
+    targets, greedy = _labels(rows=6)
+    seen = []
+
+    def factory(dimension, seed):
+        seen.append((dimension, seed))
+        generator = np.random.default_rng(90000 + seed + dimension)
+        buckets = generator.integers(0, dimension, size=values.shape[1])
+        signs = generator.integers(0, 2, size=values.shape[1]) * 2.0 - 1.0
+        return buckets, signs
+
+    report = fidelity_report(
+        values, norms, targets, greedy,
+        production_dimension=512, production_seed=20240917,
+        map_factory=factory,
+        alternate_seeds=(1, 2), sensitivity_dimensions=(128, 512),
+    )
+
+    # Every alternate seed and every K went through the factory.
+    assert (512, 1) in seen and (512, 2) in seen
+    assert (128, 1) in seen and (512, 1) in seen
+    assert report["map_semantics"] == "production"
+
+
+def test_without_a_factory_the_report_says_the_maps_are_generic() -> None:
+    """So a generic run can never be mistaken for production robustness."""
+
+    values, norms = _gradients(rows=5)
+    targets, greedy = _labels(rows=5)
+
+    report = fidelity_report(
+        values, norms, targets, greedy,
+        production_dimension=256, production_seed=20240917,
+        alternate_seeds=(1,), sensitivity_dimensions=(256,),
+    )
+
+    assert report["map_semantics"] == "generic_numpy"
+
+
+def test_the_production_row_ignores_the_factory_and_uses_the_given_map() -> None:
+    """The production result is the experiment's own realization, not a rebuild."""
+
+    values, norms = _gradients(rows=5)
+    targets, greedy = _labels(rows=5)
+    generator = np.random.default_rng(4)
+    supplied = (
+        generator.integers(0, 128, size=values.shape[1]),
+        generator.integers(0, 2, size=values.shape[1]) * 2.0 - 1.0,
+    )
+
+    report = fidelity_report(
+        values, norms, targets, greedy,
+        production_dimension=128, production_seed=20240917,
+        production_map=supplied,
+        map_factory=lambda dimension, seed: (
+            np.zeros(values.shape[1], dtype=np.int64),
+            np.ones(values.shape[1]),
+        ),
+        alternate_seeds=(1,), sensitivity_dimensions=(128,),
+    )
+
+    direct = sketch_estimated_cosines(
+        values, norms, dimension=128, seed=0, sketch_map=supplied
+    )
+    assert np.allclose(report["production_cosines"], direct, rtol=1e-12)
