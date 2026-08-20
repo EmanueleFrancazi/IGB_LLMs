@@ -634,3 +634,82 @@ def test_save_figure_creates_the_category_subdirectory(tmp_path) -> None:
     assert written[0].parent.name == "main"
     assert written[0].parent.parent == tmp_path
     assert written[0].stat().st_size > 0
+
+
+# -- the all-position pooled definition --------------------------------------
+
+
+def _brute_force_pooled(unit, labels):
+    """Pooled within/between by explicit enumeration over every ordered pair."""
+
+    within, between = [], []
+    for a in range(len(labels)):
+        for b in range(len(labels)):
+            if a == b:
+                continue
+            value = float(unit[a] @ unit[b])
+            (within if labels[a] == labels[b] else between).append(value)
+    return (
+        float(np.mean(within)) if within else float("nan"),
+        float(np.mean(between)) if between else float("nan"),
+    )
+
+
+def test_the_pooled_statistic_matches_brute_force_over_all_positions() -> None:
+    """Including singleton classes, which have no within-pair but do have between."""
+
+    generator = np.random.default_rng(31)
+    rows = _unit(generator.normal(size=(11, K)))
+    # Two real classes plus three singletons.
+    labels = np.array(
+        [ELIGIBLE[0]] * 4 + [ELIGIBLE[1]] * 4 + [ELIGIBLE[2], ELIGIBLE[3], ELIGIBLE[4]],
+        dtype=np.int64,
+    )
+    record = _record(rows, labels, labels)
+
+    result = gradient_clustering(record, grouping="target")
+    within, between = _brute_force_pooled(rows, labels)
+
+    assert result["population"]["within"] == pytest.approx(within, abs=1e-12)
+    assert result["population"]["between"] == pytest.approx(between, abs=1e-12)
+    assert result["population"]["delta"] == pytest.approx(within - between, abs=1e-12)
+
+
+def test_singletons_contribute_between_pairs_but_no_within_pairs() -> None:
+    """The whole reason the population is all positions rather than n >= 2."""
+
+    generator = np.random.default_rng(32)
+    rows = _unit(generator.normal(size=(6, K)))
+    labels = np.array(
+        [ELIGIBLE[0]] * 3 + [ELIGIBLE[1], ELIGIBLE[2], ELIGIBLE[3]], dtype=np.int64
+    )
+    record = _record(rows, labels, labels)
+
+    population = gradient_clustering(record, grouping="target")["population"]
+
+    assert population["num_positions"] == 6
+    assert population["num_represented"] == 4
+    assert population["num_classes"] == 1          # only one class reaches n >= 2
+    # Within pairs come from the triple alone: 3 * 2 = 6 ordered pairs.
+    assert population["num_within_pairs"] == 6
+    # Between pairs use every position: 36 - (9 + 1 + 1 + 1) = 24.
+    assert population["num_between_pairs"] == 24
+
+
+def test_the_permutation_null_keeps_the_full_class_count_vector() -> None:
+    """Singletons must be permuted too, or the null answers a different question."""
+
+    generator = np.random.default_rng(33)
+    rows = _unit(generator.normal(size=(9, K)))
+    labels = np.array(
+        [ELIGIBLE[0]] * 4 + [ELIGIBLE[1]] * 3 + [ELIGIBLE[2], ELIGIBLE[3]],
+        dtype=np.int64,
+    )
+    record = _record(rows, labels, labels)
+
+    result = gradient_clustering(record, grouping="target", permutations=32)
+
+    # The null's within-pair count is fixed by the class sizes it preserves.
+    assert result["null"]["permutations"] == 32
+    assert result["population"]["num_within_pairs"] == 4 * 3 + 3 * 2
+    assert np.isfinite(result["null"]["delta_mean"])

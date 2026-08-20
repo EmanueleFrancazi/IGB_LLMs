@@ -413,6 +413,9 @@ def report_gradient_clustering(record: Any, *, display_classes: int = 40) -> dic
         print(f"    represented classes            : {population['num_represented']:,}")
         print(f"    classes with n >= {result['min_support']}            : "
               f"{population['num_classes']:,}")
+        print(f"    positions total                : {population['num_positions']:,}")
+        print(f"    within-pair count              : {population['num_within_pairs']:,}")
+        print(f"    between-pair count             : {population['num_between_pairs']:,}")
         print(f"    classes displayed in heatmap   : {display['num_classes']:,}"
               f"   ({display['selection']})")
         print(f"    pooled within                  : {population['within']:+.8f}")
@@ -424,8 +427,8 @@ def report_gradient_clustering(record: Any, *, display_classes: int = 40) -> dic
         print(f"    permutation null 97.5%         : {null['delta_high']:+.8f}")
         print(f"    permutations                   : {null['permutations']}"
               f"   (seed {result['permutation_seed']})")
-        print(f"    positions used                 : {result['num_positions']:,}"
-              f"   (excluded {result['num_positions_excluded']:,})")
+        print(f"    positions excluded (zero norm) : "
+              f"{result['num_positions_excluded']:,}")
 
         # The most internally coherent displayed classes, as a diagnostic only.
         coherence = display["within_by_class"]

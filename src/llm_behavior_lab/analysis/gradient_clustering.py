@@ -349,8 +349,10 @@ def gradient_clustering(
     Args:
         record: A record carrying per-position gradient sketches.
         grouping: ``"target"`` or ``"greedy"``.
-        min_support: Smallest class size in the analysis population. Two is the
-            smallest that admits a within-class pair at all.
+        min_support: Smallest class size counted as *qualifying* for reporting
+            and for the heatmap diagonal. It does **not** restrict the pooled
+            statistic, which spans every position: a singleton simply has no
+            within-class pair to contribute.
         display_classes: How many of the most supported classes to build the
             heatmap matrix from. ``None`` builds it over the whole population,
             which is only sensible when that population is small.
@@ -375,29 +377,50 @@ def gradient_clustering(
     represented, represented_counts = np.unique(labels, return_counts=True)
     keep = represented_counts >= int(min_support)
     tokens, counts = represented[keep], represented_counts[keep]
-    if tokens.size < 2:
+    # Under the all-position definition these are two different requirements:
+    # between-class pairs need two represented classes, singletons included,
+    # while within-class pairs need at least one class with a pair to give.
+    if represented.size < 2:
         raise ValueError(
-            f"Only {tokens.size} class(es) reach min_support={min_support}; a "
-            "between-class comparison needs at least two."
+            f"Only {represented.size} represented class(es); a between-class "
+            "comparison needs at least two."
+        )
+    if tokens.size < 1:
+        raise ValueError(
+            f"No class reaches min_support={min_support}, so there is no "
+            "within-class pair to compare against."
         )
 
-    # -- population: every qualifying class, no display limit anywhere near it
-    sums, population_counts, self_squared = _class_sums(unit, labels, tokens)
+    # -- population: EVERY position, including singleton classes.
+    #
+    # A singleton has no within-class pair, so it contributes nothing to the
+    # within numerator or denominator -- but it is still a real position that
+    # forms between-class pairs with everything else, and dropping it would
+    # silently redefine "between" as "between non-singleton classes". That
+    # matters most where the singleton fraction moves with the condition being
+    # compared, which is exactly the nucleus-temperature case.
+    sums, population_counts, self_squared = _class_sums(unit, labels, represented)
     within, between = _pooled_from_blocks(sums, population_counts, self_squared)
+    total = int(population_counts.sum())
     population = {
-        "classes": tokens,
+        "classes": represented,
         "counts": population_counts,
         "num_classes": int(tokens.size),
         "num_represented": int(represented.size),
+        "num_positions": total,
         "within": within,
         "between": between,
         "delta": within - between,
         "num_within_pairs": int((population_counts * (population_counts - 1)).sum()),
+        "num_between_pairs": int(
+            total ** 2 - (population_counts.astype(np.int64) ** 2).sum()
+        ),
     }
 
-    keep_rows = np.isin(labels, tokens)
+    # The null permutes labels over the same complete population, so singleton
+    # between-pairs are present on both sides of the comparison.
     null = _permutation_null(
-        unit[keep_rows], population_counts,
+        unit, population_counts,
         permutations=permutations, seed=permutation_seed,
     )
 

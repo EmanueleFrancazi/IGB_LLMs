@@ -2849,7 +2849,20 @@ def _token_axis_label(record: Any, token_id: int, *, max_length: int = 9) -> str
     tokens = getattr(record, "tokens", None)
     if not tokens or token_id >= len(tokens):
         return str(int(token_id))
-    return f"{escape_token_label(tokens[int(token_id)], max_length=max_length)}"
+
+    label = escape_token_label(tokens[int(token_id)], max_length=max_length)
+    # Any non-ASCII character is written as its escape rather than as the glyph.
+    # A subword vocabulary is full of scripts the plotting font will not have,
+    # and matplotlib silently substitutes a blank box for a missing glyph, so the
+    # label would otherwise depend on which fonts happen to be installed.
+    # Escaping is deterministic, reproducible anywhere, and still identifies the
+    # token. Applied after the existing escaping so backslashes are not doubled.
+    if not label.isascii():
+        label = "".join(
+            character if character.isascii() else f"\\u{ord(character):04x}"
+            for character in label
+        )
+    return label
 
 
 def _clustering_heatmap(
@@ -2960,9 +2973,12 @@ def plot_gradient_directional_clustering(
         axes.set_xlabel("token class")
     panels[0].set_ylabel("token class")
 
-    colourbar = figure.colorbar(
-        left, ax=panels, fraction=0.030, pad=0.03, aspect=30
-    )
+    # A dedicated axis rather than stealing space from the panels: colorbar(ax=...)
+    # shrinks the axes it is attached to, which was letting the bar sit over the
+    # right matrix. An explicit rectangle keeps both heatmaps the same size and
+    # puts the bar clear of them.
+    bar_axis = figure.add_axes([0.915, 0.30, 0.014, 0.48])
+    colourbar = figure.colorbar(left, cax=bar_axis)
     colourbar.set_label("Estimated gradient cosine similarity", fontsize=9)
     colourbar.ax.tick_params(labelsize=7)
 
@@ -2980,7 +2996,7 @@ def plot_gradient_directional_clustering(
         f"{greedy['display']['selection']} (greedy)",
         ha="center", fontsize=7, color="#444444",
     )
-    figure.subplots_adjust(top=0.83, bottom=0.22, wspace=0.22)
+    figure.subplots_adjust(top=0.83, bottom=0.22, left=0.06, right=0.89, wspace=0.22)
 
     # Anchored in figure coordinates from each panel's own box, so the statistic
     # sits directly beneath its heatmap rather than at a fixed axes offset that
