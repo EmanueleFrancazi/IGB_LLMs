@@ -713,3 +713,95 @@ def test_the_permutation_null_keeps_the_full_class_count_vector() -> None:
     assert result["null"]["permutations"] == 32
     assert result["population"]["num_within_pairs"] == 4 * 3 + 3 * 2
     assert np.isfinite(result["null"]["delta_mean"])
+
+
+# -- final figure-20 wording and labels ---------------------------------------
+
+
+def test_the_annotation_says_all_positions_not_n_ge_2() -> None:
+    """The pooled statistic spans every position; the wording must not imply
+    it is restricted to the qualifying or the displayed classes."""
+
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.figures import _population_annotation
+
+    unit, labels = _clustered(num_classes=4, per_class=5, alignment=0.6)
+    result = gradient_clustering(_record(unit, labels, labels), grouping="target")
+
+    text = _population_annotation(result)
+
+    assert "All positions" in text
+    assert f"D = {result['population']['num_positions']:,}" in text
+    assert "n>=2" not in text and "n >= 2" not in text
+    assert "delta" in text and "Permutation null 95%" in text
+
+
+def test_the_subtitle_states_the_display_restriction_separately(tmp_path) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis import figures as module
+
+    unit, labels = _clustered(num_classes=5, per_class=5, alignment=0.6)
+    record = _record(unit, labels, labels)
+
+    held = {}
+    original = module.save_figure
+
+    def spy(figure, *args, **kwargs):
+        held["figure"] = figure
+        return original(figure, *args, **kwargs)
+
+    module.save_figure = spy
+    try:
+        module.plot_gradient_directional_clustering(record, tmp_path, display_classes=3)
+    finally:
+        module.save_figure = original
+
+    blurb = " ".join(text.get_text() for text in held["figure"].texts)
+    assert "heatmap:" in blurb
+    assert "n >=" in blurb
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("▁The", "<sp>The"),
+        ("▁reg", "<sp>reg"),
+        ("Ġthe", "<sp>the"),
+        ("<0x0A>", "<0x0A>"),
+        ("\n", "<newline>"),
+        ("\t", "<tab>"),
+        (" ", "<space>"),
+        ("", "<empty>"),
+        ("abc", "abc"),
+        ("半", "\\u534a"),
+    ],
+)
+def test_token_display_formatting(text, expected) -> None:
+    """SentencePiece reads semantically; anything else non-ASCII escapes."""
+
+    matplotlib = pytest.importorskip("matplotlib")
+    from llm_behavior_lab.analysis.figures import _token_axis_label
+
+    unit, labels = _clustered(num_classes=3, per_class=4, alignment=0.5)
+    record = _record(unit, labels, labels)
+    vocabulary = [f"t{index}" for index in range(VOCAB)]
+    vocabulary[4] = text
+    record.metadata["tokens"] = vocabulary
+
+    label = _token_axis_label(record, 4)
+
+    assert label == expected
+    assert label.isascii(), "labels must not depend on local font coverage"
+
+
+def test_display_formatting_does_not_alter_token_ids() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+
+    unit, labels = _clustered(num_classes=4, per_class=5, alignment=0.6)
+    record = _record(unit, labels, labels)
+    record.metadata["tokens"] = ["▁x"] * VOCAB
+
+    result = gradient_clustering(record, grouping="target", display_classes=4)
+
+    assert set(result["display"]["classes"]).issubset(set(labels.tolist()))
+    assert result["display"]["classes"].dtype.kind in "iu"

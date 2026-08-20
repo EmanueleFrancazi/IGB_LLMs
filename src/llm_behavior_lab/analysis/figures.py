@@ -65,6 +65,7 @@ __all__ = [
     "plot_gradient_vs_mean_probability",
     "plot_gradient_vs_nucleus_guess_bias",
     "plot_correction_provenance",
+    "plot_countsketch_fidelity",
     "plot_gradient_directional_clustering",
     "plot_initial_gradient_split",
     "plot_initial_logit_correction",
@@ -105,7 +106,7 @@ FIGURE_FORMATS = ("svg",)
 #: nothing is renumbered. Anything unlisted falls to ``diagnostics``, which keeps
 #: a new figure visible rather than silently dropping it.
 FIGURE_CATEGORIES = {
-    "figure0": "sanity_checks",
+    "figure0": "sanity_checks", "figure23": "sanity_checks",
     "figure1": "main", "figure2": "main", "figure4": "main", "figure5": "main",
     "figure6": "main", "figure7": "main", "figure8": "main", "figure9": "main",
     "figure11": "main", "figure12": "main", "figure13": "main", "figure14": "main",
@@ -2836,32 +2837,51 @@ def plot_initial_logit_correction(record: Any, directory: str | Path) -> list[Pa
     return save_figure(figure, directory, "figure19_initial_logit_correction")
 
 
-def _token_axis_label(record: Any, token_id: int, *, max_length: int = 9) -> str:
-    """A readable axis label for one token class.
+def _token_axis_label(record: Any, token_id: int, *, max_length: int = 14) -> str:
+    r"""A readable, font-independent axis label for one token class.
 
-    Decoded text where the record carries a vocabulary, falling back to the bare
-    ID otherwise. Whitespace, newlines, byte fallbacks and structural tokens are
-    the ones that matter here: printed raw they are blank or actively break the
-    axis, and two different tokens can end up looking identical. ``repr`` makes
-    every one of them visible, so no tick is ever empty.
+    Two problems have to be solved at once. Invisible characters must not render
+    as blank ticks, and characters the plotting font lacks must not render as
+    empty boxes -- matplotlib substitutes those silently, so a label would
+    otherwise depend on which fonts happen to be installed on the machine.
+
+    Common tokenizer notation therefore gets a semantic ASCII spelling rather
+    than a numeric escape: SentencePiece's word-boundary marker reads ``<sp>``
+    instead of ``\u2581``, which is what a reader actually needs to see. Byte
+    fallbacks like ``<0x0A>`` are already ASCII and pass through untouched.
+    Anything else outside ASCII falls back to a deterministic ``\uXXXX``.
+
+    Display formatting only: the token ID and every grouping decision are
+    untouched by this.
     """
 
     tokens = getattr(record, "tokens", None)
     if not tokens or token_id >= len(tokens):
         return str(int(token_id))
 
-    label = escape_token_label(tokens[int(token_id)], max_length=max_length)
-    # Any non-ASCII character is written as its escape rather than as the glyph.
-    # A subword vocabulary is full of scripts the plotting font will not have,
-    # and matplotlib silently substitutes a blank box for a missing glyph, so the
-    # label would otherwise depend on which fonts happen to be installed.
-    # Escaping is deterministic, reproducible anywhere, and still identifies the
-    # token. Applied after the existing escaping so backslashes are not doubled.
-    if not label.isascii():
-        label = "".join(
-            character if character.isascii() else f"\\u{ord(character):04x}"
-            for character in label
-        )
+    text = str(tokens[int(token_id)])
+    if text == "":
+        return "<empty>"
+
+    semantic = {
+        "\u2581": "<sp>",       # SentencePiece word boundary
+        "\u0120": "<sp>",       # byte-level BPE word boundary
+        "\n": "<newline>",
+        "\r": "<cr>",
+        "\t": "<tab>",
+        " ": "<space>",
+    }
+    pieces = []
+    for character in text:
+        if character in semantic:
+            pieces.append(semantic[character])
+        elif character.isascii() and character.isprintable():
+            pieces.append(character)
+        else:
+            pieces.append(f"\\u{ord(character):04x}")
+    label = "".join(pieces)
+    if len(label) > max_length:
+        label = label[: max_length - 2] + ".."
     return label
 
 
@@ -2898,9 +2918,9 @@ def _population_annotation(result: dict[str, Any]) -> str:
     population = result["population"]
     null = result["null"]
     return (
-        f"All n>={result['min_support']} classes "
-        f"({population['num_classes']:,}):  delta = {population['delta']:+.5f}\n"
-        f"within {population['within']:+.5f}   between {population['between']:+.5f}\n"
+        f"All positions (D = {population['num_positions']:,})\n"
+        f"delta = {population['delta']:+.5f}\n"
+        f"within {population['within']:+.5f} | between {population['between']:+.5f}\n"
         f"Permutation null 95%: [{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
         f"  (M = {null['permutations']})"
     )
@@ -2992,8 +3012,11 @@ def plot_gradient_directional_clustering(
         "same gradients, same exact norms, same sketch realization -- only the "
         "grouping label differs   |   diagonal is within-class over DISTINCT "
         "pairs, not self-similarity   |   "
-        f"displayed: {target['display']['selection']} (target), "
-        f"{greedy['display']['selection']} (greedy)",
+        f"heatmap: {target['display']['num_classes']} most supported of "
+        f"{target['population']['num_classes']:,} classes with n >= "
+        f"{target['min_support']} (target), "
+        f"{greedy['display']['num_classes']} of "
+        f"{greedy['population']['num_classes']:,} (greedy)",
         ha="center", fontsize=7, color="#444444",
     )
     figure.subplots_adjust(top=0.83, bottom=0.22, left=0.06, right=0.89, wspace=0.22)
@@ -3085,3 +3108,98 @@ def plot_correction_provenance(record: Any, directory: str | Path) -> list[Path]
     )
     figure.subplots_adjust(top=0.80, wspace=0.26)
     return save_figure(figure, directory, "figure21_correction_provenance")
+
+
+def plot_countsketch_fidelity(
+    report: dict[str, Any], directory: str | Path
+) -> list[Path]:
+    """Figure 23 -- does the K = 512 sketch reproduce true gradient directions?
+
+    A methodological check, not a result. Figure 20 reports estimated cosines,
+    some of them large, and this asks whether the instrument producing them is
+    accurate enough for those numbers to mean what they appear to mean.
+
+    The main panel is the only comparison that settles it: the full-gradient
+    cosine of a pair against the sketch's estimate of it, on equal axes with the
+    identity line. Points on the line mean the projection is faithful; vertical
+    scatter about it is the projection's error, which the annotation quantifies.
+
+    The inset shows how that error falls with sketch width, which places the
+    production choice of ``K`` in context rather than asserting it is adequate.
+
+    Numbered 23, leaving 22 for the nucleus-temperature figure that is planned
+    but not yet built. Skipping a number costs nothing; renumbering later would
+    break every existing reference, and figure numbers here are stable
+    identifiers rather than an ordering.
+    """
+
+    exact = report["exact_cosines"]
+    estimated = report["production_cosines"]
+    size = exact.shape[0]
+    upper = np.triu_indices(size, k=1)
+    production = report["production"]
+
+    figure = _new_figure(width=7.6, height=6.4)
+    axes = figure.subplots()
+
+    axes.scatter(
+        exact[upper], estimated[upper], s=42, alpha=0.8,
+        color="#1f77b4", edgecolors="#08306b", linewidths=0.6, zorder=3,
+    )
+    span = [
+        float(min(exact[upper].min(), estimated[upper].min())),
+        float(max(exact[upper].max(), estimated[upper].max())),
+    ]
+    pad = 0.05 * (span[1] - span[0] or 1.0)
+    limits = [span[0] - pad, span[1] + pad]
+    axes.plot(limits, limits, color="#d62728", linewidth=1.1, linestyle="--",
+              label="y = x  (perfect estimate)", zorder=2)
+    axes.set_xlim(limits)
+    axes.set_ylim(limits)
+    axes.set_aspect("equal", adjustable="box")
+    axes.set_xlabel("Full-gradient cosine")
+    axes.set_ylabel("CountSketch-estimated cosine")
+    axes.grid(True, alpha=0.22)
+    axes.legend(loc="upper left", fontsize=8, frameon=True)
+
+    axes.text(
+        0.98, 0.03,
+        f"K = {report['production_dimension']}   seed {report['production_seed']}\n"
+        f"pairs {production['num_pairs']}   "
+        f"MAE {production['mean_absolute_error']:.4f}\n"
+        f"RMSE {production['rmse']:.4f}   "
+        f"max {production['max_absolute_error']:.4f}\n"
+        f"bias {production['mean_signed_error']:+.4f}",
+        transform=axes.transAxes, fontsize=7.5, ha="right", va="bottom",
+        family="monospace", bbox=_ANNOTATION_BOX,
+    )
+
+    sensitivity = report.get("sensitivity") or []
+    if sensitivity:
+        inset = figure.add_axes([0.63, 0.63, 0.24, 0.22])
+        widths = [entry["dimension"] for entry in sensitivity]
+        inset.plot(
+            widths, [entry["mean_absolute_error"] for entry in sensitivity],
+            marker="o", markersize=3.5, linewidth=1.2, color="#2ca02c",
+        )
+        inset.axvline(report["production_dimension"], color="#d62728",
+                      linestyle=":", linewidth=1.0)
+        inset.set_xscale("log", base=2)
+        inset.set_yscale("log")
+        inset.set_xlabel("K", fontsize=7)
+        inset.set_ylabel("mean MAE", fontsize=7)
+        inset.tick_params(labelsize=6)
+        inset.grid(True, which="both", alpha=0.20)
+
+    figure.suptitle(
+        "CountSketch fidelity against full-gradient directional overlap", fontsize=12
+    )
+    figure.text(
+        0.5, 0.915,
+        f"{report['num_gradients']} exact gradients, {report['gradient_dtype']} "
+        f"stored and {report['accumulation_dtype']} accumulated   |   "
+        "self-pairs excluded   |   measurement fidelity, not a scientific result",
+        ha="center", fontsize=7.5, color="#444444",
+    )
+    figure.subplots_adjust(top=0.87)
+    return save_figure(figure, directory, "figure23_countsketch_fidelity")
