@@ -43,6 +43,7 @@ __all__ = [
     "cosine_from_gram",
     "fidelity_report",
     "pair_type_breakdown",
+    "subgroup_delta",
     "select_sanity_positions",
     "sketch_estimated_cosines",
 ]
@@ -59,11 +60,18 @@ SENSITIVITY_DIMENSIONS = (128, 256, 512, 1024)
 
 def select_sanity_positions(
     target_ids: np.ndarray,
-    greedy_ids: np.ndarray,
+    greedy_ids: np.ndarray | None = None,
     *,
-    count: int = 8,
+    count: int = 12,
 ) -> np.ndarray:
     """Choose a small deterministic position subset with useful pair structure.
+
+    ``greedy_ids`` is optional because of *when* selection has to happen. Target
+    labels are corpus data and are known before any model runs; greedy labels
+    only exist once the forward pass has been done, and by then the loop is
+    already streaming. Selecting on targets alone keeps the whole thing to a
+    single pass with no gradient recomputed, and the greedy pair composition is
+    reported afterwards rather than guaranteed in advance.
 
     Selection uses **only** labels and position order. It never looks at a
     sketch value, an exact cosine, or any measure of directional coherence --
@@ -87,9 +95,13 @@ def select_sanity_positions(
     """
 
     target_ids = np.asarray(target_ids, dtype=np.int64)
-    greedy_ids = np.asarray(greedy_ids, dtype=np.int64)
-    if target_ids.shape != greedy_ids.shape:
-        raise ValueError("target and greedy label arrays must have equal length.")
+    if greedy_ids is None:
+        greedy_ids = np.full_like(target_ids, -1)
+    else:
+        greedy_ids = np.asarray(greedy_ids, dtype=np.int64)
+        if target_ids.shape != greedy_ids.shape:
+            raise ValueError("target and greedy label arrays must have equal length.")
+    has_greedy = bool((greedy_ids >= 0).any())
 
     def most_frequent(labels: np.ndarray) -> int:
         values, counts = np.unique(labels, return_counts=True)
@@ -108,8 +120,18 @@ def select_sanity_positions(
                 if how_many <= 0:
                     return
 
-    take(np.flatnonzero(target_ids == most_frequent(target_ids)), 2)
-    take(np.flatnonzero(greedy_ids == most_frequent(greedy_ids)), 2)
+    # Two from the commonest target class guarantees a same-target pair; a
+    # third widens within-class coverage once the subset is larger than eight.
+    take(np.flatnonzero(target_ids == most_frequent(target_ids)), 3 if count >= 12 else 2)
+    if has_greedy:
+        take(np.flatnonzero(greedy_ids == most_frequent(greedy_ids)), 2)
+    # The second most frequent target class gives a second within-class group,
+    # and therefore same-target pairs that are not all from one token.
+    remaining = target_ids[[p for p in range(target_ids.size) if p not in chosen]]
+    if remaining.size:
+        values, counts = np.unique(remaining, return_counts=True)
+        second = int(values[np.lexsort((values, -counts))[0]])
+        take(np.flatnonzero(target_ids == second), 2)
 
     used_targets = {int(target_ids[p]) for p in chosen}
     used_greedy = {int(greedy_ids[p]) for p in chosen}
@@ -245,6 +267,41 @@ def pair_type_breakdown(
     return out
 
 
+def subgroup_delta(cosines: np.ndarray, labels: np.ndarray) -> dict[str, Any]:
+    """Within minus between on one cosine matrix, over the sanity subset.
+
+    The same statistic figure 20 reports, applied here to both the exact and the
+    sketched matrices so the two can be differenced. Per-pair error is not the
+    scientific observable; ``delta`` is, and a projection could in principle be
+    noisy per pair while preserving the within-versus-between geometry, or the
+    reverse.
+
+    Strictly a subset diagnostic. With a dozen positions this ``delta`` is not an
+    estimate of the full-experiment value and must not be read as one -- only the
+    *difference* between the exact and sketched versions is meaningful.
+
+    ``None`` when the subset lacks either a within-group or a between-group pair,
+    rather than a fabricated number.
+    """
+
+    labels = np.asarray(labels)
+    size = cosines.shape[0]
+    rows, columns = np.triu_indices(size, k=1)
+    same = labels[rows] == labels[columns]
+    if not same.any() or same.all():
+        return {"available": False, "reason": "no within-group or no between-group pair"}
+    within = float(cosines[rows, columns][same].mean())
+    between = float(cosines[rows, columns][~same].mean())
+    return {
+        "available": True,
+        "within": within,
+        "between": between,
+        "delta": within - between,
+        "num_within_pairs": int(same.sum()),
+        "num_between_pairs": int((~same).sum()),
+    }
+
+
 def fidelity_report(
     gradients: np.ndarray,
     norms: np.ndarray,
@@ -270,6 +327,16 @@ def fidelity_report(
         seed=production_seed, tensor_sizes=tensor_sizes,
     )
 
+    # The scientific observable, computed both ways on the same subset.
+    deltas = {}
+    for name, labels in (("target", target_ids), ("greedy", greedy_ids)):
+        exact_delta = subgroup_delta(exact, labels)
+        sketch_delta = subgroup_delta(production, labels)
+        entry = {"exact": exact_delta, "sketch": sketch_delta}
+        if exact_delta["available"] and sketch_delta["available"]:
+            entry["delta_error"] = sketch_delta["delta"] - exact_delta["delta"]
+        deltas[name] = entry
+
     alternates = []
     for seed in alternate_seeds:
         estimated = sketch_estimated_cosines(
@@ -277,6 +344,15 @@ def fidelity_report(
         )
         summary = _errors(exact, estimated)
         summary["seed"] = int(seed)
+        # How much the subgroup statistic itself moves with the realization.
+        for name, labels in (("target", target_ids), ("greedy", greedy_ids)):
+            observed = subgroup_delta(exact, labels)
+            projected = subgroup_delta(estimated, labels)
+            summary[f"{name}_delta_error"] = (
+                projected["delta"] - observed["delta"]
+                if observed["available"] and projected["available"]
+                else float("nan")
+            )
         alternates.append(summary)
 
     sensitivity = []
@@ -313,6 +389,7 @@ def fidelity_report(
         "production_cosines": production,
         "production": _errors(exact, production),
         "pair_types": pair_type_breakdown(exact, production, target_ids, greedy_ids),
+        "subgroup_deltas": deltas,
         "alternate_seeds": alternates,
         "alternate_summary": {
             "num_seeds": len(alternates),
@@ -326,4 +403,11 @@ def fidelity_report(
             if alternates else float("nan"),
         },
         "sensitivity": sensitivity,
+        "alternate_delta_errors": {
+            name: [
+                entry[f"{name}_delta_error"] for entry in alternates
+                if np.isfinite(entry[f"{name}_delta_error"])
+            ]
+            for name in ("target", "greedy")
+        },
     }

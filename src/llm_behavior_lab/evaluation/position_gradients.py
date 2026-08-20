@@ -106,6 +106,12 @@ CANONICAL_GRADIENT_TEMPERATURE = 1.00
 #: baseline and sketch smokes are timed on the cluster.
 DEFAULT_SKETCH_DIMENSION = 512
 
+#: Positions whose complete gradient is retained for the fidelity sanity check.
+#: Twelve gives 66 unique pairs against eight's 28, which is a far more
+#: informative fidelity comparison, at about 394 MiB of temporary CPU float32 --
+#: modest, held only until the offline analysis finishes, and never on the GPU.
+DEFAULT_SANITY_POSITIONS = 12
+
 
 @dataclass(frozen=True)
 class PositionGradientResult:
@@ -149,6 +155,11 @@ class PositionGradientResult:
     gradient_sketches: torch.Tensor | None = None
     #: Provenance of that projection, or ``None``.
     sketch_protocol: dict[str, Any] | None = None
+    #: ``[m, P]`` complete float32 gradients for the sanity subset, or ``None``.
+    #: Temporary: the caller runs the offline fidelity analysis and drops them.
+    exact_gradients: torch.Tensor | None = None
+    #: Flat indices of those positions, or ``None``.
+    exact_positions: torch.Tensor | None = None
 
     @property
     def canonical_index(self) -> int:
@@ -518,6 +529,7 @@ def compute_position_gradient_norms(
     temperatures: Sequence[float] = GRADIENT_TEMPERATURES,
     vector_split: bool = False,
     gradient_sketch: bool = False,
+    exact_gradient_positions: Sequence[int] | None = None,
     sketch_dimension: int = DEFAULT_SKETCH_DIMENSION,
     sketch_seed: int = 20240917,
     progress: Callable[[int, int], None] | None = None,
@@ -547,6 +559,11 @@ def compute_position_gradient_norms(
             it reuses each gradient set already computed for the norm -- but
             holds two float64 parameter-shaped buffers, about 131 MiB at 8.6M
             parameters.
+        exact_gradient_positions: Flat position indices whose **complete**
+            gradient is copied to CPU for the CountSketch fidelity check. Off
+            unless given. The copy is taken from the same gradient set the norm
+            and the sketch already used, so no gradient is recomputed and no
+            second backward pass is introduced.
         gradient_sketch: Also record a deterministic count sketch of every
             position's canonical gradient, so directional structure can be
             measured afterwards. Off by default. Adds no backward pass.
@@ -605,6 +622,12 @@ def compute_position_gradient_norms(
     gradient_norms = torch.empty((len(grid), total_positions), dtype=torch.float64)
     losses = torch.empty((len(grid), total_positions), dtype=torch.float64)
     split = _VectorSplitAccumulator(parameters) if vector_split else None
+    wanted = (
+        {int(index) for index in exact_gradient_positions}
+        if exact_gradient_positions is not None
+        else set()
+    )
+    captured: dict[int, torch.Tensor] = {}
     sketcher = (
         _GradientSketcher(parameters, dimension=sketch_dimension, seed=sketch_seed)
         if gradient_sketch
@@ -677,6 +700,20 @@ def compute_position_gradient_norms(
                         # Same gradient set the norm came from; no second
                         # backward pass and nothing full-sized is retained.
                         sketches[cursor] = sketcher.project(grads).cpu()
+                    if (
+                        wanted
+                        and index == canonical_temperature_index
+                        and int(position_indices[cursor]) in wanted
+                    ):
+                        # The same live gradient set the norm and the sketch came
+                        # from, flattened in parameter order and moved to CPU one
+                        # position at a time. Nothing accumulates on the GPU.
+                        captured[int(position_indices[cursor])] = torch.cat(
+                            [
+                                gradient.detach().reshape(-1).float().cpu()
+                                for gradient in grads
+                            ]
+                        )
                     if split is not None and index == canonical_temperature_index:
                         # The same gradient set the norm was taken from, before
                         # it is released. No second backward pass.
@@ -708,6 +745,16 @@ def compute_position_gradient_norms(
         losses=losses[canonical],
         vector_split=None if split is None else split.summary(),
         gradient_sketches=sketches,
+        exact_gradients=(
+            None
+            if not captured
+            else torch.stack([captured[key] for key in sorted(captured)])
+        ),
+        exact_positions=(
+            None
+            if not captured
+            else torch.tensor(sorted(captured), dtype=torch.long)
+        ),
         sketch_protocol=(
             None
             if sketcher is None

@@ -228,6 +228,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--countsketch-fidelity-sanity",
+        action="store_true",
+        help=(
+            "Small methodological run only. Retain the complete gradients of a "
+            "deterministic handful of positions, compare the production "
+            "CountSketch against their exact cosines, and write a compact "
+            "sanity artifact. Never enable this for a scientific run."
+        ),
+    )
+    parser.add_argument(
         "--gradient-sketch",
         action="store_true",
         help=(
@@ -392,6 +402,9 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         # attribute is read defensively, the same way initialization_scale is.
         # Reaching for it directly turns every older caller into an
         # AttributeError that has nothing to do with what it was doing.
+        "countsketch_fidelity_sanity": bool(
+            getattr(args, "countsketch_fidelity_sanity", False)
+        ),
         "gradient_sketch": (
             bool(gradients.get("sketch", False))
             or bool(getattr(args, "gradient_sketch", False))
@@ -420,6 +433,98 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             else gradients.get("num_windows")
         ),
     }
+
+
+
+def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
+    """Run the offline fidelity analysis and persist only its derived results.
+
+    The complete gradients exist solely for the duration of this call. They are
+    hundreds of megabytes and nothing downstream needs them once the exact
+    cosines, the production estimate, the alternate seeds and the K sweep have
+    been computed, so they are dropped here rather than written to disk.
+    """
+
+    import numpy as np
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import fidelity_report
+
+    gradients = gradient_result.exact_gradients.numpy()
+    indices = gradient_result.exact_positions.numpy()
+    lookup = {int(value): row for row, value in enumerate(
+        gradient_result.position_indices.numpy()
+    )}
+    rows = [lookup[int(index)] for index in indices]
+    targets = gradient_result.target_ids.numpy()[rows]
+    greedy = gradient_result.greedy_ids.numpy()[rows]
+    norms = gradient_result.gradient_norms.numpy()[rows]
+
+    # Integrity gate. A mismatch here means the flattening order, the position
+    # alignment or the capture point is wrong, and every fidelity number that
+    # followed would be meaningless.
+    recomputed = np.linalg.norm(gradients.astype(np.float64), axis=1)
+    drift = float(np.max(np.abs(recomputed - norms) / np.maximum(norms, 1e-30)))
+    if drift > 1e-5:
+        raise ValueError(
+            f"Recomputed norms disagree with the recorded exact norms by "
+            f"{drift:.3e}; capture alignment is wrong, so fidelity cannot be "
+            "interpreted."
+        )
+
+    report = fidelity_report(
+        gradients, norms, targets, greedy,
+        production_dimension=protocol["sketch_dimension"],
+        production_seed=20240917,
+    )
+    production = report["production"]
+    print(
+        f"    countsketch fidelity: {report['num_gradients']} gradients, "
+        f"{production['num_pairs']} pairs, MAE {production['mean_absolute_error']:.5f}, "
+        f"RMSE {production['rmse']:.5f}, bias {production['mean_signed_error']:+.5f}, "
+        f"norm drift {drift:.2e}"
+    )
+
+    payload = {
+        "selected_position_indices": indices,
+        "selected_target_ids": targets,
+        "selected_greedy_ids": greedy,
+        "exact_norms": norms,
+        "exact_cosine_matrix": report["exact_cosines"],
+        "production_cosine_matrix": report["production_cosines"],
+        "alternate_seeds": np.asarray(
+            [entry["seed"] for entry in report["alternate_seeds"]]
+        ),
+        "alternate_mae": np.asarray(
+            [entry["mean_absolute_error"] for entry in report["alternate_seeds"]]
+        ),
+        "alternate_bias": np.asarray(
+            [entry["mean_signed_error"] for entry in report["alternate_seeds"]]
+        ),
+        "alternate_rmse": np.asarray(
+            [entry["rmse"] for entry in report["alternate_seeds"]]
+        ),
+        "k_values": np.asarray(
+            [entry["dimension"] for entry in report["sensitivity"]]
+        ),
+        "k_mae": np.asarray(
+            [entry["mean_absolute_error"] for entry in report["sensitivity"]]
+        ),
+        "k_rmse": np.asarray([entry["rmse"] for entry in report["sensitivity"]]),
+        "norm_drift": np.asarray([drift]),
+    }
+    for name, entry in report["subgroup_deltas"].items():
+        for side in ("exact", "sketch"):
+            values = entry[side]
+            if values["available"]:
+                for key in ("within", "between", "delta"):
+                    payload[f"{name}_{side}_{key}"] = np.asarray([values[key]])
+        if "delta_error" in entry:
+            payload[f"{name}_delta_error"] = np.asarray([entry["delta_error"]])
+
+    destination = run.directory / "sanity"
+    destination.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(destination / "countsketch_fidelity.npz", **payload)
+    print(f"    countsketch fidelity artifact: {destination / 'countsketch_fidelity.npz'}")
 
 
 def main() -> None:
@@ -673,6 +778,27 @@ def main() -> None:
             # re-seeded reconstruction of it: the observable describes *this*
             # initialization. The call leaves every parameter, buffer, gradient,
             # and the train/eval mode exactly as it found them.
+            # Selected before the loop from target labels and position index
+            # alone -- both known without running the model, and neither able to
+            # see a similarity value, which is what keeps the check honest.
+            sanity_positions = None
+            if protocol["countsketch_fidelity_sanity"]:
+                from llm_behavior_lab.analysis.countsketch_fidelity import (
+                    select_sanity_positions,
+                )
+                from llm_behavior_lab.evaluation.position_gradients import (
+                    DEFAULT_SANITY_POSITIONS,
+                )
+
+                sanity_positions = select_sanity_positions(
+                    positions.target_ids.reshape(-1).cpu().numpy(),
+                    None,
+                    count=DEFAULT_SANITY_POSITIONS,
+                )
+                print(
+                    f"    countsketch fidelity sanity: capturing "
+                    f"{len(sanity_positions)} exact gradients"
+                )
             gradient_result = compute_position_gradient_norms(
                 model,
                 positions,
@@ -682,6 +808,7 @@ def main() -> None:
                 vector_split=protocol["gradient_vector_split"],
                 gradient_sketch=protocol["gradient_sketch"],
                 sketch_dimension=protocol["sketch_dimension"],
+                exact_gradient_positions=sanity_positions,
             )
             if gradient_result.vector_split is not None:
                 split = gradient_result.vector_split
@@ -696,6 +823,8 @@ def main() -> None:
                     f"dot = {split['dot']:.6g}, "
                     f"cos = {'undefined' if cosine is None else f'{cosine:.6f}'}"
                 )
+            if gradient_result.exact_gradients is not None:
+                _write_countsketch_fidelity(run, gradient_result, protocol)
             rate = gradient_result.num_positions / max(gradient_result.seconds, 1e-9)
             print(
                 f"    gradient analysis: {gradient_result.num_positions:,} positions "

@@ -425,3 +425,119 @@ def test_sketched_aggregates_match_the_exact_vector_split() -> None:
             estimates["norm_correct"] * estimates["norm_wrong"]
         )
         assert abs(estimated_cosine - exact["cosine"]) < 0.15
+
+
+# -- exact-gradient capture for the fidelity sanity check ---------------------
+
+
+def test_exact_capture_is_off_by_default() -> None:
+    """A scientific run must allocate nothing and behave identically."""
+
+    result = compute_position_gradient_norms(TinyModel(), _positions(), vocab_size=VOCAB)
+
+    assert result.exact_gradients is None
+    assert result.exact_positions is None
+
+
+def test_capture_retains_exactly_the_requested_positions() -> None:
+    model = TinyModel()
+    positions = _positions()
+    wanted = [1, 4, 9]
+
+    result = compute_position_gradient_norms(
+        model, positions, vocab_size=VOCAB, gradient_sketch=True,
+        exact_gradient_positions=wanted,
+    )
+
+    assert result.exact_positions.tolist() == sorted(wanted)
+    assert result.exact_gradients.shape[0] == len(wanted)
+    assert result.exact_gradients.dtype == torch.float32
+
+
+def test_captured_norms_match_the_normal_exact_norms() -> None:
+    """The integrity gate: flattening order and position alignment must hold."""
+
+    import numpy as np
+
+    model = TinyModel()
+    positions = _positions()
+    wanted = [0, 3, 7]
+
+    result = compute_position_gradient_norms(
+        model, positions, vocab_size=VOCAB, exact_gradient_positions=wanted,
+    )
+
+    flat = result.position_indices.numpy().tolist()
+    rows = [flat.index(int(index)) for index in result.exact_positions.numpy()]
+    recomputed = np.linalg.norm(
+        result.exact_gradients.numpy().astype(np.float64), axis=1
+    )
+    expected = result.gradient_norms.numpy()[rows]
+
+    assert np.allclose(recomputed, expected, rtol=1e-5, atol=0)
+
+
+def test_production_sketch_reconstructs_from_the_captured_gradient() -> None:
+    """Validates flattening order, bucket/sign construction, seed and K at once."""
+
+    import numpy as np
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import count_sketch_matrix
+
+    model = TinyModel()
+    positions = _positions()
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    sizes = [int(p.numel()) for p in parameters]
+
+    result = compute_position_gradient_norms(
+        model, positions, vocab_size=VOCAB, gradient_sketch=True,
+        sketch_dimension=64, sketch_seed=20240917,
+        exact_gradient_positions=[2, 5],
+    )
+
+    flat = result.position_indices.numpy().tolist()
+    buckets, signs = count_sketch_matrix(
+        sum(sizes), 64, seed=20240917, tensor_sizes=sizes
+    )
+    for row, index in enumerate(result.exact_positions.numpy()):
+        gradient = result.exact_gradients.numpy()[row].astype(np.float64)
+        rebuilt = np.zeros(64)
+        np.add.at(rebuilt, buckets, gradient * signs)
+        recorded = result.gradient_sketches.numpy()[flat.index(int(index))]
+        assert np.allclose(rebuilt, recorded, rtol=1e-4, atol=1e-6)
+
+
+def test_capture_does_not_change_the_normal_observables() -> None:
+    model = TinyModel()
+    positions = _positions()
+
+    without = compute_position_gradient_norms(model, positions, vocab_size=VOCAB)
+    with_capture = compute_position_gradient_norms(
+        model, positions, vocab_size=VOCAB, exact_gradient_positions=[1, 6],
+    )
+
+    assert torch.equal(without.gradient_norms, with_capture.gradient_norms)
+    assert torch.equal(
+        without.temperature_gradient_norms, with_capture.temperature_gradient_norms
+    )
+    assert torch.equal(without.greedy_ids, with_capture.greedy_ids)
+
+
+def test_capture_leaves_model_state_and_rng_untouched() -> None:
+    model = TinyModel()
+    parameters = {name: p.detach().clone() for name, p in model.named_parameters()}
+    sentinel = torch.full_like(model.output.weight, 1.75)
+    model.output.weight.grad = sentinel.clone()
+    model.train()
+    state = torch.get_rng_state()
+
+    compute_position_gradient_norms(
+        model, _positions(), vocab_size=VOCAB, gradient_sketch=True,
+        exact_gradient_positions=[0, 2, 4],
+    )
+
+    for name, parameter in model.named_parameters():
+        assert torch.equal(parameter.detach(), parameters[name]), name
+    assert torch.equal(model.output.weight.grad, sentinel)
+    assert model.training is True
+    assert torch.equal(torch.get_rng_state(), state)

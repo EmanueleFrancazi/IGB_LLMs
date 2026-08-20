@@ -269,3 +269,59 @@ def test_error_falls_as_the_sketch_widens() -> None:
     }
 
     assert errors[1024] < errors[128]
+
+
+# -- the scientific observable, not just per-pair error -----------------------
+
+
+def test_subgroup_delta_matches_a_brute_force_computation() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import subgroup_delta
+
+    values, norms = _gradients(rows=6)
+    labels = np.array([1, 1, 1, 2, 2, 3], dtype=np.int64)
+    cosines = cosine_from_gram(values, norms)
+
+    result = subgroup_delta(cosines, labels)
+
+    rows, columns = np.triu_indices(6, k=1)
+    same = labels[rows] == labels[columns]
+    assert result["within"] == pytest.approx(float(cosines[rows, columns][same].mean()))
+    assert result["between"] == pytest.approx(
+        float(cosines[rows, columns][~same].mean())
+    )
+    assert result["num_within_pairs"] == int(same.sum())
+    assert result["num_between_pairs"] == int((~same).sum())
+
+
+def test_subgroup_delta_is_unavailable_without_both_pair_kinds() -> None:
+    """Reported as unavailable rather than fabricated."""
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import subgroup_delta
+
+    values, norms = _gradients(rows=4)
+    cosines = cosine_from_gram(values, norms)
+
+    assert subgroup_delta(cosines, np.array([7, 7, 7, 7]))["available"] is False
+    assert subgroup_delta(cosines, np.array([1, 2, 3, 4]))["available"] is False
+    assert subgroup_delta(cosines, np.array([1, 1, 2, 3]))["available"] is True
+
+
+def test_the_report_carries_exact_and_sketched_deltas_and_their_error() -> None:
+    values, norms = _gradients(rows=8)
+    targets = np.array([1, 1, 1, 2, 2, 3, 4, 5], dtype=np.int64)
+    greedy = np.array([9, 9, 8, 8, 7, 7, 6, 5], dtype=np.int64)
+
+    report = fidelity_report(
+        values, norms, targets, greedy,
+        production_dimension=512, production_seed=20240917,
+        alternate_seeds=(1, 2, 3), sensitivity_dimensions=(256, 512),
+    )
+
+    for name in ("target", "greedy"):
+        entry = report["subgroup_deltas"][name]
+        assert entry["exact"]["available"] and entry["sketch"]["available"]
+        assert entry["delta_error"] == pytest.approx(
+            entry["sketch"]["delta"] - entry["exact"]["delta"]
+        )
+        # The realization-to-realization spread of that same statistic.
+        assert len(report["alternate_delta_errors"][name]) == 3
