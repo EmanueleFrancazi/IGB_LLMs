@@ -62,6 +62,11 @@ __all__ = [
     "plot_gradient_vs_guess_bias",
     "plot_gradient_vs_mean_probability",
     "plot_gradient_vs_nucleus_guess_bias",
+    "plot_correction_provenance",
+    "plot_gradient_directional_clustering",
+    "plot_initial_gradient_split",
+    "plot_initial_logit_correction",
+    "plot_initial_performance_and_bias",
     "plot_greedy_confidence_vs_temperature",
     "plot_max_predictive_probability",
     "plot_ranked_mean_token_probabilities",
@@ -1442,7 +1447,36 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
             written.extend(plot_gradient_vs_nucleus_guess_bias(record, directory))
         if record.has_mean_token_probabilities:
             written.extend(plot_gradient_vs_mean_probability(record, directory))
+
+    # Figures 17-21. They read the gradient table against whole-experiment
+    # quantities, so they need the same paired position set figures 15 and 16
+    # require, and figure 20 additionally needs the per-position sketches.
+    if _supports_initial_gradient_figures(record):
+        written.extend(plot_initial_performance_and_bias(record, directory))
+        written.extend(plot_initial_gradient_split(record, directory))
+        written.extend(plot_initial_logit_correction(record, directory))
+        written.extend(plot_correction_provenance(record, directory))
+        if _supports_gradient_clustering(record):
+            written.extend(plot_gradient_directional_clustering(record, directory))
     return written
+
+
+def _supports_initial_gradient_figures(record: Any) -> bool:
+    """Whether figures 17-19 and 21 have everything they read."""
+
+    return (
+        record.has_temperature_gradient_analysis
+        and record.has_temperature_confidence_analysis
+        and _covers_all_gradient_positions(record)
+    )
+
+
+def _supports_gradient_clustering(record: Any) -> bool:
+    """Whether figure 20 has the per-position gradient sketches it needs."""
+
+    from llm_behavior_lab.analysis.gradient_clustering import has_gradient_sketches
+
+    return has_gradient_sketches(record) and record.gradient_position_norms is not None
 
 
 def _covers_all_gradient_positions(record: Any) -> bool:
@@ -2802,7 +2836,9 @@ def plot_gradient_directional_clustering(
     )
 
     figure = _new_figure(width=14.0, height=5.2)
-    grid = figure.add_gridspec(1, 3, width_ratios=[1.25, 1.0, 1.0], wspace=0.45)
+    # Generous horizontal spacing: the heatmap's colourbar label and the next
+    # panel's y label are both long and otherwise collide.
+    grid = figure.add_gridspec(1, 3, width_ratios=[1.25, 1.0, 1.0], wspace=0.60)
     heat, bars, coherence = (figure.add_subplot(grid[0, index]) for index in range(3))
 
     matrix = target["matrix"]
@@ -2826,7 +2862,7 @@ def plot_gradient_directional_clustering(
     heat.set_xticklabels([str(int(target["classes"][i])) for i in ticks], rotation=90)
     heat.set_yticklabels([str(int(target["classes"][i])) for i in ticks])
     colourbar = figure.colorbar(image, ax=heat, fraction=0.046, pad=0.03)
-    colourbar.set_label("mean cosine similarity", fontsize=8)
+    colourbar.set_label("mean cosine", fontsize=8)
     colourbar.ax.tick_params(labelsize=7)
 
     # The observed delta of each grouping against its own permutation null, drawn

@@ -64,6 +64,11 @@ FIGURES = {
     "figure14": "plot_ranked_mean_token_probabilities",
     "figure15": "plot_gradient_vs_nucleus_guess_bias",
     "figure16": "plot_gradient_vs_mean_probability",
+    "figure17": "plot_initial_performance_and_bias",
+    "figure18": "plot_initial_gradient_split",
+    "figure19": "plot_initial_logit_correction",
+    "figure20": "plot_gradient_directional_clustering",
+    "figure21": "plot_correction_provenance",
 }
 
 #: Figures that exist only when the record carries the analysis behind them.
@@ -78,6 +83,11 @@ CONDITIONAL_FIGURES = {
     "figure14": "has_mean_token_probabilities",
     "figure15": "has_temperature_gradient_analysis",
     "figure16": "has_temperature_gradient_analysis",
+    "figure17": "has_temperature_gradient_analysis",
+    "figure18": "has_temperature_gradient_analysis",
+    "figure19": "has_temperature_gradient_analysis",
+    "figure20": "has_gradient_position_sketches",
+    "figure21": "has_temperature_gradient_analysis",
 }
 
 

@@ -532,6 +532,19 @@ class InitializationExperimentRecord:
         return self.gradient_position_norms is not None
 
     @property
+    def has_gradient_position_sketches(self) -> bool:
+        """Whether per-position gradient sketches were recorded.
+
+        Directional analysis needs both the sketches and the exact norms that
+        scale them, so both are required here rather than the array alone.
+        """
+
+        return (
+            self.gradient_position_sketches is not None
+            and self.gradient_position_norms is not None
+        )
+
+    @property
     def gradient_analysis(self) -> dict[str, Any]:
         """Protocol of the gradient analysis, empty when none was recorded."""
 
