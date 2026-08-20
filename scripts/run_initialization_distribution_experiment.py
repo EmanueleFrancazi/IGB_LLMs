@@ -511,6 +511,32 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
         f"RMSE {production['rmse']:.5f}, bias {production['mean_signed_error']:+.5f}, "
         f"norm drift {drift:.2e}, sketch drift {sketch_drift:.2e}"
     )
+    counts = "  ".join(
+        f"{name}={entry['num_pairs']}" for name, entry in report["pair_types"].items()
+    )
+    print(f"      pair types: {counts}")
+    for name, entry in report["subgroup_deltas"].items():
+        if not (entry["exact"]["available"] and entry["sketch"]["available"]):
+            print(f"      {name} subgroup delta: unavailable on selected subset")
+            continue
+        print(
+            f"      {name} subgroup: exact delta {entry['exact']['delta']:+.5f}  "
+            f"sketch delta {entry['sketch']['delta']:+.5f}  "
+            f"delta error {entry['delta_error']:+.5f}"
+        )
+    for name, errors in report["alternate_delta_errors"].items():
+        if errors:
+            print(
+                f"      {name} delta error across {len(errors)} alternate seeds: "
+                f"[{min(errors):+.5f}, {max(errors):+.5f}]"
+            )
+    print(f"      map semantics: {report['map_semantics']}")
+    print(f"      {'K':>6} {'MAE':>10} {'RMSE':>10}")
+    for entry in report["sensitivity"]:
+        print(
+            f"      {entry['dimension']:>6} {entry['mean_absolute_error']:>10.5f} "
+            f"{entry['rmse']:>10.5f}"
+        )
 
     payload = {
         "selected_position_indices": indices,
@@ -551,7 +577,9 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
         if "delta_error" in entry:
             payload[f"{name}_delta_error"] = np.asarray([entry["delta_error"]])
 
-    destination = run.directory / "sanity"
+    # RunPaths carries the canonical run root; deriving it from a sibling path
+    # or inventing a new attribute would be a second way to say the same thing.
+    destination = run.paths.run_dir / "sanity"
     destination.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(destination / "countsketch_fidelity.npz", **payload)
     print(f"    countsketch fidelity artifact: {destination / 'countsketch_fidelity.npz'}")

@@ -12,6 +12,8 @@ similarity value.
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 
@@ -569,3 +571,51 @@ def test_the_writer_still_guards_on_sanity_being_enabled() -> None:
     assert "if gradient_result is not None and gradient_result.exact_gradients is not None:" in source
     assert 'action="store_true"' in source
     assert "--countsketch-fidelity-sanity" in source
+
+
+def test_the_sanity_destination_resolves_against_a_real_experiment_run(tmp_path):
+    """Exercise the actual ExperimentRun object, not the runner's source text.
+
+    WRITTEN BUT NOT EXECUTED in a NumPy-only workspace: ``experiment.run``
+    imports torch directly, so the real class cannot be built without it.
+
+    It earns its place on the server anyway. The earlier ordering test read the
+    file and so could not see that ``run.directory`` does not exist -- the real
+    run exposes its root only as ``run.paths.run_dir`` -- and only touching the
+    real object catches that.
+    """
+
+    pytest.importorskip("torch", reason="ExperimentRun imports torch")
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import sanity_artifact_path
+    from llm_behavior_lab.experiment.config import ExperimentSettings
+    from llm_behavior_lab.experiment.run import ExperimentRun
+
+    run = ExperimentRun.create(
+        ExperimentSettings(name="countsketch_sanity_test", output_dir=tmp_path),
+        run_id="testrun",
+    )
+
+    assert run.paths.run_dir.is_dir()
+    assert run.paths.analyses_dir.parent == run.paths.run_dir
+    assert not hasattr(run, "directory"), (
+        "the runner must not depend on an ExperimentRun.directory attribute"
+    )
+
+    destination = run.paths.run_dir / "sanity"
+    destination.mkdir(parents=True, exist_ok=True)
+    artifact = destination / "countsketch_fidelity.npz"
+    np.savez_compressed(artifact, probe=np.arange(3))
+
+    assert artifact.parent.parent == run.paths.run_dir
+    assert sanity_artifact_path(run.paths.analyses_dir) == artifact
+    assert sanity_artifact_path(run.paths.analyses_dir).is_file()
+
+
+def test_the_runner_uses_the_canonical_run_root() -> None:
+    """Pins the attribute that actually exists, so the crash cannot return."""
+
+    source = _runner_source()
+
+    assert 'run.paths.run_dir / "sanity"' in source
+    assert "run.directory" not in source
