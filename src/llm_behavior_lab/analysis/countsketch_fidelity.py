@@ -153,13 +153,18 @@ def select_sanity_positions(
 def count_sketch_matrix(
     num_parameters: int, dimension: int, seed: int, *, tensor_sizes: Sequence[int] | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Rebuild one fixed CountSketch map as bucket and sign vectors.
+    """Build one fixed CountSketch map as bucket and sign vectors.
 
-    Mirrors the production construction: a generator seeded per parameter tensor
-    from ``seed + 1000003 * index``, drawing buckets and signs once. Passing the
-    production ``tensor_sizes`` therefore reproduces the production projection
-    exactly; omitting them gives a single-block map, which is all the offline
-    alternate-seed and ``K``-sweep analyses need.
+    **This does not reproduce the production map.** Production draws from
+    ``torch.Generator`` and this draws from NumPy's PCG64; the same integer seed
+    gives two structurally unrelated maps, which is exactly the bug this warning
+    exists to prevent recurring. To project with the production map, obtain it
+    from ``_GradientSketcher.numpy_map()`` and pass it as ``sketch_map``.
+
+    What this is for is the *hypothetical* realizations: the alternate-seed check
+    and the ``K`` sweep, which ask what a different draw of the construction
+    would have given. Any deterministic generator serves there, because no
+    comparison is being made against a stored production sketch.
     """
 
     sizes = list(tensor_sizes) if tensor_sizes else [int(num_parameters)]
@@ -198,12 +203,27 @@ def cosine_from_gram(gradients: np.ndarray, norms: np.ndarray) -> np.ndarray:
 def sketch_estimated_cosines(
     gradients: np.ndarray, norms: np.ndarray, *, dimension: int, seed: int,
     tensor_sizes: Sequence[int] | None = None,
+    sketch_map: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """The production estimator: sketched inner products over **exact** norms."""
+    """The production estimator: sketched inner products over **exact** norms.
 
-    buckets, signs = count_sketch_matrix(
-        gradients.shape[1], dimension, seed, tensor_sizes=tensor_sizes
-    )
+    ``sketch_map`` supplies an explicit ``(buckets, signs)`` pair, which is how
+    the production map is used: it comes from the sketcher that produced the
+    experiment's sketches rather than being re-derived here. Without it a map is
+    built from ``seed``, which is correct for hypothetical realizations and
+    **wrong** for anything compared against a stored production sketch.
+    """
+
+    if sketch_map is not None:
+        buckets, signs = sketch_map
+        if buckets.shape[0] != gradients.shape[1]:
+            raise ValueError(
+                "The supplied sketch map does not cover the gradient dimension."
+            )
+    else:
+        buckets, signs = count_sketch_matrix(
+            gradients.shape[1], dimension, seed, tensor_sizes=tensor_sizes
+        )
     projected = _project(gradients, buckets, signs, dimension)
     norms = np.asarray(norms, dtype=np.float64)
     return (projected @ projected.T) / np.outer(norms, norms)
@@ -314,6 +334,7 @@ def fidelity_report(
     production_dimension: int,
     production_seed: int,
     tensor_sizes: Sequence[int] | None = None,
+    production_map: tuple[np.ndarray, np.ndarray] | None = None,
     alternate_seeds: Sequence[int] = ALTERNATE_SKETCH_SEEDS,
     sensitivity_dimensions: Sequence[int] = SENSITIVITY_DIMENSIONS,
 ) -> dict[str, Any]:
@@ -325,9 +346,10 @@ def fidelity_report(
     """
 
     exact = cosine_from_gram(gradients, norms)
+    # The production row must use the experiment's own map, not a re-derivation.
     production = sketch_estimated_cosines(
         gradients, norms, dimension=production_dimension,
-        seed=production_seed, tensor_sizes=tensor_sizes,
+        seed=production_seed, tensor_sizes=tensor_sizes, sketch_map=production_map,
     )
 
     # The scientific observable, computed both ways on the same subset.

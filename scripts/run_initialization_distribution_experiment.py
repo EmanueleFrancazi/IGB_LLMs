@@ -471,17 +471,37 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
             "interpreted."
         )
 
+    if gradient_result.sketch_map is None:
+        raise ValueError(
+            "The fidelity check needs the production sketch map, so the run must "
+            "also enable the gradient sketch."
+        )
+    buckets, signs = gradient_result.sketch_map
+    sketch_rows = gradient_result.gradient_sketches.numpy()[rows]
+    rebuilt = np.zeros_like(sketch_rows, dtype=np.float64)
+    for row in range(gradients.shape[0]):
+        np.add.at(rebuilt[row], buckets, gradients[row].astype(np.float64) * signs)
+    scale = np.maximum(np.abs(sketch_rows).max(), 1e-30)
+    sketch_drift = float(np.max(np.abs(rebuilt - sketch_rows)) / scale)
+    if sketch_drift > 1e-4:
+        raise ValueError(
+            f"The production sketch could not be reconstructed from the captured "
+            f"gradients (relative drift {sketch_drift:.3e}); flattening order, "
+            "map or alignment is wrong."
+        )
+
     report = fidelity_report(
         gradients, norms, targets, greedy,
         production_dimension=protocol["sketch_dimension"],
         production_seed=20240917,
+        production_map=gradient_result.sketch_map,
     )
     production = report["production"]
     print(
         f"    countsketch fidelity: {report['num_gradients']} gradients, "
         f"{production['num_pairs']} pairs, MAE {production['mean_absolute_error']:.5f}, "
         f"RMSE {production['rmse']:.5f}, bias {production['mean_signed_error']:+.5f}, "
-        f"norm drift {drift:.2e}"
+        f"norm drift {drift:.2e}, sketch drift {sketch_drift:.2e}"
     )
 
     payload = {
@@ -511,6 +531,7 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
         ),
         "k_rmse": np.asarray([entry["rmse"] for entry in report["sensitivity"]]),
         "norm_drift": np.asarray([drift]),
+        "sketch_drift": np.asarray([sketch_drift]),
     }
     for name, entry in report["subgroup_deltas"].items():
         for side in ("exact", "sketch"):

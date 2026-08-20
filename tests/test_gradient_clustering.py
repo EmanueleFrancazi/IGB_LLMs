@@ -668,7 +668,16 @@ def test_the_pooled_statistic_matches_brute_force_over_all_positions() -> None:
     record = _record(rows, labels, labels)
 
     result = gradient_clustering(record, grouping="target")
-    within, between = _brute_force_pooled(rows, labels)
+    # Brute force from the values the record actually holds, not from the
+    # pre-save array. Sketches are persisted as float32 on purpose -- the
+    # projection's own 1/sqrt(K) error dwarfs float32 rounding -- so comparing
+    # against the original float64 rows measures that downcast, roughly 2e-9 in
+    # the pooled statistic, rather than the formula. Feeding both paths the same
+    # inputs keeps this assertion exact instead of loosening it to hide a
+    # difference that has nothing to do with what is being tested.
+    stored, usable = unit_sketches(record)
+    assert usable.all()
+    within, between = _brute_force_pooled(stored, labels)
 
     assert result["population"]["within"] == pytest.approx(within, abs=1e-12)
     assert result["population"]["between"] == pytest.approx(between, abs=1e-12)

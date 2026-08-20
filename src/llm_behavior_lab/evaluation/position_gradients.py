@@ -160,6 +160,10 @@ class PositionGradientResult:
     exact_gradients: torch.Tensor | None = None
     #: Flat indices of those positions, or ``None``.
     exact_positions: torch.Tensor | None = None
+    #: The production sketch map as ``(buckets, signs)`` NumPy vectors, so the
+    #: offline fidelity analysis projects with the map the run actually used
+    #: rather than re-deriving one from a different RNG.
+    sketch_map: tuple[Any, Any] | None = None
 
     @property
     def canonical_index(self) -> int:
@@ -258,6 +262,27 @@ class _GradientSketcher:
                 0, 2, (count,), generator=generator, dtype=torch.int8
             ).to(parameter.device)
             self.signs.append(signs.double() * 2.0 - 1.0)
+
+    def numpy_map(self) -> tuple["Any", "Any"]:
+        """Export this exact map as flat NumPy bucket and sign vectors.
+
+        The offline fidelity analysis must project with the **same** map the
+        experiment used, and it cannot re-derive it: this construction draws from
+        ``torch.Generator``, and a NumPy generator seeded identically produces a
+        completely different map. Reproducing a Mersenne Twister stream in NumPy
+        is not a reasonable thing to maintain, so the map itself is handed over
+        instead. One definition, one source of truth.
+
+        Concatenated in parameter order, which is the order a captured gradient
+        is flattened in, so the two line up entry for entry.
+        """
+
+        import numpy as np
+
+        return (
+            np.concatenate([bucket.cpu().numpy() for bucket in self.buckets]),
+            np.concatenate([sign.cpu().numpy() for sign in self.signs]),
+        )
 
     def project(self, grads: Sequence[torch.Tensor]) -> torch.Tensor:
         """Sketch one gradient set into a ``[dimension]`` float64 vector."""
@@ -755,6 +780,7 @@ def compute_position_gradient_norms(
             if not captured
             else torch.tensor(sorted(captured), dtype=torch.long)
         ),
+        sketch_map=None if sketcher is None else sketcher.numpy_map(),
         sketch_protocol=(
             None
             if sketcher is None
