@@ -496,3 +496,76 @@ def test_the_production_row_ignores_the_factory_and_uses_the_given_map() -> None
         values, norms, dimension=128, seed=0, sketch_map=supplied
     )
     assert np.allclose(report["production_cosines"], direct, rtol=1e-12)
+
+
+# -- runner lifecycle ---------------------------------------------------------
+
+
+def _runner_source() -> str:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    return (root / "scripts" / "run_initialization_distribution_experiment.py").read_text()
+
+
+def test_the_fidelity_write_happens_after_the_run_directory_exists() -> None:
+    """The artifact needs a run directory, and `run` is created late in main().
+
+    The write was originally placed beside the gradient loop, hundreds of lines
+    before ``ExperimentRun.create``, so a real sanity run raised
+    ``UnboundLocalError`` the moment it captured its gradients. Unit-testing the
+    writer in isolation could never have caught that -- the ordering *is* the
+    bug -- so this checks the control flow in the runner itself.
+    """
+
+    import re
+
+    source = _runner_source()
+    lines = source.splitlines()
+
+    def line_of(pattern: str, *, skip_def: bool = False) -> int:
+        for number, text in enumerate(lines, start=1):
+            if pattern in text and not (skip_def and text.strip().startswith("def ")):
+                return number
+        raise AssertionError(f"{pattern!r} not found in the runner")
+
+    created = line_of("run = ExperimentRun.create")
+    written = line_of("_write_countsketch_fidelity(run,", skip_def=True)
+    computed = line_of("gradient_result = compute_position_gradient_norms")
+
+    assert computed < created, "the gradient loop still runs before the run exists"
+    assert created < written, (
+        "the fidelity artifact is written before `run` is assigned; "
+        f"create at line {created}, write at line {written}"
+    )
+
+    # And exactly one call site, so a stray earlier one cannot creep back.
+    calls = [
+        number
+        for number, text in enumerate(lines, start=1)
+        if "_write_countsketch_fidelity(run," in text
+        and not text.strip().startswith("def ")
+    ]
+    assert calls == [written]
+
+
+def test_the_captured_gradients_are_released_after_the_write() -> None:
+    """~393 MiB must not survive the analysis that consumes it."""
+
+    source = _runner_source()
+
+    assert "_write_countsketch_fidelity(run, gradient_result, protocol)" in source
+    # The release follows the write, in that order.
+    write_at = source.index("_write_countsketch_fidelity(run, gradient_result, protocol)")
+    release_at = source.index("exact_gradients=None")
+    assert write_at < release_at
+
+
+def test_the_writer_still_guards_on_sanity_being_enabled() -> None:
+    """Disabled by default: no artifact, no buffers, nothing written."""
+
+    source = _runner_source()
+
+    assert "if gradient_result is not None and gradient_result.exact_gradients is not None:" in source
+    assert 'action="store_true"' in source
+    assert "--countsketch-fidelity-sanity" in source

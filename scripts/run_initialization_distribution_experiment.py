@@ -21,6 +21,7 @@ standard experiment-run directory. Figures are produced from that record by
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import resource
 import sys
 import time
@@ -852,8 +853,6 @@ def main() -> None:
                     f"dot = {split['dot']:.6g}, "
                     f"cos = {'undefined' if cosine is None else f'{cosine:.6f}'}"
                 )
-            if gradient_result.exact_gradients is not None:
-                _write_countsketch_fidelity(run, gradient_result, protocol)
             rate = gradient_result.num_positions / max(gradient_result.seconds, 1e-9)
             print(
                 f"    gradient analysis: {gradient_result.num_positions:,} positions "
@@ -1122,6 +1121,15 @@ def main() -> None:
         ),
     )
     record.save(run.paths.analyses_dir)
+
+    # After the record, because the artifact belongs to a run directory and that
+    # only exists once ExperimentRun.create has run. gradient_result is still the
+    # object the gradient loop produced -- it is read a few lines above to build
+    # the record -- so nothing is recomputed and no second backward pass happens.
+    # The captured vectors are released as soon as this returns.
+    if gradient_result is not None and gradient_result.exact_gradients is not None:
+        _write_countsketch_fidelity(run, gradient_result, protocol)
+        gradient_result = dataclasses.replace(gradient_result, exact_gradients=None)
 
     # ---- scalar summaries through the existing metric pipeline ------------
     adequacy = sampling_adequacy(record)
