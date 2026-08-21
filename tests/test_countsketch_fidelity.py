@@ -619,3 +619,117 @@ def test_the_runner_uses_the_canonical_run_root() -> None:
 
     assert 'run.paths.run_dir / "sanity"' in source
     assert "run.directory" not in source
+
+
+# -- estimator range and deviation diagnostics --------------------------------
+
+
+def test_the_projected_cosine_is_derivable_from_the_production_matrix() -> None:
+    """No sketches and no rerun: the diagonal already carries ||S(g)||."""
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        count_sketch_matrix,
+        projected_space_cosines,
+    )
+
+    values, norms = _gradients(rows=6)
+    production = sketch_estimated_cosines(values, norms, dimension=256, seed=9)
+
+    derived = projected_space_cosines(production)
+
+    # Recompute it the direct way and require agreement.
+    buckets, signs = count_sketch_matrix(values.shape[1], 256, 9)
+    projected = np.zeros((6, 256))
+    for row in range(6):
+        np.add.at(projected[row], buckets, values[row].astype(np.float64) * signs)
+    lengths = np.linalg.norm(projected, axis=1)
+    direct = (projected @ projected.T) / np.outer(lengths, lengths)
+
+    assert np.allclose(derived, direct, rtol=1e-10, atol=1e-12)
+
+
+def test_the_projected_cosine_is_bounded_and_the_production_one_need_not_be() -> None:
+    """Boundedness is a property of the comparator, not proof it is better."""
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import projected_space_cosines
+
+    values, norms = _gradients(rows=6)
+    production = sketch_estimated_cosines(values, norms, dimension=32, seed=4)
+    projected = projected_space_cosines(production)
+
+    assert projected.min() >= -1.0 - 1e-9
+    assert projected.max() <= 1.0 + 1e-9
+    assert np.allclose(np.diag(projected), 1.0, atol=1e-9)
+    # The production estimator carries no such guarantee; its diagonal is
+    # ||S(g)||^2 / ||g||^2, which is not 1.
+    assert not np.allclose(np.diag(production), 1.0)
+
+
+def test_identical_vectors_give_a_projected_cosine_of_one() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import projected_space_cosines
+
+    values, _ = _gradients(rows=1)
+    duplicated = np.vstack([values, values])
+    norms = np.linalg.norm(duplicated.astype(np.float64), axis=1)
+
+    projected = projected_space_cosines(
+        sketch_estimated_cosines(duplicated, norms, dimension=128, seed=3)
+    )
+
+    assert np.allclose(projected, 1.0, atol=1e-9)
+
+
+def test_the_deviation_report_counts_out_of_range_estimates_without_clipping() -> None:
+    """Values outside [-1, 1] are a measured property, not something to hide."""
+
+    from llm_behavior_lab.analysis.countsketch_fidelity import deviation_report
+
+    exact = np.array([[1.0, 0.2], [0.2, 1.0]])
+    estimated = np.array([[1.0, 1.4], [1.4, 1.0]])
+
+    report = deviation_report(exact, estimated)
+
+    assert report["num_pairs"] == 1
+    assert report["estimated_max"] == pytest.approx(1.4)   # not clipped
+    assert report["num_above_plus_one"] == 1
+    assert report["num_below_minus_one"] == 0
+    assert report["fraction_outside_unit_interval"] == pytest.approx(1.0)
+    assert report["bias"] == pytest.approx(1.2)
+    assert report["max_absolute_error"] == pytest.approx(1.2)
+
+
+def test_deviation_percentiles_are_ordered_and_report_their_support() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import deviation_report
+
+    values, norms = _gradients(rows=8)
+    exact = cosine_from_gram(values, norms)
+    estimated = sketch_estimated_cosines(values, norms, dimension=128, seed=6)
+
+    report = deviation_report(exact, estimated)
+
+    assert report["num_pairs"] == 28
+    assert (
+        report["median_absolute_error"]
+        <= report["p95_absolute_error"]
+        <= report["p99_absolute_error"]
+        <= report["max_absolute_error"]
+    )
+    assert report["signed_min"] <= report["bias"] <= report["signed_max"]
+
+
+def test_both_estimators_are_measured_against_the_same_exact_matrix() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import estimator_comparison
+
+    values, norms = _gradients(rows=7)
+    exact = cosine_from_gram(values, norms)
+    production = sketch_estimated_cosines(values, norms, dimension=256, seed=8)
+
+    comparison = estimator_comparison(exact, production)
+
+    assert set(comparison) == {
+        "exact_norm_estimator", "projected_space_estimator", "projected_cosines",
+    }
+    for name in ("exact_norm_estimator", "projected_space_estimator"):
+        assert comparison[name]["num_pairs"] == 21
+    # The bounded one cannot report out-of-range values, by construction.
+    assert comparison["projected_space_estimator"]["fraction_outside_unit_interval"] == 0.0

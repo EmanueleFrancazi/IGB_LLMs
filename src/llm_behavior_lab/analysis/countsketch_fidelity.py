@@ -41,6 +41,9 @@ __all__ = [
     "SENSITIVITY_DIMENSIONS",
     "count_sketch_matrix",
     "cosine_from_gram",
+    "deviation_report",
+    "estimator_comparison",
+    "projected_space_cosines",
     "SANITY_ARTIFACT",
     "fidelity_report",
     "load_fidelity_artifact",
@@ -526,3 +529,102 @@ def load_fidelity_artifact(path) -> dict[str, Any]:
                     "delta_error": float(np.asarray(data[key]).reshape(-1)[0])
                 }
     return report
+
+
+def projected_space_cosines(production: np.ndarray) -> np.ndarray:
+    """The bounded projected-space cosine, derived from the production matrix.
+
+    The production estimator divides by the **exact** norms, so its diagonal is
+    ``||S(g)||^2 / ||g||^2`` rather than 1 -- and that is exactly what is needed
+    to convert it::
+
+        cos_proj(a, b) = production(a, b) / sqrt(production(a, a) production(b, b))
+                       = <S(a), S(b)> / (||S(a)|| ||S(b)||)
+
+    So no sketch vectors and no rerun are required: the persisted matrix already
+    carries the projected norms in its diagonal.
+
+    This is a genuine cosine between two projected vectors, hence confined to
+    ``[-1, 1]``. That is a property of the comparator, not evidence that it is
+    the better estimator: it replaces an exact denominator with a noisy one, and
+    which wins is an empirical question the fidelity report answers.
+    """
+
+    diagonal = np.diag(production).astype(np.float64)
+    if np.any(diagonal <= 0.0):
+        raise ValueError(
+            "A projected sketch has zero norm, so its projected-space cosine is "
+            "undefined."
+        )
+    scale = np.sqrt(np.outer(diagonal, diagonal))
+    return production / scale
+
+
+def deviation_report(exact: np.ndarray, estimated: np.ndarray) -> dict[str, Any]:
+    """Range and tail behaviour of one estimator against the exact cosines.
+
+    MAE and RMSE describe the middle of the error distribution; these describe
+    its edges, which is what matters for reading an individual heatmap cell.
+
+    The out-of-range counts are the point of this for the production estimator:
+    dividing a sketched inner product by exact norms is not a cosine and is not
+    confined to ``[-1, 1]``. Values outside it are a measurable property of the
+    estimator, reported rather than clipped away -- clipping would hide the very
+    thing being quantified.
+
+    Percentiles are NumPy's linear interpolation. On a handful of pairs they are
+    order statistics with a label, not confidence bounds, so the pair count is
+    reported beside them.
+    """
+
+    size = exact.shape[0]
+    upper = np.triu_indices(size, k=1)
+    exact_pairs = exact[upper]
+    estimated_pairs = estimated[upper]
+    signed = estimated_pairs - exact_pairs
+    absolute = np.abs(signed)
+    outside = (estimated_pairs < -1.0) | (estimated_pairs > 1.0)
+
+    return {
+        "num_pairs": int(exact_pairs.size),
+        "exact_min": float(exact_pairs.min()),
+        "exact_max": float(exact_pairs.max()),
+        "estimated_min": float(estimated_pairs.min()),
+        "estimated_max": float(estimated_pairs.max()),
+        "signed_min": float(signed.min()),
+        "signed_max": float(signed.max()),
+        "bias": float(signed.mean()),
+        "mean_absolute_error": float(absolute.mean()),
+        "median_absolute_error": float(np.median(absolute)),
+        "p95_absolute_error": float(np.percentile(absolute, 95)),
+        "p99_absolute_error": float(np.percentile(absolute, 99)),
+        "max_absolute_error": float(absolute.max()),
+        "rmse": float(np.sqrt((signed ** 2).mean())),
+        "num_below_minus_one": int((estimated_pairs < -1.0).sum()),
+        "num_above_plus_one": int((estimated_pairs > 1.0).sum()),
+        "fraction_outside_unit_interval": float(outside.mean()),
+        "pearson_correlation": (
+            float(np.corrcoef(exact_pairs, estimated_pairs)[0, 1])
+            if exact_pairs.size >= 3
+            and np.std(exact_pairs) > 0
+            and np.std(estimated_pairs) > 0
+            else float("nan")
+        ),
+    }
+
+
+def estimator_comparison(exact: np.ndarray, production: np.ndarray) -> dict[str, Any]:
+    """Both estimators measured against the same exact cosines.
+
+    The question is whether the bounded comparator is actually more faithful, or
+    whether swapping an exact denominator for a random one costs more than
+    boundedness gains. Reported side by side rather than decided here: changing
+    the production estimator is a scientific decision, not an implementation one.
+    """
+
+    projected = projected_space_cosines(production)
+    return {
+        "exact_norm_estimator": deviation_report(exact, production),
+        "projected_space_estimator": deviation_report(exact, projected),
+        "projected_cosines": projected,
+    }
