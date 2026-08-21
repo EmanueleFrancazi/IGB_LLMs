@@ -136,3 +136,106 @@ def test_the_failure_message_reports_the_total_absolute_difference() -> None:
 
     # Two bins off by one each.
     assert "total absolute difference 2" in str(failure.value)
+
+
+# -- which forward batch size a historical reconstruction runs at -------------
+#
+# Batch size turned out to belong to the numerical provenance, not to
+# performance tuning. Reconstructing a real run at 8 when it had realized 4
+# moved one position at T = 0.12 and the gate caught it, so these pin the
+# precedence rule that prevents a repeat.
+
+from llm_behavior_lab.analysis.nucleus_clustering import resolve_forward_batch_size
+
+
+def test_the_realized_batch_size_is_used_when_no_override_is_given() -> None:
+    resolved = resolve_forward_batch_size({"forward_batch_size": 4})
+
+    assert resolved["value"] == 4
+    assert resolved["source"] == "historical"
+    assert resolved["historical"] == 4
+    assert "historical realized metadata" in resolved["description"]
+
+
+def test_the_requested_yaml_value_never_replaces_the_realized_one() -> None:
+    """The frozen config's runtime value is what was asked for, not what ran.
+
+    On the record that failed, the YAML said 32, the old hard-coded default said
+    8, and the run had realized 4. Only the realized value reproduces it.
+    """
+
+    analysis = {
+        "forward_batch_size": 4,
+        # Present in the same mapping and still irrelevant.
+        "runtime": {"forward_batch_size": 32},
+    }
+
+    assert resolve_forward_batch_size(analysis)["value"] == 4
+
+
+def test_the_writer_does_not_read_the_runtime_batch_size() -> None:
+    """A source-level guard: the requested value must not creep back in."""
+
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "write_nucleus_clustering_artifact.py"
+    )
+    source = script.read_text()
+
+    assert "resolve_forward_batch_size" in source
+    # "runtime" appears legitimately, for the device. It must never appear on a
+    # line that also reaches for a batch size.
+    offending = [
+        line
+        for line in source.splitlines()
+        if "runtime" in line and "forward_batch_size" in line
+    ]
+    assert offending == []
+
+
+def test_an_explicit_override_wins_and_says_so() -> None:
+    """The override diagnosed the original mismatch, so it must stay possible."""
+
+    resolved = resolve_forward_batch_size({"forward_batch_size": 4}, 8)
+
+    assert resolved["value"] == 8
+    assert resolved["source"] == "override"
+    assert resolved["historical"] == 4
+    assert "override" in resolved["description"]
+    # The historical value stays visible, so an audit log cannot be misread.
+    assert "4" in resolved["description"]
+
+
+def test_an_override_equal_to_the_historical_value_is_still_an_override() -> None:
+    """What was asked for and what was recorded stay distinguishable."""
+
+    resolved = resolve_forward_batch_size({"forward_batch_size": 4}, 4)
+
+    assert resolved["value"] == 4
+    assert resolved["source"] == "override"
+
+
+def test_a_missing_realized_batch_size_fails_rather_than_guessing() -> None:
+    """Silently defaulting is exactly the failure this rule exists to prevent."""
+
+    with pytest.raises(ValueError, match="does not carry"):
+        resolve_forward_batch_size({"num_positions": 32768})
+
+
+def test_a_missing_realized_batch_size_can_still_be_supplied_explicitly() -> None:
+    resolved = resolve_forward_batch_size({}, 4)
+
+    assert resolved["value"] == 4
+    assert resolved["source"] == "override"
+    assert resolved["historical"] is None
+    assert "unrecorded" in resolved["description"]
+
+
+def test_an_impossible_batch_size_is_rejected_from_either_source() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        resolve_forward_batch_size({"forward_batch_size": 4}, 0)
+    with pytest.raises(ValueError, match="cannot"):
+        resolve_forward_batch_size({"forward_batch_size": 0})

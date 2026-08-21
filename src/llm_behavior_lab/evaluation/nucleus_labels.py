@@ -8,12 +8,22 @@ nucleus sample therefore needs those labels recovered.
 They are recovered rather than re-drawn. Two properties of the original design
 make that possible without touching the record:
 
-* the draw is inverted from **pre-drawn uniforms indexed by position**, so a
-  position's sample depends on the position alone and not on how positions were
-  batched (:func:`sampling_uniforms`); and
+* the draw is inverted from **pre-drawn uniforms indexed by position**, so which
+  uniform a position receives depends on the position alone and not on how
+  positions were batched (:func:`sampling_uniforms`); and
 * every sweep temperature reuses replicate 0's uniforms and one shared sort
   (:func:`nucleus_guess_ids_by_temperature`), so temperature is the only thing
   that varies.
+
+Batch invariance of the *uniforms* is not batch invariance of the *result*. The
+logits are the other input to the draw, and on accelerator kernels a matrix
+multiplication can give bit-different values at different batch shapes; a token
+sitting on a truncation or comparison boundary can then fall the other way. This
+was measured, not hypothesised: reconstructing a real run at a batch size of 8
+when it had run at 4 moved exactly one position at ``T = 0.12``, and the gate
+caught it. Historical reconstruction therefore uses the batch size the run
+actually realized, recorded in its metadata. None of this says batching always
+changes results -- on this record five of six temperatures were unaffected.
 
 Reproduction still requires a forward pass, because logits are not persisted --
 but only a forward pass. No gradient is recomputed and nothing is written back
@@ -81,7 +91,9 @@ def nucleus_position_labels(
         sampling: The run's nucleus policy.
         eligible_token_ids: The sampled support.
         temperatures: The sweep temperatures to recover, in report order.
-        forward_batch_size: Windows per forward pass.
+        forward_batch_size: Windows per forward pass. Part of the numerical
+            provenance rather than a throughput knob: pass the batch size the
+            run realized, from ``metadata["analysis"]["forward_batch_size"]``.
         device: Device to run on.
 
     Returns:

@@ -48,6 +48,7 @@ from llm_behavior_lab.analysis import load_record  # noqa: E402
 from llm_behavior_lab.analysis.nucleus_clustering import (  # noqa: E402
     histogram_gate,
     nucleus_clustering,
+    resolve_forward_batch_size,
 )
 from llm_behavior_lab.data import (  # noqa: E402
     DatasetConfig,
@@ -93,11 +94,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--forward-batch-size",
         type=int,
-        default=8,
+        default=None,
         help=(
-            "Windows per forward pass. A throughput knob only: the draw is "
-            "inverted from position-indexed uniforms, so batching cannot move a "
-            "sample. If it somehow did, the histogram gate would catch it."
+            "Windows per forward pass. Defaults to the batch size the run "
+            "realized, from its metadata. Forward batching does not alter the "
+            "position-indexed sampling uniforms, but it can alter floating-point "
+            "logits on accelerator kernels, so it is part of the numerical "
+            "provenance of an exact reconstruction. Pass a value only to "
+            "override that deliberately; the override is reported as one."
         ),
     )
     parser.add_argument("--min-support", type=int, default=2)
@@ -187,11 +191,20 @@ def main() -> None:
     model = build_model_from_config(model_config).to(device)
     scale_initialization(model, float(record.metadata["initialization_scale"]["alpha"]))
 
+    # Resolved from the record, not from the frozen YAML's requested value and
+    # not from a hard-coded default: see resolve_forward_batch_size.
+    batching = resolve_forward_batch_size(analysis, args.forward_batch_size)
     print(
         f"Recovering nucleus labels: initialization {initialization_index} "
         f"(seed {model_seed}), {positions.num_positions:,} positions, "
         f"T = {', '.join(f'{value:g}' for value in temperatures)}"
     )
+    print(f"Forward batch size: {batching['description']}")
+    if batching["source"] == "override" and batching["historical"] is not None:
+        print(
+            "  WARNING: historical provenance is being overridden. Exact "
+            "reproduction is only expected at the realized batch size."
+        )
     recovered = nucleus_position_labels(
         model,
         positions,
@@ -200,7 +213,7 @@ def main() -> None:
         sampling=sampling,
         eligible_token_ids=tokenizer.eligible_token_ids,
         temperatures=temperatures,
-        forward_batch_size=args.forward_batch_size,
+        forward_batch_size=batching["value"],
         device=device,
     )
 
@@ -300,6 +313,9 @@ def main() -> None:
         "initialization_index": initialization_index,
         "model_seed": model_seed,
         "num_positions": int(positions.num_positions),
+        "forward_batch_size": batching["value"],
+        "forward_batch_size_source": batching["source"],
+        "historical_forward_batch_size": batching["historical"],
         "histogram_gate": "exact match at every temperature",
         "temperatures": list(result["temperatures"]),
         "permutations": result["permutations"],

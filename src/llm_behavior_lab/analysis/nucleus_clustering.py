@@ -40,7 +40,89 @@ from llm_behavior_lab.analysis.gradient_clustering import (
     unit_sketches,
 )
 
-__all__ = ["histogram_gate", "nucleus_clustering", "support_diagnostics"]
+__all__ = [
+    "histogram_gate",
+    "nucleus_clustering",
+    "resolve_forward_batch_size",
+    "support_diagnostics",
+]
+
+
+def resolve_forward_batch_size(
+    analysis_metadata: dict[str, Any], override: int | None = None
+) -> dict[str, Any]:
+    """Which forward batch size a historical reconstruction must use.
+
+    Batch size belongs to a run's numerical provenance, not to its performance
+    tuning. The pre-drawn uniforms are indexed by position, so batching cannot
+    change *which* uniform a position draws -- but the logits are the draw's
+    other input, and on accelerator kernels a matrix multiplication can return
+    bit-different values at different batch shapes. A token near a truncation
+    boundary can then fall the other way.
+
+    So the realized value in the record wins by default. Two things it must not
+    be confused with:
+
+    * ``runtime.forward_batch_size`` in the frozen YAML is what was *requested*;
+      a real run reconstructed at the YAML's 32, or at this script's old
+      hard-coded 8, when it had realized 4, and moved one position at
+      ``T = 0.12``; and
+    * a hard-coded default is a guess about a run it has never seen.
+
+    An explicit override stays available -- it is what diagnosed the mismatch
+    above -- but is reported as an override so an audit log cannot be misread.
+
+    Args:
+        analysis_metadata: The record's ``metadata["analysis"]`` mapping.
+        override: An explicit CLI value, or ``None`` to use the realized one.
+
+    Returns:
+        ``value``, the ``source`` it came from, the ``historical`` value for
+        comparison, and a one-line ``description`` for printing.
+
+    Raises:
+        ValueError: When no override is given and the record does not record a
+            realized batch size. Inventing one would silently reintroduce the
+            failure this function exists to prevent, so the caller is told to
+            supply the value explicitly instead.
+    """
+
+    historical = analysis_metadata.get("forward_batch_size")
+    historical = None if historical is None else int(historical)
+
+    if override is not None:
+        if int(override) <= 0:
+            raise ValueError("forward_batch_size must be positive.")
+        known = "unrecorded" if historical is None else str(historical)
+        return {
+            "value": int(override),
+            "source": "override",
+            "historical": historical,
+            "description": (
+                f"{int(override)} (explicit diagnostic override; historical value "
+                f"{known})"
+            ),
+        }
+
+    if historical is None:
+        raise ValueError(
+            "This record does not carry metadata['analysis']['forward_batch_size'], "
+            "so the batch size it realized is unknown. Forward batching is part of "
+            "the numerical provenance on accelerator kernels, so a default cannot "
+            "be assumed here. Determine the value the run used and pass it with "
+            "--forward-batch-size."
+        )
+    if historical <= 0:
+        raise ValueError(
+            f"The record reports a forward batch size of {historical}, which cannot "
+            "be the value it ran at."
+        )
+    return {
+        "value": historical,
+        "source": "historical",
+        "historical": historical,
+        "description": f"{historical} (historical realized metadata)",
+    }
 
 
 def support_diagnostics(labels: np.ndarray, *, min_support: int = 2) -> dict[str, Any]:
