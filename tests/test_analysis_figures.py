@@ -592,10 +592,13 @@ def test_a_near_miss_temperature_is_not_snapped_onto_a_canonical_key() -> None:
     assert _temperature_colours([0.1200001, 0.24]) == _viridis_at(2)
 
 
-# -- figure 24: the target-versus-greedy cross-partition diagnostic ---------
+# -- figures 23 and 24: the sanity check and the cross-partition diagnostic ---
 
 from llm_behavior_lab.analysis.figures import (  # noqa: E402
+    figure_category,
+    plot_countsketch_fidelity,
     plot_cross_partition_geometry,
+    save_figure,
 )
 
 SKETCH_K = 32
@@ -638,6 +641,93 @@ def _sketch_record(num_positions: int = 120, vocab: int = 20):
         gradient_position_norms=np.ones(num_positions),
         gradient_position_sketches=rows,
     )
+
+
+def _fidelity_report(num_gradients: int = 12):
+    """A report shaped like the real artifact: matrices, not pair vectors.
+
+    ``exact_cosines`` and ``production_cosines`` are square over the selected
+    positions, and the production diagonal carries ``||S(g)||^2 / ||g||^2``
+    rather than 1 -- that is what makes the projected-space comparator derivable
+    without any sketch vectors, so the fixture has to reproduce it rather than
+    plant ones on the diagonal.
+    """
+
+    generator = np.random.default_rng(23)
+    exact_vectors = generator.normal(size=(num_gradients, 64))
+    exact_vectors /= np.linalg.norm(exact_vectors, axis=1, keepdims=True)
+    exact = exact_vectors @ exact_vectors.T
+
+    # A sketch of the same vectors: inner products preserved in expectation,
+    # divided by the exact (unit) norms, so the diagonal drifts off 1.
+    sketch = exact_vectors + generator.normal(scale=0.05, size=(num_gradients, 64))
+    production = sketch @ sketch.T
+
+    return {
+        "num_gradients": num_gradients,
+        "gradient_dtype": "float32",
+        "accumulation_dtype": "float64",
+        "production_dimension": 512,
+        "production_seed": 20240501,
+        "map_semantics": "production",
+        "exact_cosines": exact,
+        "production_cosines": production,
+        "sensitivity": [
+            {"dimension": 128, "mean_absolute_error": 0.081, "rmse": 0.101},
+            {"dimension": 256, "mean_absolute_error": 0.057, "rmse": 0.072},
+            {"dimension": 512, "mean_absolute_error": 0.041, "rmse": 0.051},
+            {"dimension": 1024, "mean_absolute_error": 0.029, "rmse": 0.036},
+        ],
+    }
+
+
+def test_figure_twenty_three_stays_in_sanity_checks(tmp_path) -> None:
+    """A methodological check must never be filed with the results."""
+
+    written = plot_countsketch_fidelity(_fidelity_report(), tmp_path)
+
+    assert len(written) == 1
+    assert written[0].parent.name == "sanity_checks"
+    assert written[0].suffix == ".svg"
+    assert written[0].stat().st_size > 0
+    assert figure_category(written[0].stem) == "sanity_checks"
+
+
+def test_figure_twenty_three_does_not_clip_out_of_range_estimates(tmp_path) -> None:
+    """The production estimator is not a cosine, and the figure must show that.
+
+    A pair pushed past 1 is exactly the case the panel exists to reveal, so it
+    has to survive into the drawn data rather than being silently pulled back
+    to the bound.
+    """
+
+    report = _fidelity_report()
+    report["production_cosines"] = np.asarray(report["production_cosines"]).copy()
+    report["production_cosines"][0, 1] = 1.4
+    report["production_cosines"][1, 0] = 1.4
+
+    held = {}
+    original = save_figure
+
+    def capture(figure, *args, **kwargs):
+        held["axes"] = figure.axes
+        return original(figure, *args, **kwargs)
+
+    import llm_behavior_lab.analysis.figures as module
+
+    module.save_figure = capture
+    try:
+        module.plot_countsketch_fidelity(report, tmp_path)
+    finally:
+        module.save_figure = original
+
+    drawn = [
+        value
+        for axes in held["axes"]
+        for collection in axes.collections
+        for value in np.asarray(collection.get_offsets())[:, 1]
+    ]
+    assert any(np.isclose(value, 1.4) for value in drawn)
 
 
 def test_figure_twenty_four_renders_into_diagnostics(tmp_path) -> None:

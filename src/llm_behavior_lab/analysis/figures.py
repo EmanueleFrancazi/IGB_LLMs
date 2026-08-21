@@ -3121,92 +3121,132 @@ def plot_countsketch_fidelity(
     """Figure 23 -- does the K = 512 sketch reproduce true gradient directions?
 
     A methodological check, not a result. Figure 20 reports estimated cosines,
-    some of them large, and this asks whether the instrument producing them is
+    several of them large, and this asks whether the instrument producing them is
     accurate enough for those numbers to mean what they appear to mean.
 
-    The main panel is the only comparison that settles it: the full-gradient
-    cosine of a pair against the sketch's estimate of it, on equal axes with the
-    identity line. Points on the line mean the projection is faithful; vertical
-    scatter about it is the projection's error, which the annotation quantifies.
+    Two estimators are shown against the same exact cosines. The production one
+    divides a sketched inner product by **exact** norms, which makes it unbiased
+    in the inner product but not a cosine -- it is not confined to ``[-1, 1]``,
+    and values outside are drawn where they fall rather than clipped, because
+    clipping would hide the property being measured. The comparator divides by
+    the projected norms instead, which is a genuine cosine and therefore bounded,
+    but trades an exact denominator for a noisy one. Which is more faithful is
+    the empirical question, so neither is presented as the answer.
 
-    The inset shows how that error falls with sketch width, which places the
-    production choice of ``K`` in context rather than asserting it is adequate.
+    Panel C ranks the absolute errors so the tail is visible rather than summarized
+    into a single mean, and marks the p95, p99 and maximum. With a few dozen pairs
+    those are order statistics, and the pair count is printed beside them so they
+    are not read as tail estimates.
 
-    Numbered 23, leaving 22 for the nucleus-temperature figure that is planned
-    but not yet built. Skipping a number costs nothing; renumbering later would
-    break every existing reference, and figure numbers here are stable
-    identifiers rather than an ordering.
+    Numbered 23, leaving 22 for the nucleus-temperature figure. Skipping a number
+    costs nothing; renumbering would break every existing reference.
     """
 
+    from llm_behavior_lab.analysis.countsketch_fidelity import estimator_comparison
+
     exact = report["exact_cosines"]
-    estimated = report["production_cosines"]
+    production = report["production_cosines"]
     size = exact.shape[0]
     upper = np.triu_indices(size, k=1)
-    production = report["production"]
+    comparison = estimator_comparison(exact, production)
+    projected = comparison["projected_cosines"]
+    exact_norm = comparison["exact_norm_estimator"]
+    projected_space = comparison["projected_space_estimator"]
 
-    figure = _new_figure(width=7.6, height=6.4)
-    axes = figure.subplots()
+    figure = _new_figure(width=11.0, height=9.0)
+    panels = figure.subplots(2, 2)
 
-    axes.scatter(
-        exact[upper], estimated[upper], s=42, alpha=0.8,
-        color="#1f77b4", edgecolors="#08306b", linewidths=0.6, zorder=3,
-    )
-    span = [
-        float(min(exact[upper].min(), estimated[upper].min())),
-        float(max(exact[upper].max(), estimated[upper].max())),
-    ]
-    pad = 0.05 * (span[1] - span[0] or 1.0)
-    limits = [span[0] - pad, span[1] + pad]
-    axes.plot(limits, limits, color="#d62728", linewidth=1.1, linestyle="--",
-              label="y = x  (perfect estimate)", zorder=2)
-    axes.set_xlim(limits)
-    axes.set_ylim(limits)
-    axes.set_aspect("equal", adjustable="box")
-    axes.set_xlabel("Full-gradient cosine")
-    axes.set_ylabel("CountSketch-estimated cosine")
-    axes.grid(True, alpha=0.22)
-    axes.legend(loc="upper left", fontsize=8, frameon=True)
+    def scatter(axes, estimated, summary, title, colour):
+        axes.scatter(
+            exact[upper], estimated[upper], s=34, alpha=0.8,
+            color=colour, edgecolors="#222222", linewidths=0.5, zorder=3,
+        )
+        low = float(min(exact[upper].min(), estimated[upper].min()))
+        high = float(max(exact[upper].max(), estimated[upper].max()))
+        pad = 0.06 * (high - low or 1.0)
+        limits = [low - pad, high + pad]
+        axes.plot(limits, limits, color="#d62728", linewidth=1.0, linestyle="--",
+                  zorder=2, label="y = x")
+        axes.set_xlim(limits)
+        axes.set_ylim(limits)
+        axes.set_aspect("equal", adjustable="box")
+        axes.set_title(title, fontsize=10)
+        axes.grid(True, alpha=0.20)
+        axes.legend(loc="upper left", fontsize=7.5, frameon=True)
+        axes.text(
+            0.98, 0.03,
+            f"MAE {summary['mean_absolute_error']:.4f}   "
+            f"RMSE {summary['rmse']:.4f}\n"
+            f"max {summary['max_absolute_error']:.4f}   "
+            f"bias {summary['bias']:+.4f}\n"
+            f"range [{summary['estimated_min']:+.3f}, {summary['estimated_max']:+.3f}]",
+            transform=axes.transAxes, fontsize=7, ha="right", va="bottom",
+            family="monospace", bbox=_ANNOTATION_BOX,
+        )
 
-    axes.text(
-        0.98, 0.03,
-        f"K = {report['production_dimension']}   seed {report['production_seed']}\n"
-        f"pairs {production['num_pairs']}   "
-        f"MAE {production['mean_absolute_error']:.4f}\n"
-        f"RMSE {production['rmse']:.4f}   "
-        f"max {production['max_absolute_error']:.4f}\n"
-        f"bias {production['mean_signed_error']:+.4f}",
-        transform=axes.transAxes, fontsize=7.5, ha="right", va="bottom",
-        family="monospace", bbox=_ANNOTATION_BOX,
-    )
+    scatter(panels[0][0], production, exact_norm,
+            "(a) production: exact-norm denominator", "#1f77b4")
+    scatter(panels[0][1], projected, projected_space,
+            "(b) comparator: projected-space cosine (bounded)", "#2ca02c")
+    panels[0][0].set_xlabel("Full-gradient cosine")
+    panels[0][0].set_ylabel("CountSketch-estimated cosine")
+    panels[0][1].set_xlabel("Full-gradient cosine")
 
+    ranked = panels[1][0]
+    for name, summary, estimated, colour in (
+        ("exact-norm", exact_norm, production, "#1f77b4"),
+        ("projected", projected_space, projected, "#2ca02c"),
+    ):
+        errors = np.sort(np.abs(estimated[upper] - exact[upper]))
+        ranked.plot(
+            np.arange(1, errors.size + 1), errors, marker="o", markersize=2.5,
+            linewidth=1.1, color=colour, label=name,
+        )
+        for quantile, style in (("p95_absolute_error", ":"), ("p99_absolute_error", "-.")):
+            ranked.axhline(summary[quantile], color=colour, linewidth=0.8, linestyle=style)
+    ranked.set_xlabel(f"pair rank  (n = {exact_norm['num_pairs']})")
+    ranked.set_ylabel("absolute error")
+    ranked.set_title("(c) ranked absolute error, with p95 and p99", fontsize=10)
+    ranked.grid(True, alpha=0.20)
+    ranked.legend(loc="upper left", fontsize=7.5, frameon=True)
+
+    sweep = panels[1][1]
     sensitivity = report.get("sensitivity") or []
     if sensitivity:
-        inset = figure.add_axes([0.63, 0.63, 0.24, 0.22])
         widths = [entry["dimension"] for entry in sensitivity]
-        inset.plot(
-            widths, [entry["mean_absolute_error"] for entry in sensitivity],
-            marker="o", markersize=3.5, linewidth=1.2, color="#2ca02c",
-        )
-        inset.axvline(report["production_dimension"], color="#d62728",
-                      linestyle=":", linewidth=1.0)
-        inset.set_xscale("log", base=2)
-        inset.set_yscale("log")
-        inset.set_xlabel("K", fontsize=7)
-        inset.set_ylabel("mean MAE", fontsize=7)
-        inset.tick_params(labelsize=6)
-        inset.grid(True, which="both", alpha=0.20)
+        sweep.plot(widths, [entry["mean_absolute_error"] for entry in sensitivity],
+                   marker="o", markersize=4, linewidth=1.3, color="#2ca02c", label="MAE")
+        if all("rmse" in entry for entry in sensitivity):
+            sweep.plot(widths, [entry["rmse"] for entry in sensitivity],
+                       marker="s", markersize=4, linewidth=1.3, color="#7f7f7f",
+                       linestyle="--", label="RMSE")
+        sweep.axvline(report["production_dimension"], color="#d62728",
+                      linestyle=":", linewidth=1.1, label="production K")
+        sweep.set_xscale("log", base=2)
+        sweep.set_yscale("log")
+        sweep.legend(loc="upper right", fontsize=7.5, frameon=True)
+    sweep.set_xlabel("sketch width K")
+    sweep.set_ylabel("error")
+    sweep.set_title("(d) error against sketch width", fontsize=10)
+    sweep.grid(True, which="both", alpha=0.20)
 
+    outside = exact_norm["fraction_outside_unit_interval"]
     figure.suptitle(
         "CountSketch fidelity against full-gradient directional overlap", fontsize=12
     )
     figure.text(
-        0.5, 0.915,
-        f"{report['num_gradients']} exact gradients, {report['gradient_dtype']} "
-        f"stored and {report['accumulation_dtype']} accumulated   |   "
-        "self-pairs excluded   |   measurement fidelity, not a scientific result",
+        0.5, 0.945,
+        f"{report['num_gradients']} exact gradients, "
+        f"{exact_norm['num_pairs']} non-self pairs, "
+        f"{report['gradient_dtype']} stored / {report['accumulation_dtype']} accumulated"
+        f"   |   production K = {report['production_dimension']}, "
+        f"seed {report['production_seed']}"
+        f"   |   production estimates outside [-1, 1]: "
+        f"{exact_norm['num_below_minus_one'] + exact_norm['num_above_plus_one']} "
+        f"({outside:.1%}), not clipped",
         ha="center", fontsize=7.5, color="#444444",
     )
-    figure.subplots_adjust(top=0.87)
+    figure.subplots_adjust(top=0.90, hspace=0.28, wspace=0.24)
     return save_figure(figure, directory, "figure23_countsketch_fidelity")
 
 
