@@ -177,6 +177,12 @@ def histogram_gate(
     the same deterministic procedure, so they either match or the reproduction is
     of something else.
 
+    The same three discrepancy measures -- differing bins, largest difference,
+    total absolute difference -- are reported whether the gate passes or fails.
+    On a pass they are all zero, and stating that explicitly is the point: a
+    report that prints nothing on success cannot be distinguished from a report
+    whose check never ran.
+
     Raises:
         ValueError: On the first temperature whose histogram differs, reporting
             how many token IDs disagree and the largest discrepancy, so the
@@ -194,13 +200,16 @@ def histogram_gate(
     for index, temperature in enumerate(temperatures):
         observed = np.bincount(labels[index], minlength=vocab_size).astype(np.int64)
         recorded = expected[index]
+        difference = observed - recorded
+        differing = np.flatnonzero(difference)
+        worst = int(np.abs(difference).max()) if difference.size else 0
+        total = int(np.abs(difference).sum())
         if not np.array_equal(observed, recorded):
-            differing = np.flatnonzero(observed != recorded)
-            worst = int(np.abs(observed - recorded).max())
             raise ValueError(
                 f"The recovered nucleus labels at T = {temperature:g} do not "
                 f"reproduce the recorded histogram: {differing.size} token IDs "
-                f"differ, largest discrepancy {worst}. The reconstruction "
+                f"differ, largest discrepancy {worst}, total absolute "
+                f"difference {total}. The reconstruction "
                 "describes a different model, initialization, support or "
                 "sampling stream than the one measured, so nothing may be built "
                 "on these labels."
@@ -208,6 +217,10 @@ def histogram_gate(
         per_temperature.append(
             {
                 "temperature": float(temperature),
+                "exact_match": True,
+                "mismatched_bins": int(differing.size),
+                "max_absolute_difference": worst,
+                "sum_absolute_difference": total,
                 "num_positions": int(labels[index].size),
                 "num_distinct_tokens": int((observed > 0).sum()),
             }

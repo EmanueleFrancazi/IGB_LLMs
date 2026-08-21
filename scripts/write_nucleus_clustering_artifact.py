@@ -211,9 +211,21 @@ def main() -> None:
         vocab_size=tokenizer.vocab_size,
         temperatures=recovered["temperatures"],
     )
+    # Printed on success as well as failure. Zeros stated explicitly are the
+    # evidence the check ran; silence on success would look the same as no gate.
+    print("\nExact histogram gate, per sampling temperature:")
+    print(f"  {'T':>6}  {'exact match':>11}  {'bins':>6}  {'max diff':>8}  {'sum |diff|':>10}")
+    for entry in gate["per_temperature"]:
+        print(
+            f"  {entry['temperature']:6.2f}  "
+            f"{'yes' if entry['exact_match'] else 'NO':>11}  "
+            f"{entry['mismatched_bins']:6d}  "
+            f"{entry['max_absolute_difference']:8d}  "
+            f"{entry['sum_absolute_difference']:10d}"
+        )
     print(
-        "Histogram gate passed: the recovered labels reproduce the recorded "
-        f"counts exactly at all {len(gate['per_temperature'])} temperatures."
+        f"  all {len(gate['per_temperature'])} temperatures reproduce the recorded "
+        "counts exactly."
     )
 
     # -- clustering ----------------------------------------------------------

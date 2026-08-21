@@ -103,3 +103,36 @@ def test_the_gate_is_not_fooled_by_a_matching_total() -> None:
 
     with pytest.raises(ValueError):
         histogram_gate(labels, wrong, vocab_size=VOCAB, temperatures=[0.6])
+
+
+def test_the_pass_path_reports_the_same_measures_as_the_failure_path() -> None:
+    """Zeros stated explicitly, so a pass is distinguishable from an absent check.
+
+    A report that prints nothing on success looks identical to one whose gate
+    never ran, which is exactly the ambiguity this gate exists to remove.
+    """
+
+    labels, counts = _labels_and_counts([[2, 2, 3, 4], [2, 3, 3, 5]])
+
+    result = histogram_gate(
+        labels, counts, vocab_size=VOCAB, temperatures=[0.12, 1.20]
+    )
+
+    for entry in result["per_temperature"]:
+        assert entry["exact_match"] is True
+        assert entry["mismatched_bins"] == 0
+        assert entry["max_absolute_difference"] == 0
+        assert entry["sum_absolute_difference"] == 0
+
+
+def test_the_failure_message_reports_the_total_absolute_difference() -> None:
+    labels, counts = _labels_and_counts([[2, 2, 3, 3]])
+    counts = counts.copy()
+    counts[0][2] -= 1
+    counts[0][3] += 1
+
+    with pytest.raises(ValueError) as failure:
+        histogram_gate(labels, counts, vocab_size=VOCAB, temperatures=[0.6])
+
+    # Two bins off by one each.
+    assert "total absolute difference 2" in str(failure.value)
