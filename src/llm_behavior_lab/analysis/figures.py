@@ -67,6 +67,7 @@ __all__ = [
     "plot_correction_provenance",
     "plot_countsketch_fidelity",
     "plot_cross_partition_geometry",
+    "plot_nucleus_temperature_clustering",
     "plot_gradient_directional_clustering",
     "plot_initial_gradient_split",
     "plot_initial_logit_correction",
@@ -111,7 +112,7 @@ FIGURE_CATEGORIES = {
     "figure1": "main", "figure2": "main", "figure4": "main", "figure5": "main",
     "figure6": "main", "figure7": "main", "figure8": "main", "figure9": "main",
     "figure11": "main", "figure12": "main", "figure13": "main", "figure14": "main",
-    "figure20": "main",
+    "figure20": "main", "figure22": "main",
     "figure3": "diagnostics", "figure10": "diagnostics", "figure15": "diagnostics",
     "figure16": "diagnostics", "figure17": "diagnostics", "figure18": "diagnostics",
     "figure19": "diagnostics", "figure21": "diagnostics",
@@ -3402,3 +3403,180 @@ def plot_cross_partition_geometry(
     )
     figure.subplots_adjust(top=0.87, bottom=0.16)
     return save_figure(figure, directory, "figure24_cross_partition_geometry")
+
+
+def plot_nucleus_temperature_clustering(
+    result: dict[str, Any],
+    directory: str | Path,
+    *,
+    record: Any = None,
+    display_classes: int = 24,
+) -> list[Path]:
+    """Figure 22 -- directional clustering as the grouping is heated.
+
+    Figure 20 groups one gradient population by target token and by greedy
+    prediction and finds structure under both. Those are the two deterministic
+    endpoints. Here the grouping is the token actually sampled under nucleus
+    sampling at temperature ``T``, swept between them.
+
+    Panel A is the trajectory of the pooled ``delta = within - between``, with
+    the label-permutation null band behind it and the two reference groupings
+    drawn as horizontal lines. Reading it requires Panel B: as ``T`` rises the
+    sample spreads and classes fragment, so the within-class statistic rests on
+    fewer and fewer pairs. A trajectory that decays could be geometry weakening
+    or simply support evaporating, and the two panels together are what separate
+    those. Points whose classes have largely collapsed to singletons are drawn
+    hollow rather than dropped, so the reader sees where the statistic thins out
+    instead of finding a truncated curve.
+
+    The heatmaps show the coldest and hottest temperatures side by side on one
+    shared colour scale. Different scales would make any pair of temperatures
+    look alike.
+
+    The gradients are the ``T = 1`` gradients at every point. Sampling
+    temperature reshapes the *grouping*, never the loss the gradients come from.
+    """
+
+    by_temperature = result["by_temperature"]
+    references = result["references"]
+    temperatures = np.asarray(result["temperatures"], dtype=float)
+
+    delta = np.array([entry["population"]["delta"] for entry in by_temperature])
+    null_mean = np.array([entry["null"]["delta_mean"] for entry in by_temperature])
+    null_low = np.array([entry["null"]["delta_low"] for entry in by_temperature])
+    null_high = np.array([entry["null"]["delta_high"] for entry in by_temperature])
+    qualifying = np.array(
+        [entry["support"]["fraction_positions_in_qualifying"] for entry in by_temperature]
+    )
+    singletons = np.array(
+        [entry["support"]["singleton_fraction"] for entry in by_temperature]
+    )
+    within_pairs = np.array(
+        [entry["support"]["num_within_pairs"] for entry in by_temperature], dtype=float
+    )
+    # Not a significance threshold -- a legibility one, marking where the
+    # within-class statistic is carried by a small minority of positions.
+    thin = qualifying < 0.5
+
+    figure = _new_figure(width=12.5, height=8.6)
+    grid = figure.add_gridspec(2, 2, height_ratios=[1.0, 0.95], hspace=0.42, wspace=0.26)
+    trajectory = figure.add_subplot(grid[0, 0])
+    support = figure.add_subplot(grid[0, 1])
+    cold_axes = figure.add_subplot(grid[1, 0])
+    hot_axes = figure.add_subplot(grid[1, 1])
+
+    trajectory.fill_between(
+        temperatures, null_low, null_high, color="#bbbbbb", alpha=0.45,
+        label="label-permutation null (95%)", zorder=1,
+    )
+    trajectory.plot(
+        temperatures, null_mean, color="#666666", linewidth=0.9, linestyle=":",
+        zorder=2, label="null mean",
+    )
+    trajectory.plot(
+        temperatures, delta, color="#1f77b4", linewidth=1.6, zorder=4,
+        label="nucleus grouping",
+    )
+    trajectory.scatter(
+        temperatures[~thin], delta[~thin], s=38, color="#1f77b4",
+        edgecolors="#10405f", linewidths=0.8, zorder=5,
+    )
+    if thin.any():
+        trajectory.scatter(
+            temperatures[thin], delta[thin], s=38, facecolors="none",
+            edgecolors="#1f77b4", linewidths=1.2, zorder=5,
+            label="< 50% of positions in a qualifying class",
+        )
+    for grouping, colour, style in (
+        ("target", "#d62728", "--"), ("greedy", "#2ca02c", "-."),
+    ):
+        trajectory.axhline(
+            references[grouping]["population"]["delta"], color=colour,
+            linewidth=1.1, linestyle=style, zorder=3,
+            label=f"{grouping} grouping",
+        )
+    trajectory.axhline(0.0, color="#333333", linewidth=0.8, zorder=2)
+    trajectory.set_xlabel("Nucleus sampling temperature")
+    trajectory.set_ylabel("pooled delta  (within - between)")
+    trajectory.set_title("(a) clustering against sampling temperature", fontsize=10)
+    trajectory.legend(loc="best", fontsize=7, frameon=True)
+    trajectory.grid(True, alpha=0.20)
+
+    support.plot(
+        temperatures, qualifying, marker="o", markersize=4, linewidth=1.4,
+        color="#1f77b4", label=f"positions in a class of >= {result['min_support']}",
+    )
+    support.plot(
+        temperatures, singletons, marker="s", markersize=4, linewidth=1.4,
+        color="#ff7f0e", linestyle="--", label="classes that are singletons",
+    )
+    support.set_ylim(-0.03, 1.03)
+    support.set_xlabel("Nucleus sampling temperature")
+    support.set_ylabel("fraction")
+    support.set_title("(b) how much class structure survives", fontsize=10)
+    support.legend(loc="best", fontsize=7, frameon=True)
+    support.grid(True, alpha=0.20)
+
+    pairs = support.twinx()
+    pairs.plot(
+        temperatures, within_pairs, color="#7f7f7f", linewidth=1.0,
+        linestyle=":", marker="^", markersize=3,
+    )
+    pairs.set_yscale("log")
+    pairs.set_ylabel("within-class pairs   [log]", fontsize=8, color="#7f7f7f")
+    pairs.tick_params(axis="y", labelsize=7, colors="#7f7f7f")
+
+    # One scale across both heatmaps: per-panel scales would make any two
+    # temperatures look equally structured.
+    coldest, hottest = by_temperature[0], by_temperature[-1]
+    finite = np.concatenate([
+        entry["display"]["matrix"][np.isfinite(entry["display"]["matrix"])].ravel()
+        for entry in (coldest, hottest)
+    ])
+    extent = float(np.abs(finite).max()) if finite.size else 1.0
+
+    image = None
+    for axes, entry in ((cold_axes, coldest), (hot_axes, hottest)):
+        shown = entry["display"]["classes"][:display_classes]
+        matrix = entry["display"]["matrix"][: shown.size, : shown.size]
+        image = axes.imshow(
+            matrix, cmap="RdBu_r", vmin=-extent, vmax=extent, interpolation="nearest"
+        )
+        labels = [
+            _token_axis_label(record, token) if record is not None else str(int(token))
+            for token in shown
+        ]
+        ticks = np.arange(shown.size)
+        axes.set_xticks(ticks)
+        axes.set_yticks(ticks)
+        axes.set_xticklabels(labels, rotation=90, fontsize=5)
+        axes.set_yticklabels(labels, fontsize=5)
+        axes.set_title(
+            f"T = {entry['temperature']:g}   "
+            f"({entry['support']['num_qualifying']:,} qualifying classes, "
+            f"{entry['support']['fraction_positions_in_qualifying']:.0%} of positions)",
+            fontsize=9,
+        )
+    cold_axes.set_ylabel("sampled token")
+    figure.text(
+        0.5, 0.455, "(c) coldest and hottest grouping, shared colour scale",
+        ha="center", fontsize=10,
+    )
+    colourbar = figure.colorbar(image, ax=[cold_axes, hot_axes], fraction=0.030, pad=0.02)
+    colourbar.set_label("Estimated gradient cosine similarity", fontsize=8)
+    colourbar.ax.tick_params(labelsize=7)
+
+    figure.suptitle(
+        "Gradient clustering under the sampled-token grouping", fontsize=12
+    )
+    figure.text(
+        0.5, 0.935,
+        "grouping varies with sampling temperature; the gradients are the T = 1 "
+        "gradients throughout   |   "
+        f"{by_temperature[0]['num_positions']:,} positions, "
+        f"K = {by_temperature[0]['sketch_dimension']}   |   "
+        f"null: {result['permutations']} label permutations per temperature",
+        ha="center", fontsize=7, color="#444444",
+    )
+    figure.subplots_adjust(top=0.90)
+    return save_figure(figure, directory, "figure22_nucleus_temperature_clustering")

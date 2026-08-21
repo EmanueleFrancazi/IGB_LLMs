@@ -72,6 +72,7 @@ FIGURES = {
     "figure20": "plot_gradient_directional_clustering",
     "figure21": "plot_correction_provenance",
     "figure23": "plot_countsketch_fidelity",
+    "figure22": "plot_nucleus_temperature_clustering",
     "figure24": "plot_cross_partition_geometry",
 }
 
@@ -452,6 +453,26 @@ def report_gradient_clustering(record: Any, *, display_classes: int = 40) -> dic
 
 
 
+def _render_nucleus_clustering(figure_module, record, record_dir, figures_dir):
+    """Draw figure 22 from the run's nucleus-clustering artifact.
+
+    Like figure 23, this one is not backed by the record alone: recovering which
+    position sampled which token needs a forward pass, so it is done once by
+    ``scripts/write_nucleus_clustering_artifact.py`` -- which gates the recovered
+    labels against the recorded histogram -- and cached beside the record. Here
+    the artifact is only read back.
+    """
+
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    result = load_nucleus_clustering_artifact(record_dir)
+    return figure_module.plot_nucleus_temperature_clustering(
+        result, figures_dir, record=record
+    )
+
+
 def _render_countsketch_fidelity(figure_module, record_dir, figures_dir):
     """Draw figure 23 from the run's fidelity artifact.
 
@@ -522,6 +543,12 @@ def main() -> None:
             )
         except FileNotFoundError:
             pass
+        try:
+            written = written + _render_nucleus_clustering(
+                figure_module, record, args.record_dir, figures_dir
+            )
+        except FileNotFoundError:
+            pass
     else:
         required = CONDITIONAL_FIGURES.get(args.only)
         if required is not None and not getattr(record, required):
@@ -529,9 +556,15 @@ def main() -> None:
                 f"This record does not carry the analysis behind {args.only} "
                 f"({required} is false), so it cannot be drawn from it."
             )
-        if args.only == "figure23":
-            written = _render_countsketch_fidelity(
-                figure_module, args.record_dir, figures_dir
+        if args.only in ("figure22", "figure23"):
+            written = (
+                _render_countsketch_fidelity(
+                    figure_module, args.record_dir, figures_dir
+                )
+                if args.only == "figure23"
+                else _render_nucleus_clustering(
+                    figure_module, record, args.record_dir, figures_dir
+                )
             )
             print()
             for path in written:

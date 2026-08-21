@@ -325,6 +325,7 @@ def gradient_clustering(
     record: Any,
     *,
     grouping: str = "target",
+    labels: np.ndarray | None = None,
     min_support: int = 2,
     display_classes: int | None = None,
     permutations: int = DEFAULT_PERMUTATIONS,
@@ -348,7 +349,15 @@ def gradient_clustering(
 
     Args:
         record: A record carrying per-position gradient sketches.
-        grouping: ``"target"`` or ``"greedy"``.
+        grouping: ``"target"`` or ``"greedy"``, unless ``labels`` is supplied,
+            in which case it is only the name this grouping reports itself under.
+        labels: One label per position, in record order, replacing the
+            record-derived grouping. This is how a grouping the record does not
+            persist -- the nucleus sample at a given temperature -- reuses this
+            estimator, its population definition and its null rather than a
+            parallel implementation that could drift from them. Labels must be
+            supplied for **every** position, before the zero-norm mask is
+            applied, so they line up with the sketches by construction.
         min_support: Smallest class size counted as *qualifying* for reporting
             and for the heatmap diagonal. It does **not** restrict the pooled
             statistic, which spans every position: a singleton simply has no
@@ -366,7 +375,11 @@ def gradient_clustering(
     """
 
     unit, usable = unit_sketches(record)
-    labels = _labels(record, grouping)
+    labels = (
+        _labels(record, grouping)
+        if labels is None
+        else np.asarray(labels, dtype=np.int64)
+    )
     if labels.shape[0] != unit.shape[0]:
         raise ValueError(
             "The sketch and the label arrays describe different position counts."
