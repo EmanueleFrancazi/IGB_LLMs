@@ -69,6 +69,13 @@ from llm_behavior_lab.analysis.gradient_clustering import (
     has_gradient_sketches,
     unit_sketches,
 )
+from llm_behavior_lab.analysis.gradient_cross_partition import (
+    contingency_summary,
+    cross_identity_null,
+    cross_partition_matrix,
+    mixture_reconstruction,
+    pooled_cross_statistic,
+)
 from llm_behavior_lab.analysis.scale_comparison import greedy_scale_comparison
 from llm_behavior_lab.analysis.predictive import (
     PROBABILITY_QUANTILES,
@@ -136,6 +143,11 @@ __all__ = [
     "gradient_observable_summary",
     "gradient_vector_split",
     "GROUPINGS",
+    "contingency_summary",
+    "cross_identity_null",
+    "cross_partition_matrix",
+    "mixture_reconstruction",
+    "pooled_cross_statistic",
     "class_similarity_matrix",
     "clustering_summary",
     "gradient_clustering",
