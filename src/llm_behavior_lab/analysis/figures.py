@@ -66,6 +66,7 @@ __all__ = [
     "plot_gradient_vs_nucleus_guess_bias",
     "plot_correction_provenance",
     "plot_countsketch_fidelity",
+    "plot_cross_partition_geometry",
     "plot_gradient_directional_clustering",
     "plot_initial_gradient_split",
     "plot_initial_logit_correction",
@@ -114,6 +115,7 @@ FIGURE_CATEGORIES = {
     "figure3": "diagnostics", "figure10": "diagnostics", "figure15": "diagnostics",
     "figure16": "diagnostics", "figure17": "diagnostics", "figure18": "diagnostics",
     "figure19": "diagnostics", "figure21": "diagnostics",
+    "figure24": "diagnostics",
 }
 
 #: Used when a stem matches no known figure number.
@@ -1501,6 +1503,9 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
         written.extend(plot_correction_provenance(record, directory))
         if _supports_gradient_clustering(record):
             written.extend(plot_gradient_directional_clustering(record, directory))
+            # Same requirement -- sketches plus both label vectors -- since it
+            # asks how figure 20's two groupings relate to each other.
+            written.extend(plot_cross_partition_geometry(record, directory))
     return written
 
 
@@ -3203,3 +3208,157 @@ def plot_countsketch_fidelity(
     )
     figure.subplots_adjust(top=0.87)
     return save_figure(figure, directory, "figure23_countsketch_fidelity")
+
+
+def plot_cross_partition_geometry(
+    record: Any,
+    directory: str | Path,
+    *,
+    display_classes: int = 40,
+    min_support: int = 2,
+) -> list[Path]:
+    """Figure 24 -- how the target and greedy groupings relate.
+
+    Figure 20 shows two token-indexed directional families over the same gradient
+    population, and both look coherent. This asks what their relationship is.
+
+    The central panel is cell ``C_ij``: the mean cosine between gradients whose
+    **target** is token ``i`` and gradients whose **greedy prediction** is token
+    ``j``, with every shared position removed. That subtraction is not a detail.
+    Each position carries both labels, so it sits in one target group and one
+    greedy group at once, and it lands in an off-diagonal cell whenever its two
+    labels differ -- which at initialization is nearly always. Without the
+    per-cell correction those cells would silently contain positions compared
+    against themselves.
+
+    The diagonal therefore asks a real question: are gradients that *want* token
+    ``i`` aligned with gradients that *predict* token ``i``, at different
+    positions? Nothing forces a sign. A warm diagonal would indicate a shared
+    token-indexed component across the two roles; a flat matrix would indicate
+    the two families are largely orthogonal; a cold diagonal would indicate
+    token-specific opposition between wanting a token and over-producing it. The
+    colour scale is centred at zero so all three read differently.
+
+    Diagnostic rather than a headline result, hence ``diagnostics/``.
+    """
+
+    from llm_behavior_lab.analysis.gradient_clustering import unit_sketches
+    from llm_behavior_lab.analysis.gradient_cross_partition import (
+        contingency_summary,
+        cross_identity_null,
+        cross_partition_matrix,
+        mixture_reconstruction,
+        pooled_cross_statistic,
+    )
+
+    rows, usable = unit_sketches(record)
+    targets = np.asarray(record.gradient_position_target_ids, dtype=np.int64)[usable]
+    greedy = np.asarray(record.gradient_position_greedy_ids, dtype=np.int64)[usable]
+    rows = rows[usable]
+
+    pooled = pooled_cross_statistic(rows, targets, greedy)
+    null = cross_identity_null(rows, targets, greedy)
+    contingency = contingency_summary(targets, greedy)
+    mixture = mixture_reconstruction(rows, targets, greedy, min_support=min_support)
+
+    # Support only, in both roles: a token needs enough gradients wanting it and
+    # enough predicting it before its diagonal cell means anything. Never ranked
+    # by similarity, which would select the answer.
+    classes = pooled["classes"]
+    target_counts = np.bincount(targets, minlength=int(classes.max()) + 1)[classes]
+    greedy_counts = np.bincount(greedy, minlength=int(classes.max()) + 1)[classes]
+    score = np.minimum(target_counts, greedy_counts)
+    eligible = np.flatnonzero(score >= min_support)
+    order = eligible[np.argsort(-score[eligible], kind="stable")][:display_classes]
+    shown = np.sort(classes[order])
+
+    drawn = cross_partition_matrix(rows, targets, greedy, shown, shown)
+    matrix = drawn["matrix"]
+    finite = matrix[np.isfinite(matrix)]
+    extent = float(np.abs(finite).max()) if finite.size else 1.0
+
+    figure = _new_figure(width=13.0, height=6.4)
+    grid = figure.add_gridspec(1, 2, width_ratios=[1.35, 1.0], wspace=0.30)
+    heat = figure.add_subplot(grid[0, 0])
+    right = grid[0, 1].subgridspec(2, 1, hspace=0.55)
+    pooled_axes = figure.add_subplot(right[0, 0])
+    mixture_axes = figure.add_subplot(right[1, 0])
+
+    image = heat.imshow(
+        matrix, cmap="RdBu_r", vmin=-extent, vmax=extent, interpolation="nearest"
+    )
+    labels = [_token_axis_label(record, token) for token in shown]
+    ticks = np.arange(shown.size)
+    heat.set_xticks(ticks)
+    heat.set_yticks(ticks)
+    heat.set_xticklabels(labels, rotation=90, fontsize=4.5)
+    heat.set_yticklabels(labels, fontsize=4.5)
+    heat.set_xlabel("greedy-predicted token")
+    heat.set_ylabel("target token")
+    heat.set_title(
+        f"(a) self-excluded cross similarity, {shown.size} tokens", fontsize=10
+    )
+    colourbar = figure.colorbar(image, ax=heat, fraction=0.046, pad=0.03)
+    colourbar.set_label("Estimated gradient cosine similarity", fontsize=8)
+    colourbar.ax.tick_params(labelsize=7)
+
+    values = [pooled["c_same"], pooled["c_different"], pooled["delta_cross"]]
+    pooled_axes.bar(
+        range(3), values, color=["#1f77b4", "#aec7e8", "#2ca02c"], width=0.6
+    )
+    pooled_axes.errorbar(
+        2, null["delta_mean"],
+        yerr=[[null["delta_mean"] - null["delta_low"]],
+              [null["delta_high"] - null["delta_mean"]]],
+        fmt="o", color="#333333", markersize=4, capsize=5, linewidth=1.2,
+        label="identity-permutation null",
+    )
+    pooled_axes.axhline(0.0, color="#333333", linewidth=0.8)
+    pooled_axes.set_xticks(range(3))
+    pooled_axes.set_xticklabels(["C_same", "C_different", "delta_cross"], fontsize=8)
+    pooled_axes.set_ylabel("mean cosine")
+    pooled_axes.set_title("(b) pooled over all classes", fontsize=10)
+    pooled_axes.legend(loc="best", fontsize=7, frameon=True)
+    pooled_axes.grid(True, axis="y", alpha=0.20)
+
+    if mixture["num_classes"]:
+        mixture_axes.scatter(
+            mixture["support"], mixture["similarity"],
+            s=8, alpha=0.45, color="#1f77b4", edgecolors="none", rasterized=True,
+        )
+        mixture_axes.axhline(
+            mixture["median_similarity"], color="#d62728", linewidth=1.0,
+            linestyle="--", label=f"median {mixture['median_similarity']:.2f}",
+        )
+        mixture_axes.legend(loc="lower right", fontsize=7, frameon=True)
+    mixture_axes.set_xscale("log")
+    mixture_axes.set_ylim(-1.05, 1.05)
+    mixture_axes.set_xlabel("greedy-class support   [log]")
+    mixture_axes.set_ylabel("observed vs mixture")
+    mixture_axes.set_title(
+        "(c) greedy means rebuilt from target means", fontsize=10
+    )
+    mixture_axes.grid(True, which="both", alpha=0.20)
+
+    figure.suptitle(
+        "Target-conditioned and greedy-conditioned directional families", fontsize=12
+    )
+    figure.text(
+        0.5, 0.925,
+        "rows: target token   columns: greedy-predicted token   |   "
+        "every shared position removed per cell, off-diagonal included   |   "
+        f"displayed: {shown.size} tokens by min(target, greedy) support >= {min_support}"
+        f"   |   {contingency['num_true_positive_positions']:,} of "
+        f"{contingency['num_positions']:,} positions have target == greedy",
+        ha="center", fontsize=7, color="#444444",
+    )
+    figure.text(
+        0.5, 0.045,
+        f"C_same {pooled['c_same']:+.5f}   C_different {pooled['c_different']:+.5f}   "
+        f"delta_cross {pooled['delta_cross']:+.5f}   |   null "
+        f"[{null['delta_low']:+.5f}, {null['delta_high']:+.5f}] (M = {null['permutations']})"
+        f"   |   mixture similarity median {mixture['median_similarity']:.3f}",
+        ha="center", fontsize=7, family="monospace", color="#444444",
+    )
+    figure.subplots_adjust(top=0.87, bottom=0.16)
+    return save_figure(figure, directory, "figure24_cross_partition_geometry")

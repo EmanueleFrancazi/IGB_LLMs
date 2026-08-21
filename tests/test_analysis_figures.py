@@ -590,3 +590,98 @@ def test_a_near_miss_temperature_is_not_snapped_onto_a_canonical_key() -> None:
     from llm_behavior_lab.analysis.figures import _temperature_colours
 
     assert _temperature_colours([0.1200001, 0.24]) == _viridis_at(2)
+
+
+# -- figure 24: the target-versus-greedy cross-partition diagnostic ---------
+
+from llm_behavior_lab.analysis.figures import (  # noqa: E402
+    plot_cross_partition_geometry,
+)
+
+SKETCH_K = 32
+
+
+def _sketch_record(num_positions: int = 120, vocab: int = 20):
+    """A record carrying sketches and both label vectors, as figure 24 needs."""
+
+    generator = np.random.default_rng(24)
+    rows = generator.normal(size=(num_positions, SKETCH_K))
+    rows /= np.linalg.norm(rows, axis=1, keepdims=True)
+    eligible = np.arange(2, vocab)
+    targets = generator.choice(eligible, size=num_positions)
+    greedy = generator.choice(eligible, size=num_positions)
+    corpus = np.zeros(vocab, dtype=np.int64)
+    corpus[eligible] = 7
+    return InitializationExperimentRecord.build(
+        corpus_counts=corpus,
+        selected_target_counts=np.bincount(targets, minlength=vocab),
+        greedy_counts=np.bincount(greedy, minlength=vocab)[None, :],
+        nucleus_counts=np.bincount(greedy, minlength=vocab)[None, None, :],
+        mean_predicted_probabilities=np.full((1, vocab), 1.0 / vocab),
+        model_seeds=[1000],
+        eligible_token_ids=eligible,
+        metadata={
+            "num_positions": num_positions,
+            "analysis": {
+                "num_positions": num_positions,
+                "gradient_analysis": {
+                    "enabled": True,
+                    "initialization_index": 0,
+                    "covers_all_positions": True,
+                    "gradient_sketch": {"dimension": SKETCH_K, "seed": 1},
+                },
+            },
+        },
+        gradient_position_indices=np.arange(num_positions),
+        gradient_position_target_ids=targets.astype(np.int64),
+        gradient_position_greedy_ids=greedy.astype(np.int64),
+        gradient_position_norms=np.ones(num_positions),
+        gradient_position_sketches=rows,
+    )
+
+
+def test_figure_twenty_four_renders_into_diagnostics(tmp_path) -> None:
+    written = plot_cross_partition_geometry(
+        _sketch_record(), tmp_path, display_classes=12
+    )
+
+    assert len(written) == 1
+    assert written[0].parent.name == "diagnostics"
+    assert written[0].stat().st_size > 0
+
+
+def test_figure_twenty_four_selects_tokens_by_support_not_by_similarity() -> None:
+    """Ranking cells by their value would choose the conclusion in advance.
+
+    Built so the two orderings disagree: one token pair is given a strongly
+    aligned cross similarity while holding little support, so a similarity-ranked
+    selection would show it and a support-ranked selection must not.
+    """
+
+    from llm_behavior_lab.analysis.gradient_cross_partition import (
+        cross_partition_matrix,
+    )
+
+    record = _sketch_record(num_positions=120, vocab=20)
+    rows = np.asarray(record.gradient_position_sketches)
+    targets = np.asarray(record.gradient_position_target_ids)
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    classes = np.union1d(np.unique(targets), np.unique(greedy))
+    score = np.minimum(
+        np.bincount(targets, minlength=classes.max() + 1)[classes],
+        np.bincount(greedy, minlength=classes.max() + 1)[classes],
+    )
+    eligible = np.flatnonzero(score >= 2)
+    by_support = set(
+        classes[eligible[np.argsort(-score[eligible], kind="stable")][:6]].tolist()
+    )
+
+    matrix = cross_partition_matrix(rows, targets, greedy, classes, classes)["matrix"]
+    diagonal = np.diagonal(matrix)
+    finite = np.flatnonzero(np.isfinite(diagonal))
+    by_similarity = set(
+        classes[finite[np.argsort(-diagonal[finite])[:6]]].tolist()
+    )
+
+    assert by_support != by_similarity

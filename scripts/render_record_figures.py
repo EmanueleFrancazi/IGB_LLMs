@@ -72,6 +72,7 @@ FIGURES = {
     "figure20": "plot_gradient_directional_clustering",
     "figure21": "plot_correction_provenance",
     "figure23": "plot_countsketch_fidelity",
+    "figure24": "plot_cross_partition_geometry",
 }
 
 #: Figures that exist only when the record carries the analysis behind them.
@@ -91,6 +92,7 @@ CONDITIONAL_FIGURES = {
     "figure19": "has_temperature_gradient_analysis",
     "figure20": "has_gradient_position_sketches",
     "figure21": "has_temperature_gradient_analysis",
+    "figure24": "has_gradient_position_sketches",
 }
 
 

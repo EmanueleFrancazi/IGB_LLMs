@@ -219,3 +219,65 @@ def test_no_dense_contingency_matrix_is_built_for_the_pooled_statistic() -> None
     assert np.isfinite(result["c_same"])
     assert np.isfinite(result["c_different"])
     assert result["num_same_pairs"] + result["num_different_pairs"] == 400 * 400 - 400
+
+
+# -- how the identity null weights its cells ---------------------------------
+
+
+def test_the_identity_null_weights_cells_by_remaining_pairs_not_by_cell() -> None:
+    """The null must reproduce the statistic it is a null for.
+
+    ``delta_cross`` is a ratio of summed numerators to summed denominators, so a
+    class contributing many pairs counts more than a singleton. A null that
+    averaged each permuted cell's normalized value instead would be a null for a
+    different statistic, and the two disagree whenever supports are unequal --
+    which they always are on a real record. Checked here by replaying one draw
+    by hand against a deliberately lopsided fixture.
+    """
+
+    rows = _rows(14, seed=17)
+    # Token 1 is common in both roles; tokens 3 and 4 are near-singletons.
+    targets = np.array([1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 4, 4], dtype=np.int64)
+    greedy = np.array([1, 1, 1, 2, 2, 2, 1, 1, 3, 3, 1, 4, 2, 1], dtype=np.int64)
+
+    # A single draw, so ``delta_mean`` is exactly that draw and no extra
+    # per-draw array has to be exposed just for the test.
+    result = cross_identity_null(rows, targets, greedy, permutations=1)
+    classes = np.union1d(np.unique(targets), np.unique(greedy))
+
+    # Rebuild draw 0's identity permutation exactly as the implementation does.
+    generator = np.random.default_rng(result["seed"])
+    shuffled = generator.permutation(np.arange(classes.size))
+
+    same_numerator = same_pairs = 0.0
+    total_numerator = total_pairs = 0.0
+    for i, target_token in enumerate(classes):
+        left = np.flatnonzero(targets == target_token)
+        for j, greedy_token in enumerate(classes):
+            right = np.flatnonzero(greedy == greedy_token)
+            values = [
+                float(rows[a] @ rows[b]) for a in left for b in right if a != b
+            ]
+            total_numerator += sum(values)
+            total_pairs += len(values)
+            # Under the permuted identity, cell (i, shuffled[i]) is "same".
+            if j == shuffled[i]:
+                same_numerator += sum(values)
+                same_pairs += len(values)
+
+    expected = (same_numerator / same_pairs) - (
+        (total_numerator - same_numerator) / (total_pairs - same_pairs)
+    )
+    assert result["num_valid_draws"] == 1
+    assert result["delta_mean"] == pytest.approx(expected, abs=1e-12)
+
+    # And the pair-weighted value genuinely differs from the per-cell average,
+    # so the test would catch the wrong weighting rather than passing either way.
+    per_cell = []
+    for i, target_token in enumerate(classes):
+        left = np.flatnonzero(targets == target_token)
+        right = np.flatnonzero(greedy == classes[shuffled[i]])
+        values = [float(rows[a] @ rows[b]) for a in left for b in right if a != b]
+        if values:
+            per_cell.append(float(np.mean(values)))
+    assert not np.isclose(same_numerator / same_pairs, float(np.mean(per_cell)))
