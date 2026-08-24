@@ -109,6 +109,29 @@ def parse_args() -> argparse.Namespace:
             "override that deliberately; the override is reported as one."
         ),
     )
+    parser.add_argument(
+        "--sampling-temperatures",
+        type=float,
+        nargs="+",
+        default=None,
+        help=(
+            "T_s per measurement. Defaults to the sweep the record itself "
+            "recorded, which is what the labels can be gated against."
+        ),
+    )
+    parser.add_argument(
+        "--loss-temperatures",
+        nargs="+",
+        default=None,
+        help=(
+            "T_g per measurement, paired elementwise with --sampling-"
+            "temperatures. Defaults to the record's canonical gradient "
+            "temperature repeated, which is the established control. Pass "
+            "'matched' for T_g = T_s, or an explicit equal-length list. Every "
+            "value must be a loss temperature the record measured directions "
+            "at; nothing falls back to the canonical field."
+        ),
+    )
     parser.add_argument("--min-support", type=int, default=2)
     parser.add_argument("--display-classes", type=int, default=40)
     parser.add_argument("--permutations", type=int, default=256)
@@ -136,7 +159,7 @@ def main() -> None:
             "This run has no temperature sweep, so it recorded no nucleus "
             "histograms to gate a reproduction against."
         )
-    sampling_temperatures = [float(value) for value in sweep["temperatures"]]
+    recorded_sweep = [float(value) for value in sweep["temperatures"]]
 
     sampling_metadata = analysis["sampling"]
     sampling = NucleusSamplingSettings(
@@ -155,7 +178,32 @@ def main() -> None:
     loss_temperature = float(
         gradient_metadata.get("canonical_temperature", HISTORICAL_LOSS_TEMPERATURE)
     )
-    loss_temperatures = [loss_temperature] * len(sampling_temperatures)
+
+    # T_s defaults to the sweep the record recorded, because those are the only
+    # labels the histogram gate can verify.
+    sampling_temperatures = (
+        recorded_sweep
+        if args.sampling_temperatures is None
+        else [float(value) for value in args.sampling_temperatures]
+    )
+    unknown = sorted(set(sampling_temperatures) - set(recorded_sweep))
+    if unknown:
+        raise SystemExit(
+            "This record recorded nucleus histograms only at T_s = "
+            f"{', '.join(f'{v:g}' for v in recorded_sweep)}, so the labels at "
+            f"{', '.join(f'{v:g}' for v in unknown)} cannot be gated. Reproduction "
+            "without that gate is not offered."
+        )
+
+    # T_g defaults to the canonical field: that is the established control, and
+    # it is the only choice a record predating the temperature-resolved sketches
+    # can honour. "matched" is the new T_g = T_s design.
+    if args.loss_temperatures is None:
+        loss_temperatures = [loss_temperature] * len(sampling_temperatures)
+    elif len(args.loss_temperatures) == 1 and args.loss_temperatures[0] == "matched":
+        loss_temperatures = list(sampling_temperatures)
+    else:
+        loss_temperatures = [float(value) for value in args.loss_temperatures]
     initialization_index = int(gradient_metadata["initialization_index"])
     model_seed = int(analysis["model_seeds"][initialization_index])
 
@@ -212,7 +260,18 @@ def main() -> None:
         f"(seed {model_seed}), {positions.num_positions:,} positions, "
         f"T_s = {', '.join(f'{value:g}' for value in sampling_temperatures)}"
     )
-    print(f"Loss temperature: T_g = {loss_temperature:g} (from the record's gradients)")
+    from llm_behavior_lab.analysis.directional_fields import (
+        available_loss_temperatures,
+    )
+
+    print(
+        f"Loss temperatures: T_g = "
+        f"{', '.join(f'{value:g}' for value in loss_temperatures)}"
+    )
+    print(
+        "  measured directional fields at T_g = "
+        + ", ".join(f"{value:g}" for value in available_loss_temperatures(record))
+    )
     print(f"Forward batch size: {batching['description']}")
     if batching["source"] == "override" and batching["historical"] is not None:
         print(
@@ -327,6 +386,25 @@ def main() -> None:
         arrays[f"reference_{grouping}_null_high"] = np.array(
             reference["null"]["delta_high"]
         )
+    # References belong to a gradient field, so they are stored along the unique
+    # loss-temperature axis as well. With T_g pinned this is one entry and the
+    # scalars above are the same numbers; once T_g varies the scalars alone
+    # would be ambiguous.
+    reference_losses = sorted(result["references_by_loss_temperature"])
+    arrays["reference_loss_temperatures"] = np.asarray(reference_losses, dtype=float)
+    for grouping in ("target", "greedy"):
+        for field, path in (
+            ("delta", ("population", "delta")),
+            ("null_low", ("null", "delta_low")),
+            ("null_high", ("null", "delta_high")),
+        ):
+            arrays[f"reference_by_loss_{grouping}_{field}"] = np.asarray(
+                [
+                    result["references_by_loss_temperature"][value][grouping][path[0]][path[1]]
+                    for value in reference_losses
+                ],
+                dtype=float,
+            )
 
     destination = args.record_dir / ARTIFACT_NAME
     np.savez_compressed(destination, **arrays)
@@ -366,6 +444,16 @@ def main() -> None:
             grouping: result["references"][grouping]["population"]["delta"]
             for grouping in ("target", "greedy")
         },
+        "references_by_loss_temperature": {
+            f"{value:g}": {
+                grouping: result["references_by_loss_temperature"][value][grouping][
+                    "population"
+                ]["delta"]
+                for grouping in ("target", "greedy")
+            }
+            for value in sorted(result["references_by_loss_temperature"])
+        },
+        "num_directional_fields_read": result["num_fields_read"],
     }
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))
     print(f"\nArtifact written: {destination}")

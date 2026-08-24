@@ -66,7 +66,9 @@ __all__ = [
 GROUPINGS = ("target", "greedy")
 
 
-def unit_sketches(record: Any) -> tuple[np.ndarray, np.ndarray]:
+def unit_sketches(
+    record: Any, *, loss_temperature: float | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """``[D, K]`` sketches divided by the exact gradient norms, and a usable mask.
 
     The divisor is ``||g_d||`` from the experiment's own per-position norms, so
@@ -76,7 +78,29 @@ def unit_sketches(record: Any) -> tuple[np.ndarray, np.ndarray]:
 
     A position whose exact gradient norm is zero has no direction and is
     excluded rather than scaled into a fabricated one.
+
+    ``loss_temperature`` selects which measured gradient field to read. Omitting
+    it keeps the canonical field, which is what every caller written before the
+    loss-temperature axis existed wants. Requesting a temperature the record
+    never measured raises rather than falling back; see
+    :mod:`llm_behavior_lab.analysis.directional_fields`.
     """
+
+    if loss_temperature is not None:
+        from llm_behavior_lab.analysis.directional_fields import directional_field
+
+        field = directional_field(record, loss_temperature)
+        sketches = np.asarray(field["sketches"], dtype=np.float64)
+        exact = np.asarray(field["norms"], dtype=np.float64)
+        if exact.shape[0] != sketches.shape[0]:
+            raise ValueError(
+                "The sketch and the gradient-norm arrays describe different "
+                "positions."
+            )
+        usable = exact > 0.0
+        scaled = np.zeros_like(sketches)
+        scaled[usable] = sketches[usable] / exact[usable, None]
+        return scaled, usable
 
     if not has_gradient_sketches(record):
         raise ValueError(
@@ -326,6 +350,7 @@ def gradient_clustering(
     *,
     grouping: str = "target",
     labels: np.ndarray | None = None,
+    loss_temperature: float | None = None,
     min_support: int = 2,
     display_classes: int | None = None,
     permutations: int = DEFAULT_PERMUTATIONS,
@@ -374,7 +399,7 @@ def gradient_clustering(
         ``display`` -- the matrix and per-class coherence of the drawn subset.
     """
 
-    unit, usable = unit_sketches(record)
+    unit, usable = unit_sketches(record, loss_temperature=loss_temperature)
     labels = (
         _labels(record, grouping)
         if labels is None
@@ -462,6 +487,7 @@ def gradient_clustering(
         "num_positions": int(usable.sum()),
         "num_positions_excluded": int((~usable).sum()),
         "sketch_dimension": int(unit.shape[1]),
+        "loss_temperature": loss_temperature,
         "population": population,
         "null": null,
         "display": display,

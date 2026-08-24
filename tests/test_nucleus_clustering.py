@@ -27,7 +27,20 @@ ELIGIBLE = np.arange(2, VOCAB)
 K = 32
 
 
-def _record(num_positions: int = 90, seed: int = 7):
+#: Loss temperatures the multi-field fixture measures directions at.
+LOSS_TEMPERATURES = (0.12, 0.24, 0.60, 1.0, 1.20)
+
+
+def _record(
+    num_positions: int = 90, seed: int = 7, *, loss_temperatures: bool = False
+):
+    """A record with sketches, optionally at several loss temperatures.
+
+    When ``loss_temperatures`` is set, every T_g gets a *different* directional
+    field, so a computation that read the wrong slice would give a different
+    answer rather than quietly agreeing.
+    """
+
     generator = np.random.default_rng(seed)
     rows = generator.normal(size=(num_positions, K))
     rows /= np.linalg.norm(rows, axis=1, keepdims=True)
@@ -60,7 +73,31 @@ def _record(num_positions: int = 90, seed: int = 7):
         gradient_position_greedy_ids=greedy.astype(np.int64),
         gradient_position_norms=np.ones(num_positions),
         gradient_position_sketches=rows,
+        **_temperature_fields(rows, num_positions, generator, loss_temperatures),
     )
+
+
+def _temperature_fields(rows, num_positions, generator, enabled):
+    """The [N_T, D, K] field, with the canonical row equal to the canonical one."""
+
+    if not enabled:
+        return {}
+    canonical = LOSS_TEMPERATURES.index(1.0)
+    stacked = []
+    for index in range(len(LOSS_TEMPERATURES)):
+        if index == canonical:
+            stacked.append(np.asarray(rows, dtype=np.float32))
+            continue
+        other = generator.normal(size=(num_positions, K))
+        other /= np.linalg.norm(other, axis=1, keepdims=True)
+        stacked.append(other.astype(np.float32))
+    return {
+        "gradient_temperatures": np.asarray(LOSS_TEMPERATURES),
+        "gradient_temperature_position_norms": np.ones(
+            (len(LOSS_TEMPERATURES), num_positions)
+        ),
+        "gradient_temperature_position_sketches": np.stack(stacked),
+    }
 
 
 # -- reuse of the estimator, not a parallel copy of it -----------------------
@@ -97,8 +134,11 @@ def test_the_sweep_calls_the_same_estimator_at_each_temperature() -> None:
     temperatures = [0.12, 0.60, 1.20]
     labels = np.stack([greedy, greedy, greedy])
 
+    # T_g pinned, so the only thing that could differ between points is the
+    # grouping -- and the labels are identical, so nothing may.
     result = nucleus_clustering(
-        record, labels, temperatures, permutations=16, display_classes=6
+        record, labels, temperatures, loss_temperatures=[1.0] * 3,
+        permutations=16, display_classes=6,
     )
 
     # Identical labels, so only the per-temperature null seed may differ.
@@ -113,7 +153,8 @@ def test_each_temperature_draws_its_own_permutation_sequence() -> None:
     record = _record()
     greedy = np.asarray(record.gradient_position_greedy_ids)
     result = nucleus_clustering(
-        record, np.stack([greedy] * 3), [0.12, 0.60, 1.20], permutations=16
+        record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
+        loss_temperatures=[1.0] * 3, permutations=16,
     )
 
     seeds = [entry["permutation_seed"] for entry in result["by_temperature"]]
@@ -180,7 +221,9 @@ def test_the_diagnostics_describe_the_masked_population() -> None:
     )
     labels = np.asarray(record.gradient_position_greedy_ids)
 
-    result = nucleus_clustering(record, labels[None, :], [0.6], permutations=8)
+    result = nucleus_clustering(
+        record, labels[None, :], [0.6], loss_temperatures=[1.0], permutations=8
+    )
     entry = result["by_temperature"][0]
 
     total = (
@@ -211,7 +254,9 @@ def test_labels_must_cover_every_position() -> None:
     greedy = np.asarray(record.gradient_position_greedy_ids)
 
     with pytest.raises(ValueError, match="positions"):
-        nucleus_clustering(record, greedy[None, :-1], [0.6])
+        nucleus_clustering(
+            record, greedy[None, :-1], [0.6], loss_temperatures=[1.0]
+        )
 
 
 # -- the cached artifact must be indistinguishable from live results ---------
@@ -294,7 +339,8 @@ def test_the_cached_artifact_round_trips_everything_the_figure_reads(tmp_path) -
         for fraction in (0.0, 0.4, 0.9)
     ])
     live = nucleus_clustering(
-        record, labels, [0.12, 0.60, 1.20], permutations=16, display_classes=5
+        record, labels, [0.12, 0.60, 1.20], loss_temperatures=[1.0] * 3,
+        permutations=16, display_classes=5,
     )
     _write_artifact(live, tmp_path)
 
@@ -344,7 +390,8 @@ def test_the_sketch_width_is_stored_not_read_off_the_heatmap(tmp_path) -> None:
     record = _record()
     greedy = np.asarray(record.gradient_position_greedy_ids)
     live = nucleus_clustering(
-        record, greedy[None, :], [0.6], permutations=8, display_classes=5
+        record, greedy[None, :], [0.6], loss_temperatures=[1.0],
+        permutations=8, display_classes=5,
     )
     _write_artifact(live, tmp_path)
 
@@ -367,7 +414,7 @@ def test_a_missing_artifact_names_the_writer(tmp_path) -> None:
 
 
 def test_a_sweep_defaults_the_loss_temperature_to_the_sampling_one() -> None:
-    record = _record()
+    record = _record(loss_temperatures=True)
     greedy = np.asarray(record.gradient_position_greedy_ids)
 
     result = nucleus_clustering(
@@ -446,12 +493,12 @@ def test_a_repeated_pair_is_measured_once_and_reused() -> None:
 def test_pairs_differing_in_either_coordinate_are_both_computed() -> None:
     """Reuse must key on the pair, not on one half of it."""
 
-    record = _record()
+    record = _record(loss_temperatures=True)
     greedy = np.asarray(record.gradient_position_greedy_ids)
 
     same_sampling = nucleus_clustering(
         record, np.stack([greedy] * 2), [0.12, 0.12],
-        loss_temperatures=[1.0, 2.0], permutations=8,
+        loss_temperatures=[1.0, 0.12], permutations=8,
     )
     assert same_sampling["num_pairs_reused"] == 0
 
@@ -479,6 +526,19 @@ def test_a_non_positive_loss_temperature_is_rejected() -> None:
     with pytest.raises(ValueError, match="loss_temperatures must be positive"):
         nucleus_clustering(
             record, np.stack([greedy] * 2), [0.12, 0.60], loss_temperatures=[1.0, 0.0]
+        )
+
+
+def test_an_unmeasured_loss_temperature_fails_rather_than_using_the_canonical() -> None:
+    """The whole point of the field: no silent substitution."""
+
+    record = _record(loss_temperatures=True)
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    with pytest.raises(ValueError, match="No measured gradient-direction field"):
+        nucleus_clustering(
+            record, np.stack([greedy] * 2), [0.12, 0.60],
+            loss_temperatures=[1.0, 0.36], permutations=8,
         )
 
 
@@ -539,11 +599,11 @@ def test_an_explicit_artifact_round_trips_both_temperature_arrays(tmp_path) -> N
         load_nucleus_clustering_artifact,
     )
 
-    record = _record()
+    record = _record(loss_temperatures=True)
     greedy = np.asarray(record.gradient_position_greedy_ids)
     live = nucleus_clustering(
         record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
-        loss_temperatures=[1.0, 2.0, 3.0], permutations=8, display_classes=5,
+        loss_temperatures=[1.0, 0.12, 0.24], permutations=8, display_classes=5,
     )
     _write_paired_artifact(live, tmp_path)
 
@@ -551,10 +611,10 @@ def test_an_explicit_artifact_round_trips_both_temperature_arrays(tmp_path) -> N
 
     assert loaded["pair_metadata"] == "explicit"
     assert np.array_equal(loaded["sampling_temperatures"], [0.12, 0.60, 1.20])
-    assert np.array_equal(loaded["loss_temperatures"], [1.0, 2.0, 3.0])
+    assert np.array_equal(loaded["loss_temperatures"], [1.0, 0.12, 0.24])
     assert loaded["pairing"] == "T_g varies independently of T_s"
     for index, entry in enumerate(loaded["by_temperature"]):
-        assert entry["loss_temperature"] == [1.0, 2.0, 3.0][index]
+        assert entry["loss_temperature"] == [1.0, 0.12, 0.24][index]
 
 
 def test_a_matched_artifact_is_described_as_matched(tmp_path) -> None:
@@ -562,7 +622,7 @@ def test_a_matched_artifact_is_described_as_matched(tmp_path) -> None:
         load_nucleus_clustering_artifact,
     )
 
-    record = _record()
+    record = _record(loss_temperatures=True)
     greedy = np.asarray(record.gradient_position_greedy_ids)
     live = nucleus_clustering(
         record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
@@ -598,3 +658,243 @@ def test_a_result_array_out_of_step_with_the_pairs_is_caught(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="leading dimension"):
         load_nucleus_clustering_artifact(tmp_path)
+
+
+# -- the pair must reach the right gradient field ----------------------------
+
+
+def _planted_record(num_positions: int = 60, seed: int = 31):
+    """Structure at one loss temperature and none at another.
+
+    Built so the answer differs by construction: at T_g = 0.12 the gradients are
+    strongly clustered by greedy token, at T_g = 1 they are pure noise. A
+    computation that silently read the canonical field for a T_g = 0.12 request
+    cannot produce the clustered answer, so the substitution this guards against
+    is visible in Delta rather than hidden in the last digits.
+    """
+
+    generator = np.random.default_rng(seed)
+    greedy = generator.choice(ELIGIBLE[:4], size=num_positions)
+    targets = generator.choice(ELIGIBLE, size=num_positions)
+
+    def noise():
+        rows = generator.normal(size=(num_positions, K))
+        return rows / np.linalg.norm(rows, axis=1, keepdims=True)
+
+    centres = generator.normal(size=(VOCAB, K))
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+    clustered = centres[greedy] + 0.05 * noise()
+    clustered /= np.linalg.norm(clustered, axis=1, keepdims=True)
+
+    canonical = LOSS_TEMPERATURES.index(1.0)
+    stacked = []
+    for index, value in enumerate(LOSS_TEMPERATURES):
+        if index == canonical:
+            stacked.append(noise().astype(np.float32))       # no structure
+        elif value == 0.12:
+            stacked.append(clustered.astype(np.float32))     # strong structure
+        else:
+            stacked.append(noise().astype(np.float32))
+    stacked = np.stack(stacked)
+
+    corpus = np.zeros(VOCAB, dtype=np.int64)
+    corpus[ELIGIBLE] = 9
+    return InitializationExperimentRecord.build(
+        corpus_counts=corpus,
+        selected_target_counts=np.bincount(targets, minlength=VOCAB),
+        greedy_counts=np.bincount(greedy, minlength=VOCAB)[None, :],
+        nucleus_counts=np.bincount(greedy, minlength=VOCAB)[None, None, :],
+        mean_predicted_probabilities=np.full((1, VOCAB), 1.0 / VOCAB),
+        model_seeds=[1000],
+        eligible_token_ids=ELIGIBLE,
+        metadata={
+            "num_positions": num_positions,
+            "analysis": {
+                "num_positions": num_positions,
+                "gradient_analysis": {
+                    "enabled": True,
+                    "initialization_index": 0,
+                    "covers_all_positions": True,
+                    "gradient_sketch": {"dimension": K, "seed": 1},
+                },
+            },
+        },
+        gradient_position_indices=np.arange(num_positions),
+        gradient_position_target_ids=targets.astype(np.int64),
+        gradient_position_greedy_ids=greedy.astype(np.int64),
+        gradient_position_norms=np.ones(num_positions),
+        gradient_position_sketches=stacked[canonical],
+        gradient_temperatures=np.asarray(LOSS_TEMPERATURES),
+        gradient_temperature_position_norms=np.ones(
+            (len(LOSS_TEMPERATURES), num_positions)
+        ),
+        gradient_temperature_position_sketches=stacked,
+    )
+
+
+def test_the_same_labels_at_two_loss_temperatures_give_different_geometry() -> None:
+    record = _planted_record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy, greedy]), [0.60, 0.60],
+        loss_temperatures=[0.12, 1.0], permutations=16,
+    )
+
+    structured, unstructured = result["by_temperature"]
+    assert structured["loss_temperature"] == 0.12
+    assert unstructured["loss_temperature"] == 1.0
+    # Planted structure at 0.12, noise at 1. Reading the canonical field for the
+    # first pair would collapse this gap.
+    assert structured["population"]["delta"] > 0.5
+    assert abs(unstructured["population"]["delta"]) < 0.1
+    assert result["num_fields_read"] == 2
+
+
+def test_different_labels_at_one_loss_temperature_share_the_gradient_field() -> None:
+    record = _planted_record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    targets = np.asarray(record.gradient_position_target_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy, targets]), [0.12, 0.60],
+        loss_temperatures=[0.12, 0.12], permutations=16,
+    )
+
+    assert result["num_fields_read"] == 1
+    assert result["num_pairs_reused"] == 0          # different labels
+    by_greedy, by_target = result["by_temperature"]
+    # Same field, different groupings: the greedy grouping is the planted one.
+    assert by_greedy["population"]["delta"] > by_target["population"]["delta"]
+
+
+def test_a_pinned_loss_temperature_reads_one_field_for_every_point() -> None:
+    record = _planted_record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy] * 3), [0.12, 0.24, 0.60],
+        loss_temperatures=[1.0] * 3, permutations=8,
+    )
+
+    assert result["num_fields_read"] == 1
+    assert result["num_unique_loss"] == 1
+
+
+def test_the_references_come_from_the_pairs_own_loss_temperature() -> None:
+    """A reference from a different gradient field is a different geometry."""
+
+    record = _planted_record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy, greedy]), [0.60, 0.60],
+        loss_temperatures=[0.12, 1.0], permutations=16,
+    )
+
+    by_loss = result["references_by_loss_temperature"]
+    assert set(by_loss) == {0.12, 1.0}
+    # The greedy grouping is the planted structure, so its reference must be
+    # large in the structured field and small in the noise one.
+    assert by_loss[0.12]["greedy"]["population"]["delta"] > 0.5
+    assert abs(by_loss[1.0]["greedy"]["population"]["delta"]) < 0.1
+    for grouping in ("target", "greedy"):
+        for value, reference in by_loss.items():
+            assert reference[grouping]["loss_temperature"] == value
+
+
+def test_the_per_pair_null_preserves_that_pairs_label_histogram() -> None:
+    """Permuting labels must not change the class structure it permutes."""
+
+    record = _planted_record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy]), [0.60], loss_temperatures=[0.12],
+        permutations=32,
+    )
+    entry = result["by_temperature"][0]
+
+    # The null is computed over the same population the statistic is, so the
+    # counts it permutes are exactly this T_s histogram.
+    observed = np.unique(greedy, return_counts=True)[1]
+    assert np.array_equal(
+        np.sort(entry["population"]["counts"]), np.sort(observed)
+    )
+    assert entry["null"]["permutations"] == 32
+    # Planted structure sits far outside the shuffled reference.
+    assert entry["population"]["delta"] > entry["null"]["delta_high"]
+
+
+def test_the_pair_artifact_carries_references_per_loss_temperature(tmp_path) -> None:
+    """Scalar references are ambiguous once T_g varies, so the axis is stored."""
+
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _planted_record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    live = nucleus_clustering(
+        record, np.stack([greedy, greedy]), [0.60, 0.60],
+        loss_temperatures=[0.12, 1.0], permutations=8, display_classes=4,
+    )
+    _write_paired_artifact(live, tmp_path)
+
+    # The writer's reference-axis arrays, which _write_paired_artifact omits.
+    path = tmp_path / "nucleus_gradient_clustering.npz"
+    with np.load(path) as data:
+        arrays = {key: data[key] for key in data.files}
+    losses = sorted(live["references_by_loss_temperature"])
+    arrays["reference_loss_temperatures"] = np.asarray(losses, dtype=float)
+    for grouping in ("target", "greedy"):
+        for field, keys in (
+            ("delta", ("population", "delta")),
+            ("null_low", ("null", "delta_low")),
+            ("null_high", ("null", "delta_high")),
+        ):
+            arrays[f"reference_by_loss_{grouping}_{field}"] = np.asarray(
+                [
+                    live["references_by_loss_temperature"][value][grouping][keys[0]][keys[1]]
+                    for value in losses
+                ],
+                dtype=float,
+            )
+    np.savez_compressed(path, **arrays)
+
+    loaded = load_nucleus_clustering_artifact(tmp_path)
+
+    by_loss = loaded["references_by_loss_temperature"]
+    assert sorted(by_loss) == [0.12, 1.0]
+    for value in (0.12, 1.0):
+        for grouping in ("target", "greedy"):
+            assert by_loss[value][grouping]["population"]["delta"] == pytest.approx(
+                live["references_by_loss_temperature"][value][grouping]["population"][
+                    "delta"
+                ],
+                abs=1e-12,
+            )
+
+
+def test_an_artifact_without_the_reference_axis_still_loads(tmp_path) -> None:
+    """Figure 22's real artifact predates it and must keep working."""
+
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    live = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.60], loss_temperatures=[1.0, 1.0],
+        permutations=8, display_classes=5,
+    )
+    _write_artifact(live, tmp_path)
+
+    loaded = load_nucleus_clustering_artifact(tmp_path)
+
+    assert loaded["references_by_loss_temperature"] == {}
+    assert loaded["pair_metadata"] == "historical_fallback"
+    assert loaded["references"]["greedy"]["population"]["delta"] == pytest.approx(
+        live["references"]["greedy"]["population"]["delta"], abs=1e-12
+    )

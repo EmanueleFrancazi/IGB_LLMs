@@ -211,7 +211,13 @@ def nucleus_clustering(
             f"{labels_by_temperature.shape[0]} label rows against "
             f"{len(ordered)} temperature pair(s)."
         )
-    unit, usable = unit_sketches(record)
+    # One directional field per *unique* T_g, resolved once. Reading it is the
+    # expensive half of a pair, and a sweep that pins T_g would otherwise pay
+    # for the same field at every point.
+    fields: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for unique_index, value in enumerate(pairs["unique_loss"]):
+        fields[unique_index] = unit_sketches(record, loss_temperature=float(value))
+    unit, usable = fields[0]
     if labels_by_temperature.shape[1] != unit.shape[0]:
         raise ValueError(
             f"The labels cover {labels_by_temperature.shape[1]} positions but the "
@@ -245,16 +251,18 @@ def nucleus_clustering(
                 record,
                 grouping=f"nucleus T_s={temperature:g} T_g={loss_temperature:g}",
                 labels=labels,
+                loss_temperature=loss_temperature,
                 min_support=min_support,
                 display_classes=display_classes,
                 permutations=permutations,
                 permutation_seed=permutation_seed + index,
             )
             # Diagnostics describe the population the statistic was computed
-            # over, so they use the same zero-norm mask rather than the raw
-            # label vector.
+            # over, so they use this T_g's own zero-norm mask: which positions
+            # have a direction at all is a property of the gradient field.
+            _, field_usable = fields[key[1]]
             result["support"] = support_diagnostics(
-                labels[usable], min_support=min_support
+                labels[field_usable], min_support=min_support
             )
             result["reused_from_pair"] = None
             computed[key] = result
@@ -266,17 +274,28 @@ def nucleus_clustering(
         result["temperature"] = float(temperature)
         by_temperature.append(result)
 
-    references = {
-        grouping: gradient_clustering(
-            record,
-            grouping=grouping,
-            min_support=min_support,
-            display_classes=display_classes,
-            permutations=permutations,
-            permutation_seed=permutation_seed,
-        )
-        for grouping in ("target", "greedy")
-    }
+    # References belong to a gradient field, not to the sweep as a whole. With
+    # T_g pinned they are the single pair of horizontal lines figure 22 draws;
+    # once T_g varies there is one pair per measured T_g, and comparing a
+    # nucleus point against a reference from a different field would be
+    # comparing two different geometries.
+    references_by_loss = {}
+    for unique_index, value in enumerate(pairs["unique_loss"]):
+        loss_value = float(value)
+        references_by_loss[loss_value] = {
+            grouping: gradient_clustering(
+                record,
+                grouping=grouping,
+                loss_temperature=loss_value,
+                min_support=min_support,
+                display_classes=display_classes,
+                permutations=permutations,
+                permutation_seed=permutation_seed,
+            )
+            for grouping in ("target", "greedy")
+        }
+    # The historical shape, which is unambiguous exactly when T_g is pinned.
+    references = references_by_loss[float(pairs["unique_loss"][0])]
     return {
         "sampling_temperatures": pairs["sampling_temperatures"],
         "loss_temperatures": pairs["loss_temperatures"],
@@ -284,6 +303,8 @@ def nucleus_clustering(
         "num_unique_sampling": int(pairs["unique_sampling"].size),
         "num_unique_loss": int(pairs["unique_loss"].size),
         "num_pairs_reused": num_reused,
+        "num_fields_read": len(fields),
+        "references_by_loss_temperature": references_by_loss,
         # Historical key, always the sampling temperatures.
         "temperatures": ordered,
         "by_temperature": by_temperature,

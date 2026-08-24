@@ -824,8 +824,12 @@ def _nucleus_result(record, temperatures=(0.12, 0.24, 0.60, 1.20)):
         )
         for value in temperatures
     ])
+    # T_g pinned to the canonical field, which is the only one this record
+    # measured -- and the design figure 22 actually represents.
     return nucleus_clustering(
-        record, labels, list(temperatures), permutations=8, display_classes=10
+        record, labels, list(temperatures),
+        loss_temperatures=[1.0] * len(temperatures),
+        permutations=8, display_classes=10,
     )
 
 

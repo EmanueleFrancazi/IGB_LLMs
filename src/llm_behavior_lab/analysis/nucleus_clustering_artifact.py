@@ -122,6 +122,29 @@ def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
             }
             for grouping in ("target", "greedy")
         }
+        # Present only in artifacts written once T_g could vary; with T_g
+        # pinned the scalar references above say the same thing.
+        references_by_loss = {}
+        if "reference_loss_temperatures" in data.files:
+            for index, value in enumerate(data["reference_loss_temperatures"]):
+                references_by_loss[float(value)] = {
+                    grouping: {
+                        "population": {
+                            "delta": float(
+                                data[f"reference_by_loss_{grouping}_delta"][index]
+                            )
+                        },
+                        "null": {
+                            "delta_low": float(
+                                data[f"reference_by_loss_{grouping}_null_low"][index]
+                            ),
+                            "delta_high": float(
+                                data[f"reference_by_loss_{grouping}_null_high"][index]
+                            ),
+                        },
+                    }
+                    for grouping in ("target", "greedy")
+                }
         labels = data["nucleus_labels"]
         min_support = int(data["min_support"])
         permutations = int(data["permutations"])
@@ -136,6 +159,7 @@ def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
         "temperatures": temperatures,
         "by_temperature": by_temperature,
         "references": references,
+        "references_by_loss_temperature": references_by_loss,
         "nucleus_labels": labels,
         "min_support": min_support,
         "permutations": permutations,
