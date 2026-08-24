@@ -1071,6 +1071,13 @@ support, never renumbered.
 | `figure6_temperature_ranked_distances` | ranked-profile distance to greedy and to the null, against temperature |
 | `figure7_temperature_support_and_greedy_agreement` | effective support relative to the null per input condition, plus agreement with greedy |
 
+Figures 8–19 are added by the optional predictive-probability, temperature-confidence and
+gradient analyses described below, and appear only when the record carries the analysis
+behind them. Figures 20–24 cover gradient **direction** and are described in
+[Gradient-direction analyses](#gradient-direction-analyses). Files are written into
+`main/`, `diagnostics/` or `sanity_checks/` subdirectories according to what each figure is
+for.
+
 ### Null comparisons
 
 Two reference families sit alongside the model measurements:
@@ -1300,6 +1307,387 @@ measure.
 
 ---
 
+## Gradient-direction analyses
+
+Figures 0–19 describe *what the model guesses* and *how large* the per-position gradients
+are. The analyses in this section describe *which way those gradients point*, and how that
+direction depends on how positions are grouped.
+
+Two things are measured per evaluation position `d` at one initialization:
+
+- the **exact** L2 norm `||g_d||` of the single-position cross-entropy gradient with
+  respect to all trainable parameters; and
+- a fixed-width **CountSketch** projection `S(g_d)` of that same gradient.
+
+The full `[D, P]` gradient matrix is never formed — at experiment scale it is roughly a
+terabyte — so direction is compared through the sketch and magnitude through the exact
+norm.
+
+### Two temperatures: `T_s` and `T_g`
+
+Temperature appears twice in this work, in unrelated roles. Keeping them apart is the main
+thing to understand before reading any of the figures below.
+
+| Symbol | Name | What it changes |
+|---|---|---|
+| `T_s` | sampling temperature | the nucleus-sampled token that *labels* a position, `h_d ~ nucleus(softmax(z_d / T_s), top_p)` |
+| `T_g` | loss / gradient temperature | the objective the gradient comes from, `L_d(T_g) = -log softmax(z_d / T_g)[y_d]` |
+
+The supervised target `y_d` is **always the true next token**. A nucleus-sampled token is
+only a grouping label; it never becomes the training target. Changing `T_s` therefore
+repartitions a fixed set of gradients, while changing `T_g` changes the gradient field
+itself. `g(T)` is the gradient of a different objective, not a rescaling of `g(1)`, so a
+direction measured at one `T_g` says nothing about another.
+
+Two designs follow, and they answer different questions:
+
+- **fixed-gradient control**, `Δ(T_s = T, T_g = 1)` — the grouping is heated while the
+  geometry is held still. This is what figure 22 shows.
+- **matched temperature**, `Δ(T_s = T, T_g = T)` — grouping and geometry move together.
+
+Throughout: `D` = analyzed positions, `M` = measured loss temperatures, `K` = sketch width,
+`within`/`between` = pooled within- and between-class directional similarity, and
+`Δ = within − between`.
+
+### Measuring the gradient fields
+
+Gradient measurement is off by default because it costs one backward pass per position and
+temperature. The relevant runner flags:
+
+| Flag | Effect |
+|---|---|
+| `--gradient-analysis` | measure per-position exact gradient norms |
+| `--gradient-sketch` | also project each gradient into a CountSketch, enabling every directional analysis |
+| `--gradient-vector-split` | accumulate the correct/incorrect gradient split at the canonical temperature |
+| `--gradient-temperatures T [T ...]` | which **loss** temperatures `T_g` to measure fields at |
+| `--sketch-dimension K` | sketch width (default 512) |
+| `--gradient-windows N` | measure a deterministic subset of windows instead of all of them |
+
+`--gradient-temperatures` selects what is **measured**; choosing which `(T_s, T_g)` pairs to
+*analyse* happens later, downstream. Its semantics:
+
+- positive, finite values only;
+- duplicates collapse to their first occurrence;
+- the requested order is the order measured and persisted;
+- the canonical `T_g = 1` is appended when absent, because the record's canonical norm and
+  sketch fields are that row;
+- omitting the flag uses the configured grid, or the established default
+  `0.12 0.24 0.36 0.48 0.60 1.00 1.20`;
+- the same grid can be set in the experiment config under `gradient_analysis.temperatures`,
+  which the CLI overrides;
+- an explicitly empty grid is an error, and is not treated as "omitted".
+
+Cost scales with `D × M`. Storage is dominated by the sketch field: `[M, D, K]` in float32
+is about 470 MB at `M = 7`, `D = 32768`, `K = 512`.
+
+### Example: a full gradient-direction run
+
+Run from the repository root. This measures every loss temperature needed for both the
+control and the matched design in a single pass:
+
+```bash
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml \
+  --experiment-config configs/experiment/initialization_distribution.yaml \
+  --initialization-scale 1.0 \
+  --num-initializations 12 \
+  --num-windows 512 \
+  --num-replicates 1 \
+  --forward-batch-size 4 \
+  --gradient-analysis \
+  --gradient-sketch \
+  --gradient-vector-split \
+  --gradient-temperatures 0.12 0.24 0.36 0.48 0.60 1.00 1.20 \
+  --offline \
+  --output-dir outputs
+```
+
+This is a long-running measurement, not a laptop smoke test: 512 windows of 64 tokens give
+`D = 32768` positions, and each is differentiated once per loss temperature. Use a small
+`--num-windows` first to check the wiring.
+
+### The CountSketch directional estimator
+
+A count sketch assigns every parameter coordinate a bucket and a sign and accumulates
+`sketch[h(i)] += s(i) · g[i]`. Inner products are preserved in expectation, with error
+falling as `1/√K`, so directions can be compared without storing full gradients.
+
+The normalized representation used everywhere downstream is
+
+```text
+u_d = S(g_d) / ||g_d||
+```
+
+where the divisor is the **exact** full-parameter norm, not `||S(g_d)||`. That choice makes
+`E⟨u_a, u_b⟩` equal the true cosine between `g_a` and `g_b`: the sketch is unbiased in the
+inner product, and dividing by a constant keeps it so. Normalizing by the sketch's own
+length would instead give a ratio of two correlated random quantities.
+
+Two consequences matter when reading the figures:
+
+- `||u_d||` is **not** 1, so within-class identities subtract the measured `Σ ||u_d||²`
+  rather than a class count;
+- the estimates are not confined to `[-1, 1]`, and are not clipped. They are reported as
+  *estimated gradient cosine similarity*, never as exact cosines.
+
+Individual pairwise values carry the projection's noise; the pooled class-level means are
+what these analyses report. How close the estimator actually is to exact geometry is
+checked separately — see figure 23.
+
+### Temperature-resolved fields in the record
+
+With `--gradient-sketch`, a record (version 11) carries:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `gradient_temperatures` | `(M,)` | the measured loss temperatures, in measurement order |
+| `gradient_temperature_position_norms` | `(M, D)` | exact gradient norm per temperature and position |
+| `gradient_temperature_position_sketches` | `(M, D, K)` | CountSketch of each gradient, float32 |
+| `gradient_position_norms` | `(D,)` | canonical `T_g = 1` norms |
+| `gradient_position_sketches` | `(D, K)` | canonical `T_g = 1` sketches |
+
+The canonical fields are a **row of** the temperature-resolved arrays rather than a second
+measurement of the same thing, and the record refuses to be built if the canonical slice
+and the canonical field disagree.
+
+Records written before these fields existed remain fully usable for canonical `T_g = 1`
+directional analysis. They must not be treated as containing arbitrary `T_g` directions:
+asking such a record for another loss temperature raises and names what was measured. There
+is no interpolation between measured temperatures and no silent fallback to `T_g = 1`.
+
+### Exact nucleus reconstruction
+
+The experiment streams its logits and keeps only per-token counts, so the record knows *how
+many* positions sampled each token at each `T_s`, but not *which* position sampled what.
+Grouping gradients by the sampled token therefore requires recovering those labels.
+
+They are recovered, not re-drawn. The reconstruction replays the run's own initialization
+and its pre-drawn, position-indexed sampling uniforms through a forward pass — no gradients
+are recomputed, and the source record is never written to. The recovered labels are then
+gated against the histograms the experiment actually recorded, per temperature, with
+**exact integer equality**. Any mismatch aborts before a single statistic is computed: a
+reconstruction that does not reproduce the recorded counts is a reconstruction of some
+other model.
+
+Requesting a subset of the recorded sampling temperatures is supported, and each requested
+`T_s` is gated against its own recorded histogram. An unrecorded `T_s` fails, as does an
+unmeasured `T_g`.
+
+Forward batch size is part of this provenance rather than a throughput knob. The uniforms
+are indexed by position, so batching cannot change which uniform a position draws, but on
+accelerator kernels it can change the logits in the last bits and move a token sitting on a
+truncation boundary. The reconstruction therefore defaults to the batch size the run
+actually realized, recorded in its metadata.
+
+### Downstream analyses from an existing run
+
+These read a finished run and write new artifacts beside it. None modifies the base record.
+Point the config flags at the run's **own** snapshots, not at `configs/` — the repository
+copies may have moved on since the run.
+
+```bash
+RUN=/path/to/run
+
+# Fixed-gradient control: T_s varies, T_g pinned at 1. This is figure 22.
+python3 scripts/write_nucleus_clustering_artifact.py "$RUN/analyses" \
+  --data-config  "$RUN/config/data_config.yaml" \
+  --model-config "$RUN/config/model_config.yaml" \
+  --sampling-temperatures 0.12 0.24 0.36 0.48 0.60 1.20 \
+  --loss-temperatures     1.0  1.0  1.0  1.0  1.0  1.0
+
+# Matched temperature: T_g = T_s elementwise.
+python3 scripts/write_nucleus_clustering_artifact.py "$RUN/analyses" \
+  --data-config  "$RUN/config/data_config.yaml" \
+  --model-config "$RUN/config/model_config.yaml" \
+  --sampling-temperatures 0.12 0.24 0.36 0.48 0.60 1.20 \
+  --loss-temperatures matched
+
+# Target-versus-greedy cross-partition geometry (figure 24).
+python3 scripts/write_cross_partition_artifact.py "$RUN/analyses"
+
+# Render figures from the record and whatever artifacts exist beside it.
+python3 scripts/render_record_figures.py "$RUN/analyses" \
+  --figures-dir "$RUN/figures"
+```
+
+Both nucleus designs write to the same filename,
+`analyses/nucleus_gradient_clustering.npz`, and there is no output-name flag. The second
+run overwrites the first, so copy each result aside before producing the next:
+
+```bash
+python3 scripts/write_nucleus_clustering_artifact.py "$RUN/analyses" ... # control
+cp "$RUN/analyses/nucleus_gradient_clustering.npz" \
+   "$RUN/analyses/nucleus_gradient_clustering_control.npz"
+python3 scripts/write_nucleus_clustering_artifact.py "$RUN/analyses" ... --loss-temperatures matched
+cp "$RUN/analyses/nucleus_gradient_clustering.npz" \
+   "$RUN/analyses/nucleus_gradient_clustering_matched.npz"
+```
+
+Figure 22 reads the canonical filename, so leave the **control** artifact there if you want
+figure 22 to keep its established meaning.
+
+Three defaults that are deliberately different and should not be collapsed into one rule:
+
+- the internal pair helper defaults an omitted `T_g` array to `T_g = T_s`;
+- `scripts/write_nucleus_clustering_artifact.py` defaults `--loss-temperatures` to the
+  record's **canonical** gradient temperature, preserving the established control;
+- an artifact written before the two temperatures were stored separately is read as
+  `T_s` varying with fixed `T_g = 1`, which is what it always meant.
+
+### Figures 20–24
+
+| Figure | Category | Source |
+|---|---|---|
+| 20 — target/greedy directional clustering | `main` | record |
+| 21 — corrective-signal provenance | `diagnostics` | record |
+| 22 — nucleus sampling-temperature clustering | `main` | `analyses/nucleus_gradient_clustering.npz` |
+| 23 — CountSketch fidelity | `sanity_checks` | `sanity/countsketch_fidelity.npz` |
+| 24 — target↔greedy cross-partition geometry | `diagnostics` | record |
+
+**Figure 20 — do gradients cluster by token subgroup?** One gradient population is grouped
+two ways: by the true target token, and by the greedy prediction. For each grouping the
+figure reports pooled `within` (mean estimated similarity between distinct positions in the
+same class), pooled `between` (mean across classes), and `Δ = within − between`, together
+with a label-permutation null. Both pooled quantities are computed over **every** position
+from class sums rather than by enumerating pairs, so a singleton class contributes no
+within-pair but still forms between-pairs. A positive `Δ` well outside the permutation
+interval indicates token-conditioned directional structure; the null says how much apparent
+structure the same gradients and the same class-size distribution produce once token
+identity is shuffled away. Target and greedy answer different questions — positions sharing
+a target share a *loss*, positions sharing a greedy prediction share a *decision* — and
+small differences between their magnitudes should not be over-read given the sketch's own
+error.
+
+**Figure 21 — where does the corrective signal come from?** A diagnostic on the
+initial-gradient decomposition, tracing how much of the cross-entropy correction is
+attributable to each source across loss temperatures. It is routed to `diagnostics` and
+requires the temperature-gradient analysis.
+
+**Figure 22 — clustering under the sampled-token grouping.** `T_s` varies; **`T_g` is fixed
+at 1** for every point. The gradients are the canonical `T = 1` gradients throughout, so
+only the grouping is heated. Panels show the `Δ(T_s)` trajectory with its per-temperature
+permutation null band and the target and greedy groupings as horizontal reference lines;
+a support panel; and the coldest and hottest groupings as heatmaps on one shared,
+zero-centred colour scale.
+
+The support panel needs care, because it plots two different denominators: the *fraction of
+positions* belonging to a class of at least the minimum support, and the *fraction of
+represented classes* that are singletons, plus the total within-class pair count on a
+secondary log axis. As `T_s` rises the sample spreads and classes fragment, so the
+within-class statistic rests on fewer pairs; points where fewer than half the positions sit
+in a qualifying class are drawn hollow rather than dropped. Reading the trajectory without
+the support panel can mistake support evaporating for geometry weakening.
+
+The null permutes the sampled labels across the fixed gradient positions while preserving
+that temperature's realized class sizes exactly. It therefore tests association between
+labels and directions *conditional on the observed support structure*. It does not cover
+sampling-replicate variability, initialization variability, or CountSketch approximation
+error — those are separate concerns.
+
+**Matched-temperature analysis.** The same machinery computes `Δ(T_s, T_g)` for any
+elementwise pair array whose loss temperatures were measured, including `Δ(T, T)`. This is
+an analysis capability rather than a numbered figure; it has none. Its artifact stores both
+temperature arrays, and — since a reference computed from a different gradient field would
+be a different geometry — target and greedy references per measured loss temperature, under
+`reference_loss_temperatures` and `reference_by_loss_*`. A control-versus-matched comparison
+can be derived from a single base record whenever `T_g = 1` and the matched temperatures
+were all measured.
+
+**Figure 23 — CountSketch fidelity.** A methodological sanity check, not a result: it asks
+whether the instrument producing every directional number above is accurate enough for those
+numbers to mean what they appear to mean. Exact gradients are retained for a deterministic
+handful of positions, their exact pairwise cosines computed directly, and the production
+sketch estimates compared against them. The figure shows the production exact-norm estimator
+and a bounded projected-space comparator against the same exact cosines, the ranked absolute
+error with its p95 and p99, and error against sketch width `K`. Values outside `[-1, 1]` are
+drawn where they fall and counted, because clipping would hide the property being measured.
+
+This runs as its **own small run**, not as part of a scientific one. The flag
+`--countsketch-fidelity-sanity` retains complete gradients for those positions, and the code
+documents it as a small methodological mode that should not be enabled for a full-scale run:
+
+```bash
+python3 scripts/run_initialization_distribution_experiment.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml \
+  --num-initializations 1 --num-windows 8 \
+  --gradient-analysis --gradient-sketch --countsketch-fidelity-sanity \
+  --offline --output-dir outputs
+```
+
+The artifact lands at `<run>/sanity/countsketch_fidelity.npz`, and the renderer picks it up
+from the run root when rendering that run.
+
+**Figure 24 — target↔greedy cross-partition geometry.** Figure 20 finds structure under
+both groupings; this asks how the two relate. With target classes `A_i` (positions whose
+target is token `i`) and greedy classes `B_j` (positions whose greedy prediction is token
+`j`), cell `C_ij` is the mean estimated similarity between `A_i` and `B_j`.
+
+Every position carries both labels, so it belongs to one target class and one greedy class
+simultaneously and lands in an off-diagonal cell whenever the two differ — which at
+initialization is nearly always. Each cell therefore subtracts its own shared positions
+rather than comparing them with themselves; the correction applies to off-diagonal cells,
+not only the diagonal. Alongside the matrix the figure reports pooled same-token versus
+different-token cross similarity with an identity-permutation null that shuffles which
+greedy identity counts as "the same token" as which target identity, and a panel comparing
+each greedy class's mean direction against a mixture of target-class means.
+
+That mixture panel reports a projected-space cosine-like comparator between mean
+directions. It is **not** variance explained. A same-token result compatible with the null
+does not establish that the two groupings are orthogonal or independent; it says the
+identity correspondence is not detectable at this support and this sketch precision.
+
+Displayed tokens are chosen by support in both roles, `min(n_target, n_greedy)`, never by
+observed similarity — ranking cells by their value would choose the conclusion before
+drawing it.
+
+### Figure categories
+
+Figures are routed into subdirectories of the figures directory:
+
+| Category | Holds |
+|---|---|
+| `main/` | principal scientific results |
+| `diagnostics/` | provenance, structural, and interpretive diagnostics |
+| `sanity_checks/` | methodological validation of the instruments |
+
+A figure not listed in the routing table falls to `diagnostics/`, so a new figure stays
+visible rather than being silently dropped. The category records what a figure is *for*; it
+is not by itself a statement about evidentiary strength.
+
+### Small runs, full runs, and sanity runs
+
+- **Small validation runs** (a handful of windows) are the right way to check CLI and
+  config correctness, array shapes, which temperature fields were selected, canonical
+  `T_g = 1` equality, and that every artifact is produced. Their clustering magnitudes are
+  not scientifically representative: with few positions the classes fragment, so `Δ` rests
+  on very little support.
+- **Full runs** are the scientific measurement, and are long.
+- **Methodological sanity runs** are small by design and exist to validate an instrument —
+  figure 23 is the example.
+
+### Reproducibility notes
+
+Several properties are enforced by the code rather than by convention:
+
+- evaluation windows are chosen deterministically and evenly spaced, and every
+  initialization sees the same positions;
+- model-initialization randomness and sampling randomness come from separate generators, so
+  enabling an analysis cannot shift the weights;
+- nucleus draws are pre-drawn per position, so a streamed measurement equals an
+  all-at-once one and a position's draw does not depend on its batch;
+- each run snapshots the model, data, and experiment configs it actually used under
+  `config/`, which is what derived analyses should be pointed at;
+- the CountSketch map is generated from a fixed seed through Torch's generator, so two runs
+  produce comparable sketches;
+- the canonical `T_g = 1` slice is validated against the canonical fields at record
+  construction;
+- nucleus label reconstruction is gated on exact histogram equality;
+- the realized forward batch size is recorded and reused by reconstruction.
+
+---
+
 ## Experiment run outputs
 
 A persisted run is a self-contained directory under `<output_dir>/<experiment-name>/<run-id>/`:
@@ -1326,6 +1714,26 @@ outputs/
         gradient_norm_analysis.json
       logs/
 ```
+
+An initialization-distribution run additionally writes `analyses/` array records and, once
+the corresponding analyses have been run, a `figures/` tree and a `sanity/` directory:
+
+```text
+      analyses/
+        initialization_distribution.npz     # the base record; derived analyses never write to it
+        initialization_distribution.json
+        nucleus_gradient_clustering.npz     # written by the nucleus artifact writer
+        gradient_cross_partition.npz        # written by the cross-partition artifact writer
+      figures/
+        main/
+        diagnostics/
+        sanity_checks/
+      sanity/
+        countsketch_fidelity.npz            # only from a CountSketch sanity run
+```
+
+`figures/` defaults to a sibling of the `analyses/` directory being rendered, and
+`--figures-dir` overrides it.
 
 What each part holds:
 
