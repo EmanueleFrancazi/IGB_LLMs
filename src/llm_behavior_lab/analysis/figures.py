@@ -3318,10 +3318,19 @@ def plot_cross_partition_geometry(
     finite = matrix[np.isfinite(matrix)]
     extent = float(np.abs(finite).max()) if finite.size else 1.0
 
-    figure = _new_figure(width=13.0, height=6.4)
-    grid = figure.add_gridspec(1, 2, width_ratios=[1.35, 1.0], wspace=0.30)
+    # Every margin is reserved here rather than nudged afterwards: the header and
+    # footer are figure-level text, which no automatic layout accounts for, so
+    # the axes region is bounded explicitly and the text placed in the bands left
+    # for it. ``wspace`` is wide enough for the colourbar and its rotated label
+    # to sit between the matrix and panel (b)'s own y-label without touching it.
+    figure = _new_figure(width=13.5, height=7.6)
+    grid = figure.add_gridspec(
+        1, 2,
+        width_ratios=[1.35, 1.0], wspace=0.46,
+        left=0.075, right=0.975, top=0.855, bottom=0.145,
+    )
     heat = figure.add_subplot(grid[0, 0])
-    right = grid[0, 1].subgridspec(2, 1, hspace=0.55)
+    right = grid[0, 1].subgridspec(2, 1, hspace=0.62)
     pooled_axes = figure.add_subplot(right[0, 0])
     mixture_axes = figure.add_subplot(right[1, 0])
 
@@ -3332,15 +3341,16 @@ def plot_cross_partition_geometry(
     ticks = np.arange(shown.size)
     heat.set_xticks(ticks)
     heat.set_yticks(ticks)
-    heat.set_xticklabels(labels, rotation=90, fontsize=4.5)
-    heat.set_yticklabels(labels, fontsize=4.5)
+    heat.set_xticklabels(labels, rotation=90, fontsize=5.5)
+    heat.set_yticklabels(labels, fontsize=5.5)
+    heat.tick_params(axis="both", length=2, pad=1.5)
     heat.set_xlabel("greedy-predicted token")
     heat.set_ylabel("target token")
     heat.set_title(
         f"(a) self-excluded cross similarity, {shown.size} tokens", fontsize=10
     )
-    colourbar = figure.colorbar(image, ax=heat, fraction=0.046, pad=0.03)
-    colourbar.set_label("Estimated gradient cosine similarity", fontsize=8)
+    colourbar = figure.colorbar(image, ax=heat, fraction=0.042, pad=0.045)
+    colourbar.set_label("Estimated gradient cosine similarity", fontsize=8, labelpad=6)
     colourbar.ax.tick_params(labelsize=7)
 
     values = [pooled["c_same"], pooled["c_different"], pooled["delta_cross"]]
@@ -3358,8 +3368,9 @@ def plot_cross_partition_geometry(
     pooled_axes.set_xticks(range(3))
     pooled_axes.set_xticklabels(["C_same", "C_different", "delta_cross"], fontsize=8)
     pooled_axes.set_ylabel("mean cosine")
-    pooled_axes.set_title("(b) pooled over all classes", fontsize=10)
-    pooled_axes.legend(loc="best", fontsize=7, frameon=True)
+    pooled_axes.set_title("(b) pooled over all classes", fontsize=10, pad=8)
+    pooled_axes.legend(loc="upper left", fontsize=7, frameon=True, framealpha=0.9)
+    pooled_axes.margins(y=0.22)
     pooled_axes.grid(True, axis="y", alpha=0.20)
 
     if mixture["num_classes"]:
@@ -3376,8 +3387,15 @@ def plot_cross_partition_geometry(
     mixture_axes.set_ylim(-1.05, 1.05)
     mixture_axes.set_xlabel("greedy-class support   [log]")
     mixture_axes.set_ylabel("observed vs mixture")
+    # Support counts over a sub-decade range, which is exactly the case the
+    # default log ticker labels badly; the shared 1-2-5 ladder is reused here.
+    if mixture["num_classes"]:
+        support = np.asarray(mixture["support"], dtype=float)
+        _configure_gradient_panel_x_axis(
+            mixture_axes, float(support.min()), float(support.max())
+        )
     mixture_axes.set_title(
-        "(c) greedy means rebuilt from target means", fontsize=10
+        "(c) greedy means rebuilt from target means", fontsize=10, pad=8
     )
     mixture_axes.grid(True, which="both", alpha=0.20)
 
@@ -3385,7 +3403,7 @@ def plot_cross_partition_geometry(
         "Target-conditioned and greedy-conditioned directional families", fontsize=12
     )
     figure.text(
-        0.5, 0.925,
+        0.5, 0.918,
         "rows: target token   columns: greedy-predicted token   |   "
         "every shared position removed per cell, off-diagonal included   |   "
         f"displayed: {shown.size} tokens by min(target, greedy) support >= {min_support}"
@@ -3394,14 +3412,13 @@ def plot_cross_partition_geometry(
         ha="center", fontsize=7, color="#444444",
     )
     figure.text(
-        0.5, 0.045,
+        0.5, 0.038,
         f"C_same {pooled['c_same']:+.5f}   C_different {pooled['c_different']:+.5f}   "
         f"delta_cross {pooled['delta_cross']:+.5f}   |   null "
         f"[{null['delta_low']:+.5f}, {null['delta_high']:+.5f}] (M = {null['permutations']})"
         f"   |   mixture similarity median {mixture['median_similarity']:.3f}",
         ha="center", fontsize=7, family="monospace", color="#444444",
     )
-    figure.subplots_adjust(top=0.87, bottom=0.16)
     return save_figure(figure, directory, "figure24_cross_partition_geometry")
 
 
@@ -3458,8 +3475,12 @@ def plot_nucleus_temperature_clustering(
     # within-class statistic is carried by a small minority of positions.
     thin = qualifying < 0.5
 
-    figure = _new_figure(width=12.5, height=8.6)
-    grid = figure.add_gridspec(2, 2, height_ratios=[1.0, 0.95], hspace=0.42, wspace=0.26)
+    figure = _new_figure(width=12.5, height=10.2)
+    grid = figure.add_gridspec(
+        2, 2,
+        height_ratios=[0.82, 1.0], hspace=0.36, wspace=0.30,
+        left=0.075, right=0.90, top=0.885, bottom=0.075,
+    )
     trajectory = figure.add_subplot(grid[0, 0])
     support = figure.add_subplot(grid[0, 1])
     cold_axes = figure.add_subplot(grid[1, 0])
@@ -3498,8 +3519,11 @@ def plot_nucleus_temperature_clustering(
     trajectory.axhline(0.0, color="#333333", linewidth=0.8, zorder=2)
     trajectory.set_xlabel("Nucleus sampling temperature")
     trajectory.set_ylabel("pooled delta  (within - between)")
-    trajectory.set_title("(a) clustering against sampling temperature", fontsize=10)
-    trajectory.legend(loc="best", fontsize=7, frameon=True)
+    trajectory.set_title(
+        "(a) clustering against sampling temperature", fontsize=10, pad=8
+    )
+    trajectory.legend(loc="upper left", fontsize=7, frameon=True, framealpha=0.9)
+    trajectory.margins(y=0.16)
     trajectory.grid(True, alpha=0.20)
 
     support.plot(
@@ -3513,8 +3537,10 @@ def plot_nucleus_temperature_clustering(
     support.set_ylim(-0.03, 1.03)
     support.set_xlabel("Nucleus sampling temperature")
     support.set_ylabel("fraction")
-    support.set_title("(b) how much class structure survives", fontsize=10)
-    support.legend(loc="best", fontsize=7, frameon=True)
+    support.set_title(
+        "(b) how much class structure survives", fontsize=10, pad=8
+    )
+    support.legend(loc="center left", fontsize=7, frameon=True, framealpha=0.9)
     support.grid(True, alpha=0.20)
 
     pairs = support.twinx()
@@ -3523,8 +3549,15 @@ def plot_nucleus_temperature_clustering(
         linestyle=":", marker="^", markersize=3,
     )
     pairs.set_yscale("log")
-    pairs.set_ylabel("within-class pairs   [log]", fontsize=8, color="#7f7f7f")
+    pairs.set_ylabel(
+        "within-class pairs   [log]", fontsize=8, color="#7f7f7f", labelpad=6
+    )
     pairs.tick_params(axis="y", labelsize=7, colors="#7f7f7f")
+    from matplotlib.ticker import LogFormatterSciNotation, MaxNLocator, NullFormatter
+
+    pairs.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    pairs.yaxis.set_major_formatter(LogFormatterSciNotation())
+    pairs.yaxis.set_minor_formatter(NullFormatter())
 
     # One scale across both heatmaps: per-panel scales would make any two
     # temperatures look equally structured.
@@ -3549,8 +3582,9 @@ def plot_nucleus_temperature_clustering(
         ticks = np.arange(shown.size)
         axes.set_xticks(ticks)
         axes.set_yticks(ticks)
-        axes.set_xticklabels(labels, rotation=90, fontsize=5)
-        axes.set_yticklabels(labels, fontsize=5)
+        axes.set_xticklabels(labels, rotation=90, fontsize=5.5)
+        axes.set_yticklabels(labels, fontsize=5.5)
+        axes.tick_params(axis="both", length=2, pad=1.5)
         axes.set_title(
             f"T = {entry['temperature']:g}   "
             f"({entry['support']['num_qualifying']:,} qualifying classes, "
@@ -3559,10 +3593,12 @@ def plot_nucleus_temperature_clustering(
         )
     cold_axes.set_ylabel("sampled token")
     figure.text(
-        0.5, 0.455, "(c) coldest and hottest grouping, shared colour scale",
+        0.5, 0.497, "(c) coldest and hottest grouping, shared colour scale",
         ha="center", fontsize=10,
     )
-    colourbar = figure.colorbar(image, ax=[cold_axes, hot_axes], fraction=0.030, pad=0.02)
+    colourbar = figure.colorbar(
+        image, ax=[cold_axes, hot_axes], fraction=0.032, pad=0.035
+    )
     colourbar.set_label("Estimated gradient cosine similarity", fontsize=8)
     colourbar.ax.tick_params(labelsize=7)
 
@@ -3570,7 +3606,7 @@ def plot_nucleus_temperature_clustering(
         "Gradient clustering under the sampled-token grouping", fontsize=12
     )
     figure.text(
-        0.5, 0.935,
+        0.5, 0.938,
         "grouping varies with sampling temperature; the gradients are the T = 1 "
         "gradients throughout   |   "
         f"{by_temperature[0]['num_positions']:,} positions, "
@@ -3578,5 +3614,4 @@ def plot_nucleus_temperature_clustering(
         f"null: {result['permutations']} label permutations per temperature",
         ha="center", fontsize=7, color="#444444",
     )
-    figure.subplots_adjust(top=0.90)
     return save_figure(figure, directory, "figure22_nucleus_temperature_clustering")

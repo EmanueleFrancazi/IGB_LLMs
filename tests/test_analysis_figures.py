@@ -775,3 +775,223 @@ def test_figure_twenty_four_selects_tokens_by_support_not_by_similarity() -> Non
     )
 
     assert by_support != by_similarity
+
+
+# -- layout regressions for the two newest figures ---------------------------
+#
+# Structural rather than pixel-perfect: no baseline images, since the repository
+# has no such infrastructure and brittle rasters would fail on every matplotlib
+# bump. These catch the failures that actually happened -- a colourbar label
+# landing on a neighbouring axis's label, and figure-level header/footer text
+# drawn on top of the axes -- by checking reserved bands and artist counts.
+
+from llm_behavior_lab.analysis.figures import (  # noqa: E402
+    plot_nucleus_temperature_clustering,
+)
+
+
+def _held_figure(function, *args, **kwargs):
+    """Render through the real path but keep the Figure for inspection."""
+
+    import llm_behavior_lab.analysis.figures as module
+
+    held = {}
+    original = module.save_figure
+
+    def capture(figure, *inner_args, **inner_kwargs):
+        held["figure"] = figure
+        return original(figure, *inner_args, **inner_kwargs)
+
+    module.save_figure = capture
+    try:
+        written = function(*args, **kwargs)
+    finally:
+        module.save_figure = original
+    return held["figure"], written
+
+
+def _nucleus_result(record, temperatures=(0.12, 0.24, 0.60, 1.20)):
+    from llm_behavior_lab.analysis.nucleus_clustering import nucleus_clustering
+
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    generator = np.random.default_rng(22)
+    pool = np.unique(greedy)
+    labels = np.stack([
+        np.where(
+            generator.random(greedy.size) < min(1.0, value / 1.4),
+            generator.choice(pool, size=greedy.size),
+            greedy,
+        )
+        for value in temperatures
+    ])
+    return nucleus_clustering(
+        record, labels, list(temperatures), permutations=8, display_classes=10
+    )
+
+
+def _data_axes(figure):
+    """Axes carrying data, i.e. everything that is not a colourbar."""
+
+    return [axes for axes in figure.axes if axes.get_label() != "<colorbar>"]
+
+
+def _colourbar_axes(figure):
+    return [axes for axes in figure.axes if axes.get_label() == "<colorbar>"]
+
+
+def test_figure_twenty_two_has_its_four_panels_and_one_shared_colourbar(tmp_path) -> None:
+    """One colourbar, because the two heatmaps share a scale on purpose."""
+
+    record = _sketch_record()
+    figure, written = _held_figure(
+        plot_nucleus_temperature_clustering,
+        _nucleus_result(record), tmp_path, record=record, display_classes=10,
+    )
+
+    # Four panels plus the twin axis on panel (b).
+    assert len(_data_axes(figure)) == 5
+    assert len(_colourbar_axes(figure)) == 1
+    assert written[0].parent.name == "main"
+    assert figure_category(written[0].stem) == "main"
+
+
+def test_figure_twenty_four_has_its_three_panels_and_one_colourbar(tmp_path) -> None:
+    figure, written = _held_figure(
+        plot_cross_partition_geometry, _sketch_record(), tmp_path, display_classes=10
+    )
+
+    assert len(_data_axes(figure)) == 3
+    assert len(_colourbar_axes(figure)) == 1
+    assert written[0].parent.name == "diagnostics"
+    assert figure_category(written[0].stem) == "diagnostics"
+
+
+@pytest.mark.parametrize("which", ["figure22", "figure24"])
+def test_the_header_and_footer_bands_are_reserved_not_overdrawn(which, tmp_path) -> None:
+    """Figure-level text is invisible to automatic layout, so it gets a band.
+
+    Relying on tight_layout here is what produced the collisions this checks
+    for: every axes must stay clear of the top and bottom strips the header and
+    footer are drawn into.
+    """
+
+    record = _sketch_record()
+    if which == "figure22":
+        figure, _ = _held_figure(
+            plot_nucleus_temperature_clustering,
+            _nucleus_result(record), tmp_path, record=record, display_classes=10,
+        )
+    else:
+        figure, _ = _held_figure(
+            plot_cross_partition_geometry, record, tmp_path, display_classes=10
+        )
+
+    # Only figure 24 carries a summary footer; figure 22 spends that space on a
+    # second row of panels. The band is checked where it exists.
+    footers = [text for text in figure.texts if text.get_position()[1] < 0.10]
+    if which == "figure24":
+        assert footers, "figure 24 should carry a figure-level summary footer"
+    if footers:
+        footer_top = max(text.get_position()[1] for text in footers)
+        for axes in _data_axes(figure) + _colourbar_axes(figure):
+            assert axes.get_position().y0 > footer_top, (
+                f"{axes.get_title() or axes.get_label()} reaches into the footer"
+            )
+
+    for axes in _data_axes(figure) + _colourbar_axes(figure):
+        assert axes.get_position().y1 < 0.94, "an axes reaches into the header band"
+
+
+def test_the_two_heatmaps_do_not_overlap_the_colourbar(tmp_path) -> None:
+    """The colourbar label used to be drawn over a neighbouring y-label."""
+
+    record = _sketch_record()
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        _nucleus_result(record), tmp_path, record=record, display_classes=10,
+    )
+
+    bar = _colourbar_axes(figure)[0].get_position()
+    for axes in _data_axes(figure):
+        box = axes.get_position()
+        overlaps = box.x1 > bar.x0 and box.x0 < bar.x1 and box.y1 > bar.y0 and box.y0 < bar.y1
+        assert not overlaps
+
+
+def test_rendering_does_not_mutate_the_analysis_it_was_given(tmp_path) -> None:
+    """A figure reads results; it must never write back into them."""
+
+    record = _sketch_record()
+    result = _nucleus_result(record)
+    before = {
+        "delta": [e["population"]["delta"] for e in result["by_temperature"]],
+        "null": [e["null"]["delta_low"] for e in result["by_temperature"]],
+        "classes": [e["display"]["classes"].copy() for e in result["by_temperature"]],
+        "matrix": [e["display"]["matrix"].copy() for e in result["by_temperature"]],
+        "sketches": np.asarray(record.gradient_position_sketches).copy(),
+    }
+
+    plot_nucleus_temperature_clustering(
+        result, tmp_path, record=record, display_classes=10
+    )
+    plot_cross_partition_geometry(record, tmp_path, display_classes=10)
+
+    for index, entry in enumerate(result["by_temperature"]):
+        assert entry["population"]["delta"] == before["delta"][index]
+        assert entry["null"]["delta_low"] == before["null"][index]
+        assert np.array_equal(entry["display"]["classes"], before["classes"][index])
+        assert np.allclose(
+            entry["display"]["matrix"], before["matrix"][index], equal_nan=True
+        )
+    assert np.array_equal(
+        np.asarray(record.gradient_position_sketches), before["sketches"]
+    )
+
+
+def test_the_heatmap_axes_keep_one_tick_label_per_displayed_class(tmp_path) -> None:
+    """Thinning labels would silently misalign a reader's row lookup."""
+
+    record = _sketch_record()
+    result = _nucleus_result(record)
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        result, tmp_path, record=record, display_classes=10,
+    )
+
+    heatmaps = [axes for axes in _data_axes(figure) if axes.images]
+    assert len(heatmaps) == 2
+    for axes, entry in zip(heatmaps, (result["by_temperature"][0],
+                                      result["by_temperature"][-1])):
+        expected = min(10, entry["display"]["classes"].size)
+        assert len(axes.get_xticklabels()) == expected
+        assert len(axes.get_yticklabels()) == expected
+
+
+def test_figure_twenty_two_keeps_its_panel_c_title_between_the_two_rows(tmp_path) -> None:
+    """The row label sits in the gap, touching neither row.
+
+    It is figure-level text placed at a fixed height, so a change to the grid
+    ratios can slide a panel underneath it without anything raising.
+    """
+
+    record = _sketch_record()
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        _nucleus_result(record), tmp_path, record=record, display_classes=10,
+    )
+
+    row_label = [
+        text for text in figure.texts
+        if text.get_position()[1] < 0.6 and "coldest and hottest" in text.get_text()
+    ]
+    assert len(row_label) == 1
+    height = row_label[0].get_position()[1]
+
+    boxes = [axes.get_position() for axes in _data_axes(figure)]
+    top_row = [box for box in boxes if box.y0 > height]
+    bottom_row = [box for box in boxes if box.y1 < height]
+
+    assert len(top_row) == 3          # trajectory, support, and support's twin
+    assert len(bottom_row) == 2       # the two heatmaps
+    assert min(box.y0 for box in top_row) - height > 0.01
+    assert height - max(box.y1 for box in bottom_row) > 0.01
