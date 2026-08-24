@@ -457,18 +457,25 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         # (T_s, T_g) pairs from what was measured is the paired nucleus
         # analysis's job, not this one's.
         "gradient_temperatures": _resolve_gradient_temperatures(
-            getattr(args, "gradient_temperatures", None)
-            or gradients.get("temperatures")
+            getattr(args, "gradient_temperatures", None),
+            gradients.get("temperatures"),
         ),
     }
 
 
 
-def _resolve_gradient_temperatures(requested: Any) -> tuple[float, ...]:
+def _resolve_gradient_temperatures(
+    requested: Any, from_config: Any = None
+) -> tuple[float, ...]:
     """The loss temperatures to measure gradient fields at.
 
     Omitted keeps the established seven-value grid, so a run that says nothing
     about temperatures measures exactly what it always did.
+
+    Precedence is resolved here, on ``None`` rather than on truthiness. An
+    explicitly empty request is a mistake worth reporting, and ``requested or
+    from_config`` would silently turn it into "nothing was asked for" and hand
+    back the default grid -- which is exactly what it did.
 
     The canonical ``T = 1`` is required rather than optional: the record's
     canonical norm and sketch fields are that row, and figure 20 and the vector
@@ -480,6 +487,8 @@ def _resolve_gradient_temperatures(requested: Any) -> tuple[float, ...]:
     the order measured and persisted.
     """
 
+    if requested is None:
+        requested = from_config
     if requested is None:
         return GRADIENT_TEMPERATURES
 

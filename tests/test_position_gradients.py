@@ -728,10 +728,57 @@ def test_an_unusable_gradient_temperature_is_rejected(bad) -> None:
 
 
 def test_an_empty_requested_grid_is_rejected() -> None:
+    """Asking for nothing is a mistake, not a request for the default.
+
+    Resolving precedence with ``requested or from_config`` conflated the two:
+    an empty list is falsy, so it fell through to the config, found nothing,
+    and silently measured the default seven-value grid.
+    """
+
     resolve = _load_runner()
 
     with pytest.raises(ValueError, match="must not be empty"):
         resolve({}, _args(gradient_temperatures=[]))
+
+
+def test_an_empty_request_is_rejected_even_when_the_config_has_values() -> None:
+    """The empty request must not fall through to the config either."""
+
+    resolve = _load_runner()
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        resolve(
+            {"gradient_analysis": {"temperatures": [0.12, 0.60]}},
+            _args(gradient_temperatures=[]),
+        )
+
+
+def test_an_empty_config_grid_is_rejected() -> None:
+    resolve = _load_runner()
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        resolve({"gradient_analysis": {"temperatures": []}}, _args())
+
+
+def test_omitting_the_grid_is_distinct_from_asking_for_an_empty_one() -> None:
+    """The two paths a None-blind precedence rule would merge."""
+
+    resolve = _load_runner()
+
+    assert resolve({}, _args())["gradient_temperatures"] == GRADIENT_TEMPERATURES
+    with pytest.raises(ValueError):
+        resolve({}, _args(gradient_temperatures=[]))
+
+
+def test_the_cli_grid_overrides_the_config_grid() -> None:
+    resolve = _load_runner()
+
+    protocol = resolve(
+        {"gradient_analysis": {"temperatures": [0.12, 0.24]}},
+        _args(gradient_temperatures=[0.60, 1.0]),
+    )
+
+    assert protocol["gradient_temperatures"] == (0.60, 1.0)
 
 
 def test_the_measurement_honours_the_requested_grid() -> None:
