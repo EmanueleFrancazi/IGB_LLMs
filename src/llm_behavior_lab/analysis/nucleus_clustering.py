@@ -43,6 +43,7 @@ from llm_behavior_lab.analysis.temperature_pairs import temperature_pairs
 
 __all__ = [
     "histogram_gate",
+    "select_recorded_histograms",
     "nucleus_clustering",
     "resolve_forward_batch_size",
     "support_diagnostics",
@@ -313,6 +314,73 @@ def nucleus_clustering(
         "permutations": int(permutations),
         "permutation_seed": int(permutation_seed),
     }
+
+
+def select_recorded_histograms(
+    recorded_temperatures: Sequence[float],
+    requested_temperatures: Sequence[float],
+    recorded_counts: np.ndarray,
+) -> dict[str, Any]:
+    """Line up recorded nucleus histograms with the temperatures asked for.
+
+    A reconstruction need not cover the whole recorded sweep. Reproducing one
+    temperature is a legitimate request -- it is how an unmeasured loss
+    temperature was diagnosed -- and the gate should compare that temperature
+    against its own recorded histogram rather than refusing because five others
+    were not asked for.
+
+    What must not happen is a request quietly matching the wrong row. Matching
+    is therefore exact within the same narrow tolerance the loss-temperature
+    lookup uses: wide enough for a value that has passed through float32, far
+    too narrow for two temperatures on a 0.12 grid to alias. A requested
+    temperature the run never recorded is refused; nothing is interpolated and
+    no neighbouring histogram is substituted.
+
+    Repeats are allowed and mean what they say: the same recorded histogram is
+    selected twice, so a sweep pairing one ``T_s`` against two different ``T_g``
+    keeps both of its points.
+
+    Returns:
+        ``counts`` ``[len(requested), V]`` in requested order, and ``indices``,
+        the recorded row each request selected.
+    """
+
+    from llm_behavior_lab.analysis.directional_fields import (
+        TEMPERATURE_MATCH_TOLERANCE,
+    )
+
+    recorded = np.asarray(recorded_temperatures, dtype=np.float64).reshape(-1)
+    requested = np.asarray(requested_temperatures, dtype=np.float64).reshape(-1)
+    counts = np.asarray(recorded_counts)
+    if requested.size == 0:
+        raise ValueError("No sampling temperatures were requested.")
+    if counts.shape[0] != recorded.size:
+        raise ValueError(
+            f"{counts.shape[0]} recorded histogram(s) against {recorded.size} "
+            "recorded sampling temperature(s)."
+        )
+
+    indices = []
+    for value in requested:
+        close = np.flatnonzero(
+            np.abs(recorded - value) <= TEMPERATURE_MATCH_TOLERANCE
+        )
+        if close.size == 0:
+            listed = ", ".join(f"{item:g}" for item in recorded)
+            raise ValueError(
+                f"This run recorded no nucleus histogram at sampling temperature "
+                f"T_s = {value:g}, so labels reconstructed there could not be "
+                f"gated. Recorded: {listed}."
+            )
+        if close.size > 1:
+            raise ValueError(
+                f"Sampling temperature T_s = {value:g} matches {close.size} "
+                "recorded temperatures, which cannot be resolved unambiguously."
+            )
+        indices.append(int(close[0]))
+
+    order = np.asarray(indices, dtype=np.int64)
+    return {"counts": counts[order], "indices": order}
 
 
 def histogram_gate(

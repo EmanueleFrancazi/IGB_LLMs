@@ -42,6 +42,8 @@ from llm_behavior_lab.evaluation.init_distribution import (
 )
 from llm_behavior_lab.evaluation.init_distribution import build_evaluation_positions
 from llm_behavior_lab.evaluation.position_gradients import (
+    CANONICAL_GRADIENT_TEMPERATURE,
+    GRADIENT_TEMPERATURES,
     compute_position_gradient_norms,
     evenly_spaced_indices,
     masked_evaluation_logits,
@@ -598,7 +600,7 @@ def _args(**overrides) -> argparse.Namespace:
         "temperatures": None, "no_temperature_sweep": False,
         "no_uniform_null": False, "no_input_structure": False,
         "gradient_analysis": False, "no_gradient_analysis": False,
-        "gradient_windows": None,
+        "gradient_windows": None, "gradient_temperatures": None,
     }
     fields.update(overrides)
     return argparse.Namespace(**fields)
@@ -659,3 +661,98 @@ def test_gradient_window_subset_resolution() -> None:
         == 3
     )
     assert resolve({}, _args())["gradient_initialization_index"] == 0
+
+
+# -- which loss temperatures get measured ------------------------------------
+
+
+def test_the_gradient_temperature_grid_defaults_to_the_established_one() -> None:
+    """A run that says nothing must measure exactly what it always did."""
+
+    resolve = _load_runner()
+
+    assert resolve({}, _args())["gradient_temperatures"] == GRADIENT_TEMPERATURES
+
+
+def test_the_gradient_temperature_grid_can_be_requested_from_either_side() -> None:
+    resolve = _load_runner()
+
+    from_cli = resolve({}, _args(gradient_temperatures=[0.12, 0.60, 1.0]))
+    from_config = resolve(
+        {"gradient_analysis": {"temperatures": [0.12, 0.60, 1.0]}}, _args()
+    )
+
+    assert from_cli["gradient_temperatures"] == (0.12, 0.60, 1.0)
+    assert from_config["gradient_temperatures"] == (0.12, 0.60, 1.0)
+
+
+def test_the_requested_measurement_order_is_preserved() -> None:
+    """The axis is persisted in this order, so it must not be re-sorted."""
+
+    resolve = _load_runner()
+
+    grid = resolve({}, _args(gradient_temperatures=[1.20, 0.12, 1.0]))
+
+    assert grid["gradient_temperatures"] == (1.20, 0.12, 1.0)
+
+
+def test_a_repeated_temperature_collapses_to_its_first_occurrence() -> None:
+    resolve = _load_runner()
+
+    grid = resolve({}, _args(gradient_temperatures=[0.60, 0.12, 0.60, 1.0]))
+
+    assert grid["gradient_temperatures"] == (0.60, 0.12, 1.0)
+
+
+def test_the_canonical_temperature_is_added_when_omitted() -> None:
+    """The record's canonical norm and sketch fields are that row.
+
+    Leaving it out is far more likely a slip than a decision to abandon every
+    canonical analysis, so the grid is completed rather than rejected.
+    """
+
+    resolve = _load_runner()
+
+    grid = resolve({}, _args(gradient_temperatures=[0.12, 0.60]))
+
+    assert grid["gradient_temperatures"] == (0.12, 0.60, 1.0)
+    assert CANONICAL_GRADIENT_TEMPERATURE in grid["gradient_temperatures"]
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.5, float("inf"), float("nan")])
+def test_an_unusable_gradient_temperature_is_rejected(bad) -> None:
+    resolve = _load_runner()
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        resolve({}, _args(gradient_temperatures=[0.12, bad]))
+
+
+def test_an_empty_requested_grid_is_rejected() -> None:
+    resolve = _load_runner()
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        resolve({}, _args(gradient_temperatures=[]))
+
+
+def test_the_measurement_honours_the_requested_grid() -> None:
+    """End to end: the axis measured is the axis asked for."""
+
+    requested = (0.12, 1.0)
+    result = _measure(
+        _build_model(),
+        _positions(),
+        temperatures=requested,
+        gradient_sketch=True,
+        sketch_dimension=8,
+    )
+
+    assert result.temperatures == requested
+    assert result.temperature_gradient_norms.shape[0] == len(requested)
+    assert result.temperature_gradient_sketches.shape[0] == len(requested)
+    canonical = requested.index(CANONICAL_GRADIENT_TEMPERATURE)
+    assert torch.equal(
+        result.temperature_gradient_sketches[canonical], result.gradient_sketches
+    )
+    assert torch.equal(
+        result.temperature_gradient_norms[canonical], result.gradient_norms
+    )

@@ -239,3 +239,210 @@ def test_an_impossible_batch_size_is_rejected_from_either_source() -> None:
         resolve_forward_batch_size({"forward_batch_size": 4}, 0)
     with pytest.raises(ValueError, match="cannot"):
         resolve_forward_batch_size({"forward_batch_size": 0})
+
+
+# -- reconstructing a subset of the recorded sweep ---------------------------
+#
+# A reconstruction need not cover every recorded temperature. Refusing a subset
+# is what stopped an unmeasured-T_g request from ever reaching the check that
+# was supposed to reject it, so the gate now compares only what was asked for --
+# against that temperature's own recorded histogram, and no other.
+
+from llm_behavior_lab.analysis.nucleus_clustering import select_recorded_histograms
+
+RECORDED = (0.12, 0.24, 0.36, 0.48, 0.60, 1.20)
+
+
+def _recorded_counts():
+    """One distinguishable histogram per recorded temperature.
+
+    Equal totals across temperatures, because every temperature sampled the
+    same positions; only which tokens they landed on differs.
+    """
+
+    counts = np.zeros((len(RECORDED), VOCAB), dtype=np.int64)
+    for index in range(len(RECORDED)):
+        counts[index, index + 2] = 4
+        counts[index, 1] = 2
+    return counts
+
+
+def test_the_whole_recorded_sweep_still_selects_itself() -> None:
+    counts = _recorded_counts()
+
+    selection = select_recorded_histograms(RECORDED, RECORDED, counts)
+
+    assert np.array_equal(selection["indices"], np.arange(len(RECORDED)))
+    assert np.array_equal(selection["counts"], counts)
+
+
+def test_a_single_temperature_subset_selects_only_its_own_histogram() -> None:
+    counts = _recorded_counts()
+
+    selection = select_recorded_histograms(RECORDED, [0.36], counts)
+
+    assert selection["counts"].shape == (1, VOCAB)
+    assert np.array_equal(selection["indices"], [2])
+    assert np.array_equal(selection["counts"][0], counts[2])
+
+
+def test_a_multi_element_subset_selects_exactly_those_histograms() -> None:
+    counts = _recorded_counts()
+
+    selection = select_recorded_histograms(RECORDED, [0.24, 1.20], counts)
+
+    assert np.array_equal(selection["indices"], [1, 5])
+    assert np.array_equal(selection["counts"], counts[[1, 5]])
+
+
+def test_the_requested_order_is_honoured_rather_than_the_stored_order() -> None:
+    """A request out of stored order must not be silently re-sorted."""
+
+    counts = _recorded_counts()
+
+    selection = select_recorded_histograms(RECORDED, [1.20, 0.12, 0.48], counts)
+
+    assert np.array_equal(selection["indices"], [5, 0, 3])
+    assert np.array_equal(selection["counts"][0], counts[5])
+    assert np.array_equal(selection["counts"][1], counts[0])
+
+
+def test_a_repeated_request_selects_the_same_histogram_twice() -> None:
+    """Well-defined: one T_s paired against two T_g keeps both points."""
+
+    counts = _recorded_counts()
+
+    selection = select_recorded_histograms(RECORDED, [0.12, 0.12], counts)
+
+    assert np.array_equal(selection["indices"], [0, 0])
+    assert np.array_equal(selection["counts"][0], selection["counts"][1])
+
+
+def test_an_unrecorded_sampling_temperature_is_refused() -> None:
+    counts = _recorded_counts()
+
+    with pytest.raises(ValueError) as failure:
+        select_recorded_histograms(RECORDED, [0.37], counts)
+
+    message = str(failure.value)
+    assert "T_s = 0.37" in message
+    assert "0.12, 0.24, 0.36, 0.48, 0.6, 1.2" in message
+
+
+def test_a_float_round_tripped_request_still_matches() -> None:
+    counts = _recorded_counts()
+
+    selection = select_recorded_histograms(
+        RECORDED, [float(np.float32(0.36))], counts
+    )
+
+    assert np.array_equal(selection["indices"], [2])
+
+
+def test_a_near_miss_does_not_alias_onto_a_neighbour() -> None:
+    counts = _recorded_counts()
+
+    with pytest.raises(ValueError, match="recorded no nucleus histogram"):
+        select_recorded_histograms(RECORDED, [0.30], counts)
+
+
+def test_an_empty_request_is_refused() -> None:
+    with pytest.raises(ValueError, match="No sampling temperatures"):
+        select_recorded_histograms(RECORDED, [], _recorded_counts())
+
+
+def test_a_histogram_count_that_does_not_match_the_axis_is_refused() -> None:
+    with pytest.raises(ValueError, match="recorded histogram"):
+        select_recorded_histograms(RECORDED, [0.12], _recorded_counts()[:3])
+
+
+def test_a_subset_still_aborts_on_a_mismatch_inside_it() -> None:
+    """The gate is not weakened by narrowing what it covers."""
+
+    counts = _recorded_counts()
+    selection = select_recorded_histograms(RECORDED, [0.24, 0.48], counts)
+    labels = np.stack([_labels_for(counts[1]), _labels_for(counts[3])])
+
+    # Exactly reproduced: passes.
+    assert histogram_gate(
+        labels, selection["counts"], vocab_size=VOCAB, temperatures=[0.24, 0.48]
+    )["passed"]
+
+    # One position moved inside the second selected temperature: aborts.
+    broken = selection["counts"].copy()
+    broken[1][3] -= 1
+    broken[1][4] += 1
+    with pytest.raises(ValueError, match="T = 0.48"):
+        histogram_gate(labels, broken, vocab_size=VOCAB, temperatures=[0.24, 0.48])
+
+
+def test_only_the_selected_histograms_are_compared() -> None:
+    """An unselected temperature's histogram cannot fail the gate."""
+
+    counts = _recorded_counts()
+    # Corrupt a temperature that is not requested, keeping its total intact so
+    # only the selection can explain the gate passing.
+    counts[4] = 0
+    counts[4][0] = 6
+    selection = select_recorded_histograms(RECORDED, [0.12, 0.24], counts)
+    labels = np.stack([_labels_for(counts[0]), _labels_for(counts[1])])
+
+    result = histogram_gate(
+        labels, selection["counts"], vocab_size=VOCAB, temperatures=[0.12, 0.24]
+    )
+
+    assert result["passed"]
+
+
+def _labels_for(counts: np.ndarray) -> np.ndarray:
+    """A label vector whose histogram is exactly ``counts``."""
+
+    return np.repeat(np.arange(counts.size), counts).astype(np.int64)
+
+
+def test_an_unmeasured_loss_temperature_is_refused_before_reconstruction() -> None:
+    """Ordering matters, not just the eventual error.
+
+    A T_g the record never measured can never succeed, so discovering it after
+    building the model and recovering labels wastes the expensive half of the
+    work -- which is exactly what happened: the request never reached the
+    directional-field lookup at all. The check is asserted to sit ahead of every
+    expensive call in ``main``. The writer imports PyTorch at module scope, so
+    this reads the source rather than executing it.
+    """
+
+    import ast
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "write_nucleus_clustering_artifact.py"
+    )
+    tree = ast.parse(script.read_text())
+    main = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+
+    def first_line(name: str) -> int:
+        lines = [
+            node.lineno
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == name
+        ]
+        assert lines, f"{name} is not called in main()"
+        return min(lines)
+
+    validation = first_line("loss_temperature_index")
+    for expensive in (
+        "build_model_from_config",
+        "nucleus_position_labels",
+        "seed_everything",
+        "histogram_gate",
+    ):
+        assert validation < first_line(expensive), (
+            f"the T_g check must run before {expensive}"
+        )

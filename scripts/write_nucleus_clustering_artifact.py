@@ -45,10 +45,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from llm_behavior_lab.analysis import load_record  # noqa: E402
+from llm_behavior_lab.analysis.directional_fields import (  # noqa: E402
+    available_loss_temperatures,
+    loss_temperature_index,
+)
 from llm_behavior_lab.analysis.nucleus_clustering import (  # noqa: E402
     histogram_gate,
     nucleus_clustering,
     resolve_forward_batch_size,
+    select_recorded_histograms,
+)
+from llm_behavior_lab.analysis.temperature_pairs import (  # noqa: E402
+    temperature_pairs,
 )
 from llm_behavior_lab.data import (  # noqa: E402
     DatasetConfig,
@@ -186,14 +194,18 @@ def main() -> None:
         if args.sampling_temperatures is None
         else [float(value) for value in args.sampling_temperatures]
     )
-    unknown = sorted(set(sampling_temperatures) - set(recorded_sweep))
-    if unknown:
-        raise SystemExit(
-            "This record recorded nucleus histograms only at T_s = "
-            f"{', '.join(f'{v:g}' for v in recorded_sweep)}, so the labels at "
-            f"{', '.join(f'{v:g}' for v in unknown)} cannot be gated. Reproduction "
-            "without that gate is not offered."
+    # Selects the recorded histogram per requested T_s, in requested order. A
+    # subset is fine; an unrecorded temperature is not, because its labels could
+    # not be gated.
+    recorded_counts = record.sweep_counts("real")[
+        int(gradient_metadata["initialization_index"])
+    ]
+    try:
+        selection = select_recorded_histograms(
+            recorded_sweep, sampling_temperatures, recorded_counts
         )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
     # T_g defaults to the canonical field: that is the established control, and
     # it is the only choice a record predating the temperature-resolved sketches
@@ -204,6 +216,18 @@ def main() -> None:
         loss_temperatures = list(sampling_temperatures)
     else:
         loss_temperatures = [float(value) for value in args.loss_temperatures]
+
+    # Validated here, on the arrays already in hand, and deliberately before the
+    # model is built: a request for a loss temperature this record never
+    # measured is a request that can never succeed, and discovering that after a
+    # full forward reconstruction wastes the expensive half of the work.
+    try:
+        pairs = temperature_pairs(sampling_temperatures, loss_temperatures)
+        for value in pairs["unique_loss"]:
+            loss_temperature_index(record, float(value))
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
     initialization_index = int(gradient_metadata["initialization_index"])
     model_seed = int(analysis["model_seeds"][initialization_index])
 
@@ -260,10 +284,6 @@ def main() -> None:
         f"(seed {model_seed}), {positions.num_positions:,} positions, "
         f"T_s = {', '.join(f'{value:g}' for value in sampling_temperatures)}"
     )
-    from llm_behavior_lab.analysis.directional_fields import (
-        available_loss_temperatures,
-    )
-
     print(
         f"Loss temperatures: T_g = "
         f"{', '.join(f'{value:g}' for value in loss_temperatures)}"
@@ -290,12 +310,19 @@ def main() -> None:
         device=device,
     )
 
+    # Labels are recovered once per unique T_s; expanding back to the requested
+    # order is what lets one T_s appear against several T_g without being
+    # reconstructed again.
+    unique_order = list(recovered["temperatures"])
+    rows = [unique_order.index(float(value)) for value in sampling_temperatures]
+    labels_by_request = recovered["labels"][rows]
+
     # -- the gate, before anything is computed from the labels ---------------
     gate = histogram_gate(
-        recovered["labels"],
-        record.sweep_counts("real")[initialization_index],
+        labels_by_request,
+        selection["counts"],
         vocab_size=tokenizer.vocab_size,
-        temperatures=recovered["temperatures"],
+        temperatures=sampling_temperatures,
     )
     # Printed on success as well as failure. Zeros stated explicitly are the
     # evidence the check ran; silence on success would look the same as no gate.
@@ -317,8 +344,8 @@ def main() -> None:
     # -- clustering ----------------------------------------------------------
     result = nucleus_clustering(
         record,
-        recovered["labels"],
-        recovered["temperatures"],
+        labels_by_request,
+        sampling_temperatures,
         loss_temperatures=loss_temperatures,
         min_support=args.min_support,
         display_classes=args.display_classes,
@@ -347,7 +374,7 @@ def main() -> None:
         "min_support": np.array(result["min_support"]),
         "permutations": np.array(result["permutations"]),
         "permutation_seed": np.array(result["permutation_seed"]),
-        "nucleus_labels": recovered["labels"],
+        "nucleus_labels": labels_by_request,
         "delta": np.array([e["population"]["delta"] for e in result["by_temperature"]]),
         "within": np.array([e["population"]["within"] for e in result["by_temperature"]]),
         "between": np.array(

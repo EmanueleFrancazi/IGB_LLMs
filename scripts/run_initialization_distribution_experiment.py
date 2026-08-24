@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 import resource
 import sys
 import time
@@ -74,6 +75,8 @@ from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     measure_initialization,
 )
 from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    CANONICAL_GRADIENT_TEMPERATURE,
+    GRADIENT_TEMPERATURES,
     DEFAULT_SKETCH_DIMENSION,
     compute_position_gradient_norms,
 )
@@ -242,10 +245,11 @@ def parse_args() -> argparse.Namespace:
         "--gradient-sketch",
         action="store_true",
         help=(
-            "Also record a deterministic count sketch of every position's T = 1 "
-            "gradient, so directional clustering by token subgroup can be "
-            "measured afterwards. Adds no backward pass; persists one compact "
-            "vector per position (about 67 MB at D = 32768, K = 512)."
+            "Also record a deterministic count sketch of every position's "
+            "gradient at every measured loss temperature, so directional "
+            "clustering by token subgroup can be measured afterwards. Adds no "
+            "backward pass; persists one compact vector per position and "
+            "temperature (about 470 MB at D = 32768, K = 512, 7 temperatures)."
         ),
     )
     parser.add_argument(
@@ -254,6 +258,22 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SKETCH_DIMENSION,
         metavar="K",
         help="Width of that sketch.",
+    )
+    parser.add_argument(
+        "--gradient-temperatures",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="T",
+        help=(
+            "Loss temperatures T_g to measure gradient fields at, in the order "
+            "they are measured and persisted. Defaults to the established grid "
+            "0.12 0.24 0.36 0.48 0.60 1.00 1.20. Duplicates collapse; the "
+            "canonical T = 1 is added if omitted, since the record's canonical "
+            "norm and sketch fields are that row. This selects what is "
+            "MEASURED; which (T_s, T_g) pairs are analysed is chosen later by "
+            "scripts/write_nucleus_clustering_artifact.py."
+        ),
     )
     parser.add_argument(
         "--gradient-windows",
@@ -433,8 +453,50 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             if args.gradient_windows is not None
             else gradients.get("num_windows")
         ),
+        # Which LOSS temperatures the gradient fields are measured at. Selecting
+        # (T_s, T_g) pairs from what was measured is the paired nucleus
+        # analysis's job, not this one's.
+        "gradient_temperatures": _resolve_gradient_temperatures(
+            getattr(args, "gradient_temperatures", None)
+            or gradients.get("temperatures")
+        ),
     }
 
+
+
+def _resolve_gradient_temperatures(requested: Any) -> tuple[float, ...]:
+    """The loss temperatures to measure gradient fields at.
+
+    Omitted keeps the established seven-value grid, so a run that says nothing
+    about temperatures measures exactly what it always did.
+
+    The canonical ``T = 1`` is required rather than optional: the record's
+    canonical norm and sketch fields are that row, and figure 20 and the vector
+    split are defined on it. A grid that leaves it out is completed rather than
+    rejected, since the omission is far more likely a slip than a request to
+    abandon every canonical analysis.
+
+    Duplicates collapse to their first occurrence, and the surviving order is
+    the order measured and persisted.
+    """
+
+    if requested is None:
+        return GRADIENT_TEMPERATURES
+
+    values = [float(value) for value in requested]
+    if not values:
+        raise ValueError("--gradient-temperatures must not be empty.")
+    for value in values:
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(
+                f"Every gradient temperature must be finite and positive; got "
+                f"{value:g}. Softmax at T = 0 is undefined, and greedy is the "
+                "T -> 0 limit rather than a temperature that can be measured."
+            )
+    grid = tuple(dict.fromkeys(values))
+    if CANONICAL_GRADIENT_TEMPERATURE not in grid:
+        grid = grid + (CANONICAL_GRADIENT_TEMPERATURE,)
+    return grid
 
 
 def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
@@ -863,6 +925,7 @@ def main() -> None:
                 vocab_size=tokenizer.vocab_size,
                 eligible_token_ids=eligible_token_ids,
                 num_windows=protocol["gradient_num_windows"],
+                temperatures=protocol["gradient_temperatures"],
                 vector_split=protocol["gradient_vector_split"],
                 gradient_sketch=protocol["gradient_sketch"],
                 sketch_dimension=protocol["sketch_dimension"],
