@@ -154,8 +154,26 @@ class PositionGradientResult:
     #: ``None`` when the diagnostic was not requested.
     vector_split: dict[str, Any] | None = None
     #: ``[D_g, K]`` count sketch of each position's canonical gradient, or
-    #: ``None`` when sketching was not requested.
+    #: ``None`` when sketching was not requested. Always the canonical row of
+    #: ``temperature_gradient_sketches`` rather than a separately measured
+    #: quantity, so the two cannot disagree.
     gradient_sketches: torch.Tensor | None = None
+
+    #: ``[N_T, D_g, K]`` count sketch of every position's gradient at every
+    #: measured loss temperature, or ``None`` when sketching was not requested.
+    #:
+    #: Direction, unlike magnitude, is not recoverable from a scalar, so a
+    #: directional analysis at ``T_g != 1`` needs its own projection. Each row is
+    #: produced from the very gradient set whose exact norm sits in the matching
+    #: row of ``temperature_gradient_norms`` -- the same backward pass, no second
+    #: traversal -- which is what keeps the pair aligned by construction.
+    #:
+    #: Stored float32. The projection itself accumulates in float64 inside
+    #: :meth:`_GradientSketcher.project`; only the finished ``[K]`` vector is
+    #: narrowed, and the record persists sketches at float32 anyway, so the
+    #: canonical row is bit-for-bit what it always was. At ``N_T = 7,
+    #: D_g = 32768, K = 512`` this is about 470 MB, against 940 MB in float64.
+    temperature_gradient_sketches: torch.Tensor | None = None
     #: Provenance of that projection, or ``None``.
     sketch_protocol: dict[str, Any] | None = None
     #: ``[m, P]`` complete float32 gradients for the sanity subset, or ``None``.
@@ -713,8 +731,13 @@ def compute_position_gradient_norms(
         if gradient_sketch
         else None
     )
-    sketches = (
-        torch.empty((total_positions, sketch_dimension), dtype=torch.float64)
+    # One tensor for every temperature. The canonical row is taken from it at
+    # the end rather than accumulated separately, so no second T = 1 gradient
+    # field can drift away from this one.
+    temperature_sketches = (
+        torch.empty(
+            (len(grid), total_positions, sketch_dimension), dtype=torch.float32
+        )
         if gradient_sketch
         else None
     )
@@ -776,10 +799,13 @@ def compute_position_gradient_norms(
 
                     gradient_norms[index, cursor] = squared.sqrt().cpu()
                     losses[index, cursor] = loss.detach().double().cpu()
-                    if sketcher is not None and index == canonical_temperature_index:
-                        # Same gradient set the norm came from; no second
-                        # backward pass and nothing full-sized is retained.
-                        sketches[cursor] = sketcher.project(grads).cpu()
+                    if sketcher is not None:
+                        # Same gradient set the norm came from, at this very
+                        # temperature; no second backward pass and nothing
+                        # full-sized is retained.
+                        temperature_sketches[index, cursor] = (
+                            sketcher.project(grads).cpu()
+                        )
                     if (
                         wanted
                         and index == canonical_temperature_index
@@ -824,7 +850,10 @@ def compute_position_gradient_norms(
         gradient_norms=gradient_norms[canonical],
         losses=losses[canonical],
         vector_split=None if split is None else split.summary(),
-        gradient_sketches=sketches,
+        temperature_gradient_sketches=temperature_sketches,
+        gradient_sketches=(
+            None if temperature_sketches is None else temperature_sketches[canonical]
+        ),
         exact_gradients=(
             None
             if not captured

@@ -43,7 +43,7 @@ __all__ = [
 #: exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 10
+RECORD_VERSION = 11
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -164,6 +164,23 @@ _MEAN_TOKEN_ARRAY_NAME = "predictive_temperature_mean_token_probabilities"
 #: Optional, like every array added since version 5: a record written without it
 #: stays valid and every figure that does not need it still renders.
 _GRADIENT_SKETCH_ARRAY_NAME = "gradient_position_sketches"
+
+#: Version 11 addition: ``[N_T, D_g, K]`` count sketch of every evaluated
+#: position's gradient at every measured loss temperature.
+#:
+#: The norms already spanned this axis, but a norm is a scalar and a direction
+#: is not recoverable from one, so a directional analysis at ``T_g != 1`` needs
+#: its own projection. Each row comes from the same backward pass as the
+#: matching row of ``gradient_temperature_position_norms``.
+#:
+#: About 470 MB at ``N_T = 7, D_g = 32768, K = 512`` in float32 -- much the
+#: largest array in the record, and the reason it stays optional: a run needing
+#: only the canonical direction should not pay for it.
+#:
+#: Its canonical ``T = 1`` slice is the same measured field as
+#: ``gradient_position_sketches``, and validation asserts they are equal, just
+#: as it already does for the norms.
+_GRADIENT_TEMPERATURE_SKETCH_ARRAY_NAME = "gradient_temperature_position_sketches"
 
 
 def _atomic_write_bytes(path: Path, write) -> Path:
@@ -292,6 +309,9 @@ class InitializationExperimentRecord:
     gradient_temperatures: np.ndarray | None = None
     #: ``[N_T, D_g]`` exact full-parameter gradient norm at each temperature.
     gradient_temperature_position_norms: np.ndarray | None = None
+    #: ``[N_T, D_g, K]`` count sketch of each position's gradient at each
+    #: temperature. Its canonical row equals ``gradient_position_sketches``.
+    gradient_temperature_position_sketches: np.ndarray | None = None
     #: ``[N_T]`` diagnostic temperatures, in the order the arrays are indexed by.
     predictive_temperatures: np.ndarray | None = None
     #: ``[I, N_T, K]`` ranked profile at each diagnostic temperature.
@@ -530,6 +550,21 @@ class InitializationExperimentRecord:
         """Whether per-position parameter-gradient norms were recorded."""
 
         return self.gradient_position_norms is not None
+
+    @property
+    def has_temperature_gradient_sketches(self) -> bool:
+        """Whether directional information exists beyond the canonical ``T``.
+
+        A record without this carries direction at ``T = 1`` only. It is still a
+        complete record; it simply cannot answer a question about ``T_g != 1``,
+        and has to say so rather than substituting the canonical field.
+        """
+
+        return (
+            self.gradient_temperature_position_sketches is not None
+            and self.gradient_temperatures is not None
+            and self.gradient_position_norms is not None
+        )
 
     @property
     def has_gradient_position_sketches(self) -> bool:
@@ -1070,6 +1105,51 @@ class InitializationExperimentRecord:
                 "gradient_position_norms; the established T = 1 observable and its "
                 "own baseline slice must be identical."
             )
+        self._validate_temperature_gradient_sketches(int(canonical[0]))
+
+    def _validate_temperature_gradient_sketches(self, canonical_index: int) -> None:
+        """Check the temperature-resolved directional field, if present.
+
+        The invariant worth stating is the last one, and it is the same one the
+        norms already carry: the canonical slice must *be* the canonical field,
+        not merely resemble it. Two independently measured ``T = 1`` gradient
+        fields that happen to agree would be a coincidence to re-establish on
+        every run; one measured field read twice cannot disagree.
+        """
+
+        sketches = self.gradient_temperature_position_sketches
+        if sketches is None:
+            return
+        if self.gradient_position_sketches is None:
+            raise ValueError(
+                "gradient_temperature_position_sketches was given without "
+                "gradient_position_sketches, so its canonical slice has nothing "
+                "to be checked against."
+            )
+        temperatures = self.gradient_temperatures
+        expected = (
+            temperatures.shape[0],
+            int(self.gradient_position_norms.shape[0]),
+            int(np.asarray(self.gradient_position_sketches).shape[1]),
+        )
+        if sketches.shape != expected:
+            raise ValueError(
+                "gradient_temperature_position_sketches must have shape "
+                f"[temperatures, positions, K] {expected}; got {sketches.shape}."
+            )
+        if not np.all(np.isfinite(sketches)):
+            raise ValueError(
+                "gradient_temperature_position_sketches must be finite."
+            )
+        if not np.array_equal(
+            sketches[canonical_index], np.asarray(self.gradient_position_sketches)
+        ):
+            raise ValueError(
+                "The canonical row of gradient_temperature_position_sketches "
+                "differs from gradient_position_sketches. They must be the same "
+                "measured field: a directional analysis at T = 1 has to give the "
+                "same answer whichever array it reads."
+            )
 
     def _validate_mean_token_probabilities(self, num_inits: int, vocab_size: int) -> None:
         """Check the identity-preserving mean token probabilities.
@@ -1149,7 +1229,11 @@ class InitializationExperimentRecord:
             + _PROBABILITY_ARRAY_NAMES
             + _TEMPERATURE_ARRAY_NAMES
             + _GRADIENT_TEMPERATURE_ARRAY_NAMES
-            + (_MEAN_TOKEN_ARRAY_NAME, _GRADIENT_SKETCH_ARRAY_NAME)
+            + (
+                _MEAN_TOKEN_ARRAY_NAME,
+                _GRADIENT_SKETCH_ARRAY_NAME,
+                _GRADIENT_TEMPERATURE_SKETCH_ARRAY_NAME,
+            )
         ):
             values = getattr(self, optional_name)
             if values is not None:
@@ -1201,7 +1285,11 @@ class InitializationExperimentRecord:
                 + _PROBABILITY_ARRAY_NAMES
                 + _TEMPERATURE_ARRAY_NAMES
                 + _GRADIENT_TEMPERATURE_ARRAY_NAMES
-                + (_MEAN_TOKEN_ARRAY_NAME, _GRADIENT_SKETCH_ARRAY_NAME)
+                + (
+                _MEAN_TOKEN_ARRAY_NAME,
+                _GRADIENT_SKETCH_ARRAY_NAME,
+                _GRADIENT_TEMPERATURE_SKETCH_ARRAY_NAME,
+            )
             )
             if name in arrays
         }
@@ -1253,6 +1341,7 @@ class InitializationExperimentRecord:
         gradient_temperature_position_norms: np.ndarray | None = None,
         predictive_temperature_mean_token_probabilities: np.ndarray | None = None,
         gradient_position_sketches: np.ndarray | None = None,
+        gradient_temperature_position_sketches: np.ndarray | None = None,
     ) -> "InitializationExperimentRecord":
         """Assemble a record, deriving the canonical ``token_ids`` axis.
 
@@ -1328,6 +1417,9 @@ class InitializationExperimentRecord:
             gradient_temperatures=_optional_array(gradient_temperatures, np.float64),
             gradient_temperature_position_norms=_optional_array(
                 gradient_temperature_position_norms, np.float64
+            ),
+            gradient_temperature_position_sketches=_optional_array(
+                gradient_temperature_position_sketches, np.float32
             ),
             gradient_position_sketches=_optional_array(
                 gradient_position_sketches, np.float32

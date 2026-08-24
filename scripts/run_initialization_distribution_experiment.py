@@ -1138,6 +1138,14 @@ def main() -> None:
             if gradient_result is None or gradient_result.gradient_sketches is None
             else gradient_result.gradient_sketches.numpy()
         ),
+        # The canonical field above is a row of this one, so the two cannot
+        # disagree; the record validates that they do not.
+        gradient_temperature_position_sketches=(
+            None
+            if gradient_result is None
+            or gradient_result.temperature_gradient_sketches is None
+            else gradient_result.temperature_gradient_sketches.numpy()
+        ),
         uniform_null=(
             {}
             if null_summary is None
