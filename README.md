@@ -983,6 +983,11 @@ changes.
 > The model is untrained. Nothing this experiment reports is a statement about model
 > quality.
 
+This section covers the guess-distribution measurement and figures 0–19. Gradient
+**direction** — the CountSketch machinery, the sampling/loss temperature distinction, and
+figures 20–24 — is built on top of it and is described in
+[Gradient-direction analyses](#gradient-direction-analyses).
+
 Smoke check on the tracked fixture — fast, fully offline, and **not** scientifically
 meaningful (595 characters, 39 tokens):
 
@@ -1188,13 +1193,12 @@ A run carrying gradient data also gets `figure10_temperature_gradient_vs_initial
 six panels relating the gradient to the guessing bias across loss temperatures. There
 temperature is inside the loss, `ell_T = -log softmax(z/T)[y]`, so the gradient really
 changes — while `q_i`, `n_i` and `p_i` are identical in every panel because
-`argmax softmax(z/T) = argmax z`. The single-temperature version remains as
+`argmax softmax(z/T) = argmax z`. This is the loss temperature written `T_g` in
+[Gradient-direction analyses](#gradient-direction-analyses), and it is not the nucleus
+sampling temperature. The single-temperature version remains as
 `supplementary_t1_gradient_vs_initial_guess_bias.svg`:
 one marker per token with `n_i > 0`, at `x = G_i` and `y = q_i`, coloured by corpus
 frequency. Runs without gradient data produce exactly the figures they did before.
-
-Figures and statistics can be regenerated from a finished record alone — no model,
-no GPU, and nothing recomputed:
 
 Every run also records the **raw predictive distribution** the model produces before
 any sampling policy touches it: logits restricted to the eligible support, softmax at
@@ -1215,6 +1219,9 @@ Only sufficient statistics are stored — a ranked `[I, K]` profile and three `[
 per-position vectors, about 12 MB — never the full `[I, D, K]` probability tensor, which
 would be roughly 50 GiB.
 
+Figures and statistics can be regenerated from a finished record alone — no model, no GPU,
+and nothing recomputed:
+
 ```bash
 python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure8
 python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure9
@@ -1222,7 +1229,7 @@ python3 scripts/render_record_figures.py outputs/<run>/analyses --only figure10
 python3 scripts/render_record_figures.py outputs/<run>/analyses --stats-only
 ```
 
-The second form prints the distributions of `G_i`, `q_i`, `p_i` and `n_i` and the
+The `--stats-only` form prints the distributions of `G_i`, `q_i`, `p_i` and `n_i` and the
 three Spearman correlations without drawing anything. Neither form imports PyTorch,
 which a test asserts.
 
@@ -1559,10 +1566,19 @@ a target share a *loss*, positions sharing a greedy prediction share a *decision
 small differences between their magnitudes should not be over-read given the sketch's own
 error.
 
-**Figure 21 — where does the corrective signal come from?** A diagnostic on the
-initial-gradient decomposition, tracing how much of the cross-entropy correction is
-attributable to each source across loss temperatures. It is routed to `diagnostics` and
-requires the temperature-gradient analysis.
+**Figure 21 — where does the corrective signal come from?** A diagnostic completing the
+initial-gradient decomposition begun in figure 19. The cross-entropy correction has two
+sides: an amplification term on the true target, `A = A_TP + A_FN`, split by whether the
+target was already predicted correctly, and a suppression term `S` on tokens the model
+wrongly favours. Figure 19 shows the suppression side's provenance and the net
+correction but reports the target side only numerically; panel (a) plots that provenance as
+`A_FN(i) / A(i)` per token, and panel (b) sets the two sides on one axis pair —
+`A_FN(i) / A(i)` against `S_FP(i) / S(i)` — so "is the correction driven by missed targets
+or by false-positive wins" has a single place to be read. At initialization
+`A_FN / A` sits near 1 almost everywhere simply because almost nothing is yet correct —
+that is the measurement, not a defect, and the panels become informative as correct
+predictions accumulate. Routed to `diagnostics`; requires the temperature-gradient
+analysis.
 
 **Figure 22 — clustering under the sampled-token grouping.** `T_s` varies; **`T_g` is fixed
 at 1** for every point. The gradients are the canonical `T = 1` gradients throughout, so
