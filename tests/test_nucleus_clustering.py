@@ -361,3 +361,240 @@ def test_a_missing_artifact_names_the_writer(tmp_path) -> None:
 
     with pytest.raises(FileNotFoundError, match="write_nucleus_clustering_artifact"):
         load_nucleus_clustering_artifact(tmp_path)
+
+
+# -- paired sampling and loss temperatures -----------------------------------
+
+
+def test_a_sweep_defaults_the_loss_temperature_to_the_sampling_one() -> None:
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.60], permutations=8
+    )
+
+    assert np.array_equal(result["loss_temperatures"], [0.12, 0.60])
+    assert result["loss_defaulted"] is True
+    for entry, expected in zip(result["by_temperature"], (0.12, 0.60)):
+        assert entry["sampling_temperature"] == expected
+        assert entry["loss_temperature"] == expected
+
+
+def test_the_controlled_design_pins_the_loss_temperature(tmp_path) -> None:
+    """Figure 22's sweep: T_s varies, T_g stays at the record's gradients."""
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    sampling = [0.12, 0.24, 0.60]
+
+    result = nucleus_clustering(
+        record, np.stack([greedy] * 3), sampling,
+        loss_temperatures=[1.0, 1.0, 1.0], permutations=8,
+    )
+
+    assert np.array_equal(result["sampling_temperatures"], sampling)
+    assert np.all(result["loss_temperatures"] == 1.0)
+    assert result["loss_defaulted"] is False
+    for entry in result["by_temperature"]:
+        assert entry["loss_temperature"] == 1.0
+        assert "T_s=" in entry["grouping"] and "T_g=" in entry["grouping"]
+
+
+def test_the_sampling_temperatures_stay_available_under_the_old_key() -> None:
+    """Readers written before the split looked up "temperatures"."""
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    result = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.60],
+        loss_temperatures=[1.0, 1.0], permutations=8,
+    )
+
+    assert result["temperatures"] == (0.12, 0.60)
+
+
+def test_a_repeated_pair_is_measured_once_and_reused() -> None:
+    """A sweep pinning T_g must not pay for the same measurement twice.
+
+    Both coordinates repeat here, so the second pair is the same measurement as
+    the first -- same labels, same gradient directions -- and reusing it is
+    exact rather than approximate.
+    """
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    labels = np.stack([greedy, greedy, greedy])
+
+    result = nucleus_clustering(
+        record, labels, [0.12, 0.12, 0.60],
+        loss_temperatures=[1.0, 1.0, 1.0], permutations=8,
+    )
+
+    assert result["num_pairs_reused"] == 1
+    first, repeat, other = result["by_temperature"]
+    assert repeat["reused_from_pair"] == 0
+    assert first["reused_from_pair"] is None
+    assert other["reused_from_pair"] is None
+    assert repeat["population"]["delta"] == first["population"]["delta"]
+    assert repeat["null"]["delta_mean"] == first["null"]["delta_mean"]
+    # The reused entry still reports its own place in the sweep.
+    assert repeat["pair_index"] == 1
+
+
+def test_pairs_differing_in_either_coordinate_are_both_computed() -> None:
+    """Reuse must key on the pair, not on one half of it."""
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    same_sampling = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.12],
+        loss_temperatures=[1.0, 2.0], permutations=8,
+    )
+    assert same_sampling["num_pairs_reused"] == 0
+
+    same_loss = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.60],
+        loss_temperatures=[1.0, 1.0], permutations=8,
+    )
+    assert same_loss["num_pairs_reused"] == 0
+
+
+def test_a_mismatched_pair_length_is_rejected() -> None:
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    with pytest.raises(ValueError, match="same length"):
+        nucleus_clustering(
+            record, np.stack([greedy] * 2), [0.12, 0.60], loss_temperatures=[1.0]
+        )
+
+
+def test_a_non_positive_loss_temperature_is_rejected() -> None:
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+
+    with pytest.raises(ValueError, match="loss_temperatures must be positive"):
+        nucleus_clustering(
+            record, np.stack([greedy] * 2), [0.12, 0.60], loss_temperatures=[1.0, 0.0]
+        )
+
+
+# -- reading artifacts from both eras ----------------------------------------
+
+
+def _write_paired_artifact(result, directory):
+    """The writer's layout including the explicit pair arrays."""
+
+    import numpy as np
+
+    _write_artifact(result, directory)
+    path = directory / "nucleus_gradient_clustering.npz"
+    with np.load(path) as data:
+        arrays = {key: data[key] for key in data.files}
+    arrays["sampling_temperatures"] = np.asarray(
+        result["sampling_temperatures"], dtype=float
+    )
+    arrays["loss_temperatures"] = np.asarray(result["loss_temperatures"], dtype=float)
+    np.savez_compressed(path, **arrays)
+
+
+def test_an_artifact_from_before_the_split_keeps_its_original_meaning(tmp_path) -> None:
+    """Figure 22's real artifact stores only "temperatures".
+
+    It must keep reading as the controlled design it was -- T_s varying against
+    the canonical T_g = 1 gradients -- rather than being reinterpreted as the
+    new matched default.
+    """
+
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    live = nucleus_clustering(
+        record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
+        loss_temperatures=[1.0, 1.0, 1.0], permutations=8, display_classes=5,
+    )
+    _write_artifact(live, tmp_path)          # old layout: no pair arrays
+
+    loaded = load_nucleus_clustering_artifact(tmp_path)
+
+    assert loaded["pair_metadata"] == "historical_fallback"
+    assert np.array_equal(loaded["sampling_temperatures"], [0.12, 0.60, 1.20])
+    assert np.all(loaded["loss_temperatures"] == 1.0)
+    assert loaded["pairing"] == "T_g = 1 fixed"
+    # And the values it reports are the ones that were stored.
+    for stored, computed in zip(loaded["by_temperature"], live["by_temperature"]):
+        assert stored["population"]["delta"] == pytest.approx(
+            computed["population"]["delta"], abs=1e-12
+        )
+
+
+def test_an_explicit_artifact_round_trips_both_temperature_arrays(tmp_path) -> None:
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    live = nucleus_clustering(
+        record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
+        loss_temperatures=[1.0, 2.0, 3.0], permutations=8, display_classes=5,
+    )
+    _write_paired_artifact(live, tmp_path)
+
+    loaded = load_nucleus_clustering_artifact(tmp_path)
+
+    assert loaded["pair_metadata"] == "explicit"
+    assert np.array_equal(loaded["sampling_temperatures"], [0.12, 0.60, 1.20])
+    assert np.array_equal(loaded["loss_temperatures"], [1.0, 2.0, 3.0])
+    assert loaded["pairing"] == "T_g varies independently of T_s"
+    for index, entry in enumerate(loaded["by_temperature"]):
+        assert entry["loss_temperature"] == [1.0, 2.0, 3.0][index]
+
+
+def test_a_matched_artifact_is_described_as_matched(tmp_path) -> None:
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    live = nucleus_clustering(
+        record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
+        permutations=8, display_classes=5,
+    )
+    _write_paired_artifact(live, tmp_path)
+
+    loaded = load_nucleus_clustering_artifact(tmp_path)
+
+    assert loaded["pairing"] == "T_g = T_s (matched)"
+
+
+def test_a_result_array_out_of_step_with_the_pairs_is_caught(tmp_path) -> None:
+    """The reader validates rather than plotting one pair's value on another."""
+
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _record()
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    live = nucleus_clustering(
+        record, np.stack([greedy] * 3), [0.12, 0.60, 1.20],
+        loss_temperatures=[1.0, 1.0, 1.0], permutations=8, display_classes=5,
+    )
+    _write_paired_artifact(live, tmp_path)
+
+    path = tmp_path / "nucleus_gradient_clustering.npz"
+    with np.load(path) as data:
+        arrays = {key: data[key] for key in data.files}
+    arrays["delta"] = arrays["delta"][:2]
+    np.savez_compressed(path, **arrays)
+
+    with pytest.raises(ValueError, match="leading dimension"):
+        load_nucleus_clustering_artifact(tmp_path)

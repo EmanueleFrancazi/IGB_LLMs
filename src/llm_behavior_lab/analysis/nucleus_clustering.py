@@ -39,6 +39,7 @@ from llm_behavior_lab.analysis.gradient_clustering import (
     gradient_clustering,
     unit_sketches,
 )
+from llm_behavior_lab.analysis.temperature_pairs import temperature_pairs
 
 __all__ = [
     "histogram_gate",
@@ -154,8 +155,9 @@ def support_diagnostics(labels: np.ndarray, *, min_support: int = 2) -> dict[str
 def nucleus_clustering(
     record: Any,
     labels_by_temperature: np.ndarray,
-    temperatures: Sequence[float],
+    sampling_temperatures: Sequence[float],
     *,
+    loss_temperatures: Sequence[float] | None = None,
     min_support: int = 2,
     display_classes: int | None = 40,
     permutations: int = DEFAULT_PERMUTATIONS,
@@ -163,7 +165,14 @@ def nucleus_clustering(
 ) -> dict[str, Any]:
     """Sweep the grouping across sampling temperature.
 
-    Each temperature is handed to the same estimator the target and greedy
+    Each pair is ``(T_s, T_g)``: ``T_s`` shapes the distribution the grouping
+    label was sampled from, ``T_g`` the loss the gradients come from. The
+    gradients here are whatever the record persisted, so ``T_g`` is a statement
+    about the record rather than something recomputed -- figure 22's record
+    holds the ``T_g = 1`` gradients throughout. Carrying it explicitly is what
+    keeps the axis honest once matched-temperature sweeps exist alongside it.
+
+    Each pair is handed to the same estimator the target and greedy
     groupings use, through its explicit-label entry point. Reusing it is the
     point: a separate implementation could drift from the all-position
     definition, and the trajectory would then be comparing two different
@@ -177,25 +186,30 @@ def nucleus_clustering(
         record: A record carrying per-position gradient sketches.
         labels_by_temperature: ``[T, D]`` nucleus samples, in record position
             order, already gated against the recorded histogram.
-        temperatures: The ``T`` values those rows correspond to.
+        sampling_temperatures: The ``T_s`` values those rows correspond to.
+        loss_temperatures: The ``T_g`` paired elementwise with them. Omitted
+            means ``T_g = T_s``; figure 22's controlled design passes ``1.0``
+            repeated, since its gradients are the ``T = 1`` gradients.
         min_support: Class size that counts as qualifying, for reporting only.
         display_classes: Classes in each stored heatmap.
         permutations: Draws in the label-permutation null, per temperature.
-        permutation_seed: Base seed. Each temperature offsets it by its index so
-            no two temperatures share a permutation sequence, which would
-            correlate their nulls and understate the spread of the trajectory.
+        permutation_seed: Base seed. Each pair offsets it by its index so no two
+            pairs share a permutation sequence, which would correlate their
+            nulls and understate the spread of the trajectory.
 
     Returns:
         ``by_temperature`` -- one clustering result and support summary per
-        temperature; ``references`` -- the target and greedy groupings.
+        pair; ``references`` -- the target and greedy groupings; and the
+        validated ``sampling_temperatures`` / ``loss_temperatures``.
     """
 
+    pairs = temperature_pairs(sampling_temperatures, loss_temperatures)
     labels_by_temperature = np.asarray(labels_by_temperature, dtype=np.int64)
-    ordered = tuple(float(value) for value in temperatures)
+    ordered = tuple(float(value) for value in pairs["sampling_temperatures"])
     if labels_by_temperature.shape[0] != len(ordered):
         raise ValueError(
             f"{labels_by_temperature.shape[0]} label rows against "
-            f"{len(ordered)} temperatures."
+            f"{len(ordered)} temperature pair(s)."
         )
     unit, usable = unit_sketches(record)
     if labels_by_temperature.shape[1] != unit.shape[0]:
@@ -204,24 +218,52 @@ def nucleus_clustering(
             f"record holds {unit.shape[0]} gradient sketches."
         )
 
+    # Reuse, at the only level where it is sound. A pair's result depends on the
+    # sampled labels (through T_s) and the gradient directions (through T_g).
+    # The directions come from the record and are read once above; labels are
+    # supplied per pair. So two pairs agreeing on both indices are the same
+    # measurement and the second is a lookup, which is what keeps a sweep like
+    # T_g = 1 repeated six times from paying six times over. Pairs that differ
+    # in either coordinate are computed, since nothing about them is shared.
     by_temperature = []
+    computed: dict[tuple[int, int], dict[str, Any]] = {}
+    num_reused = 0
     for index, temperature in enumerate(ordered):
-        labels = labels_by_temperature[index]
-        result = gradient_clustering(
-            record,
-            grouping=f"nucleus T={temperature:g}",
-            labels=labels,
-            min_support=min_support,
-            display_classes=display_classes,
-            permutations=permutations,
-            permutation_seed=permutation_seed + index,
+        loss_temperature = float(pairs["loss_temperatures"][index])
+        key = (
+            int(pairs["sampling_index"][index]),
+            int(pairs["loss_index"][index]),
         )
+        cached = computed.get(key)
+        if cached is not None:
+            result = dict(cached)
+            result["reused_from_pair"] = int(result["pair_index"])
+            num_reused += 1
+        else:
+            labels = labels_by_temperature[index]
+            result = gradient_clustering(
+                record,
+                grouping=f"nucleus T_s={temperature:g} T_g={loss_temperature:g}",
+                labels=labels,
+                min_support=min_support,
+                display_classes=display_classes,
+                permutations=permutations,
+                permutation_seed=permutation_seed + index,
+            )
+            # Diagnostics describe the population the statistic was computed
+            # over, so they use the same zero-norm mask rather than the raw
+            # label vector.
+            result["support"] = support_diagnostics(
+                labels[usable], min_support=min_support
+            )
+            result["reused_from_pair"] = None
+            computed[key] = result
+        result["pair_index"] = index
+        result["sampling_temperature"] = float(temperature)
+        result["loss_temperature"] = loss_temperature
+        # Kept for readers written before the pair split, where it always meant
+        # the sampling temperature.
         result["temperature"] = float(temperature)
-        # Diagnostics describe the population the statistic was computed over,
-        # so they use the same zero-norm mask rather than the raw label vector.
-        result["support"] = support_diagnostics(
-            labels[usable], min_support=min_support
-        )
         by_temperature.append(result)
 
     references = {
@@ -236,6 +278,13 @@ def nucleus_clustering(
         for grouping in ("target", "greedy")
     }
     return {
+        "sampling_temperatures": pairs["sampling_temperatures"],
+        "loss_temperatures": pairs["loss_temperatures"],
+        "loss_defaulted": pairs["loss_defaulted"],
+        "num_unique_sampling": int(pairs["unique_sampling"].size),
+        "num_unique_loss": int(pairs["unique_loss"].size),
+        "num_pairs_reused": num_reused,
+        # Historical key, always the sampling temperatures.
         "temperatures": ordered,
         "by_temperature": by_temperature,
         "references": references,

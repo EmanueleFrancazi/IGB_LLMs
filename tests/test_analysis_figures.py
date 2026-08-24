@@ -995,3 +995,66 @@ def test_figure_twenty_two_keeps_its_panel_c_title_between_the_two_rows(tmp_path
     assert len(bottom_row) == 2       # the two heatmaps
     assert min(box.y0 for box in top_row) - height > 0.01
     assert height - max(box.y1 for box in bottom_row) > 0.01
+
+
+def test_figure_twenty_two_names_both_temperatures(tmp_path) -> None:
+    """A bare "temperature" is ambiguous once T_s and T_g can differ.
+
+    The x-axis carries T_s, so it says so, and the subtitle states what T_g was
+    doing -- otherwise a reader cannot tell a controlled sweep from a matched one.
+    """
+
+    record = _sketch_record()
+    result = _nucleus_result(record)
+    result["loss_temperatures"] = np.ones(len(result["by_temperature"]))
+    result["pairing"] = "T_g = 1 fixed"
+
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        result, tmp_path, record=record, display_classes=10,
+    )
+
+    labels = [
+        axes.get_xlabel() for axes in _data_axes(figure) if axes.get_xlabel()
+    ]
+    assert labels, "the temperature panels should label their x-axis"
+    for label in labels:
+        assert "T_s" in label
+
+    subtitle = " ".join(text.get_text() for text in figure.texts)
+    assert "T_g = 1 fixed" in subtitle
+    assert "$T_s$" in subtitle or "T_s" in subtitle
+
+
+def test_figure_twenty_two_states_a_matched_sweep_as_matched(tmp_path) -> None:
+    record = _sketch_record()
+    result = _nucleus_result(record)
+    result["loss_temperatures"] = np.asarray(result["sampling_temperatures"])
+    result["pairing"] = None       # forced to derive it
+
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        result, tmp_path, record=record, display_classes=10,
+    )
+
+    subtitle = " ".join(text.get_text() for text in figure.texts)
+    assert "T_g = T_s (matched)" in subtitle
+
+
+def test_figure_twenty_two_falls_back_for_a_pre_split_result(tmp_path) -> None:
+    """A result carrying only the old key still renders, at T_g = 1."""
+
+    record = _sketch_record()
+    result = _nucleus_result(record)
+    sampling = list(result["sampling_temperatures"])
+    for key in ("sampling_temperatures", "loss_temperatures", "pairing"):
+        result.pop(key, None)
+    result["temperatures"] = tuple(sampling)
+
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        result, tmp_path, record=record, display_classes=10,
+    )
+
+    subtitle = " ".join(text.get_text() for text in figure.texts)
+    assert "T_g = 1 fixed" in subtitle

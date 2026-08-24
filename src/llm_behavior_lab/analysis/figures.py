@@ -3456,7 +3456,21 @@ def plot_nucleus_temperature_clustering(
 
     by_temperature = result["by_temperature"]
     references = result["references"]
-    temperatures = np.asarray(result["temperatures"], dtype=float)
+    # Two temperatures exist and the axis carries only one of them, so the
+    # sweep says which. A result assembled before the pair split carries only
+    # the sampling temperatures; the loss temperature is then stated at the
+    # established historical value rather than left ambiguous.
+    from llm_behavior_lab.analysis.temperature_pairs import describe_pairing
+
+    temperatures = np.asarray(
+        result.get("sampling_temperatures", result["temperatures"]), dtype=float
+    )
+    loss_temperatures = np.asarray(
+        result.get("loss_temperatures", np.ones_like(temperatures)), dtype=float
+    )
+    pairing = result.get("pairing") or describe_pairing(
+        temperatures, loss_temperatures
+    )
 
     delta = np.array([entry["population"]["delta"] for entry in by_temperature])
     null_mean = np.array([entry["null"]["delta_mean"] for entry in by_temperature])
@@ -3517,10 +3531,10 @@ def plot_nucleus_temperature_clustering(
             label=f"{grouping} grouping",
         )
     trajectory.axhline(0.0, color="#333333", linewidth=0.8, zorder=2)
-    trajectory.set_xlabel("Nucleus sampling temperature")
+    trajectory.set_xlabel("Nucleus sampling temperature  $T_s$")
     trajectory.set_ylabel("pooled delta  (within - between)")
     trajectory.set_title(
-        "(a) clustering against sampling temperature", fontsize=10, pad=8
+        "(a) clustering against sampling temperature $T_s$", fontsize=10, pad=8
     )
     trajectory.legend(loc="upper left", fontsize=7, frameon=True, framealpha=0.9)
     trajectory.margins(y=0.16)
@@ -3535,7 +3549,7 @@ def plot_nucleus_temperature_clustering(
         color="#ff7f0e", linestyle="--", label="classes that are singletons",
     )
     support.set_ylim(-0.03, 1.03)
-    support.set_xlabel("Nucleus sampling temperature")
+    support.set_xlabel("Nucleus sampling temperature  $T_s$")
     support.set_ylabel("fraction")
     support.set_title(
         "(b) how much class structure survives", fontsize=10, pad=8
@@ -3586,7 +3600,7 @@ def plot_nucleus_temperature_clustering(
         axes.set_yticklabels(labels, fontsize=5.5)
         axes.tick_params(axis="both", length=2, pad=1.5)
         axes.set_title(
-            f"T = {entry['temperature']:g}   "
+            f"$T_s$ = {entry['temperature']:g}   "
             f"({entry['support']['num_qualifying']:,} qualifying classes, "
             f"{entry['support']['fraction_positions_in_qualifying']:.0%} of positions)",
             fontsize=9,
@@ -3607,11 +3621,10 @@ def plot_nucleus_temperature_clustering(
     )
     figure.text(
         0.5, 0.938,
-        "grouping varies with sampling temperature; the gradients are the T = 1 "
-        "gradients throughout   |   "
+        f"grouping varies with sampling temperature $T_s$; {pairing}   |   "
         f"{by_temperature[0]['num_positions']:,} positions, "
         f"K = {by_temperature[0]['sketch_dimension']}   |   "
-        f"null: {result['permutations']} label permutations per temperature",
+        f"null: {result['permutations']} label permutations per pair",
         ha="center", fontsize=7, color="#444444",
     )
     return save_figure(figure, directory, "figure22_nucleus_temperature_clustering")

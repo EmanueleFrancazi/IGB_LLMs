@@ -73,6 +73,11 @@ from llm_behavior_lab.utils import get_device, seed_everything  # noqa: E402
 #: Name of the derived artifact, inside the record's own directory.
 ARTIFACT_NAME = "nucleus_gradient_clustering.npz"
 
+#: Loss temperature to assume for a record that predates the explicit field.
+#: Every such record was measured at the canonical T = 1, which is what figure 22
+#: has always reported.
+HISTORICAL_LOSS_TEMPERATURE = 1.0
+
 
 def load_yaml_config(path: Path) -> dict:
     import yaml
@@ -131,7 +136,7 @@ def main() -> None:
             "This run has no temperature sweep, so it recorded no nucleus "
             "histograms to gate a reproduction against."
         )
-    temperatures = [float(value) for value in sweep["temperatures"]]
+    sampling_temperatures = [float(value) for value in sweep["temperatures"]]
 
     sampling_metadata = analysis["sampling"]
     sampling = NucleusSamplingSettings(
@@ -143,6 +148,14 @@ def main() -> None:
     )
 
     gradient_metadata = analysis["gradient_analysis"]
+    # T_g is a property of the gradients the record already holds, not something
+    # this script may choose: it is read from the temperature those gradients
+    # were taken at. Records written before that field existed are read at the
+    # established historical value, which is what the figure has always stated.
+    loss_temperature = float(
+        gradient_metadata.get("canonical_temperature", HISTORICAL_LOSS_TEMPERATURE)
+    )
+    loss_temperatures = [loss_temperature] * len(sampling_temperatures)
     initialization_index = int(gradient_metadata["initialization_index"])
     model_seed = int(analysis["model_seeds"][initialization_index])
 
@@ -197,8 +210,9 @@ def main() -> None:
     print(
         f"Recovering nucleus labels: initialization {initialization_index} "
         f"(seed {model_seed}), {positions.num_positions:,} positions, "
-        f"T = {', '.join(f'{value:g}' for value in temperatures)}"
+        f"T_s = {', '.join(f'{value:g}' for value in sampling_temperatures)}"
     )
+    print(f"Loss temperature: T_g = {loss_temperature:g} (from the record's gradients)")
     print(f"Forward batch size: {batching['description']}")
     if batching["source"] == "override" and batching["historical"] is not None:
         print(
@@ -212,7 +226,7 @@ def main() -> None:
         vocab_size=tokenizer.vocab_size,
         sampling=sampling,
         eligible_token_ids=tokenizer.eligible_token_ids,
-        temperatures=temperatures,
+        temperatures=sampling_temperatures,
         forward_batch_size=batching["value"],
         device=device,
     )
@@ -246,12 +260,20 @@ def main() -> None:
         record,
         recovered["labels"],
         recovered["temperatures"],
+        loss_temperatures=loss_temperatures,
         min_support=args.min_support,
         display_classes=args.display_classes,
         permutations=args.permutations,
     )
 
     arrays: dict[str, np.ndarray] = {
+        # Both halves of every pair, so a reader never has to infer one of them.
+        "sampling_temperatures": np.asarray(
+            result["sampling_temperatures"], dtype=float
+        ),
+        "loss_temperatures": np.asarray(result["loss_temperatures"], dtype=float),
+        # Historical key, retained so a reader written before the pair split
+        # still finds the sampling temperatures where it expects them.
         "temperatures": np.asarray(result["temperatures"], dtype=float),
         # Stored rather than re-inferred when read back: the displayed matrix is
         # a class-by-class block, so nothing about the sketch width or the
@@ -317,11 +339,16 @@ def main() -> None:
         "forward_batch_size_source": batching["source"],
         "historical_forward_batch_size": batching["historical"],
         "histogram_gate": "exact match at every temperature",
-        "temperatures": list(result["temperatures"]),
+        "sampling_temperatures": [float(v) for v in result["sampling_temperatures"]],
+        "loss_temperatures": [float(v) for v in result["loss_temperatures"]],
+        "num_unique_sampling_temperatures": result["num_unique_sampling"],
+        "num_unique_loss_temperatures": result["num_unique_loss"],
+        "num_pairs_reused": result["num_pairs_reused"],
         "permutations": result["permutations"],
         "by_temperature": [
             {
-                "temperature": entry["temperature"],
+                "sampling_temperature": entry["sampling_temperature"],
+                "loss_temperature": entry["loss_temperature"],
                 "delta": entry["population"]["delta"],
                 "within": entry["population"]["within"],
                 "between": entry["population"]["between"],

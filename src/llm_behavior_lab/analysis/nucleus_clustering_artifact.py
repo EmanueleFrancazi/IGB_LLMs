@@ -20,10 +20,22 @@ from typing import Any
 
 import numpy as np
 
+from llm_behavior_lab.analysis.temperature_pairs import (
+    describe_pairing,
+    validate_pair_aligned,
+)
+
 __all__ = ["ARTIFACT_NAME", "load_nucleus_clustering_artifact"]
 
 #: Where the writer leaves its output, relative to the record directory.
 ARTIFACT_NAME = "nucleus_gradient_clustering.npz"
+
+#: Loss temperature attributed to an artifact written before ``T_s`` and ``T_g``
+#: were stored separately. Every such artifact came from the canonical ``T = 1``
+#: gradients -- that is what figure 22 has always reported in its subtitle -- so
+#: this states the established reading rather than inventing a new one. It is
+#: never written back: the stored artifact is left exactly as it was.
+HISTORICAL_LOSS_TEMPERATURE = 1.0
 
 
 def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
@@ -45,7 +57,21 @@ def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
         )
 
     with np.load(path) as data:
-        temperatures = tuple(float(value) for value in data["temperatures"])
+        # An artifact from before the pair split stores only "temperatures",
+        # which always meant the sampling temperatures.
+        explicit = "sampling_temperatures" in data.files
+        if explicit:
+            sampling = np.asarray(data["sampling_temperatures"], dtype=float)
+            loss = np.asarray(data["loss_temperatures"], dtype=float)
+        else:
+            sampling = np.asarray(data["temperatures"], dtype=float)
+            loss = np.full(sampling.shape, HISTORICAL_LOSS_TEMPERATURE, dtype=float)
+        validate_pair_aligned(
+            sampling, loss,
+            delta=data["delta"], within=data["within"], between=data["between"],
+            null_delta_mean=data["null_delta_mean"],
+        )
+        temperatures = tuple(float(value) for value in sampling)
         support_fields = (
             "num_represented", "num_qualifying", "num_singletons",
             "singleton_fraction", "positions_in_qualifying",
@@ -57,7 +83,11 @@ def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
             by_temperature.append(
                 {
                     "temperature": temperature,
-                    "grouping": f"nucleus T={temperature:g}",
+                    "sampling_temperature": temperature,
+                    "loss_temperature": float(loss[index]),
+                    "grouping": (
+                        f"nucleus T_s={temperature:g} T_g={float(loss[index]):g}"
+                    ),
                     "population": {
                         "delta": float(data["delta"][index]),
                         "within": float(data["within"][index]),
@@ -98,6 +128,11 @@ def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
         permutation_seed = int(data["permutation_seed"])
 
     return {
+        "sampling_temperatures": sampling,
+        "loss_temperatures": loss,
+        "pair_metadata": "explicit" if explicit else "historical_fallback",
+        "pairing": describe_pairing(sampling, loss),
+        # Historical key, always the sampling temperatures.
         "temperatures": temperatures,
         "by_temperature": by_temperature,
         "references": references,
