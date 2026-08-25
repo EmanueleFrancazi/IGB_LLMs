@@ -599,6 +599,7 @@ def test_acquisition_does_not_enable_offline_mode(fake_datasets, tmp_path) -> No
     assert fake_datasets[0]["offline"] is False
 
 
+import importlib
 import sys
 import types
 
@@ -615,15 +616,34 @@ def _fake_datasets_config(monkeypatch, **attributes):
     return module
 
 
+def _fake_hub_constants(monkeypatch, **attributes):
+    """Install a fake huggingface_hub.constants exposing only the given attributes.
+
+    ``huggingface_hub`` arrives with the optional ``hf`` extra, so the default
+    suite must not require it. The package and its ``constants`` submodule are
+    both placed in ``sys.modules`` so that the production ``import
+    huggingface_hub.constants`` resolves to this fake instead of the real
+    library, whether or not the extra happens to be installed.
+    """
+
+    package = types.ModuleType("huggingface_hub")
+    module = types.ModuleType("huggingface_hub.constants")
+    for name, value in attributes.items():
+        setattr(module, name, value)
+    package.constants = module
+    monkeypatch.setitem(sys.modules, "huggingface_hub", package)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", module)
+    return module
+
+
 def test_offline_mode_sets_every_flag_the_version_exposes(monkeypatch) -> None:
     """Newer Datasets carries both names; both must be enabled."""
 
-    import huggingface_hub.constants as hub_constants
+    hub_constants = _fake_hub_constants(monkeypatch, HF_HUB_OFFLINE=False)
 
     config = _fake_datasets_config(
         monkeypatch, HF_HUB_OFFLINE=False, HF_DATASETS_OFFLINE=False
     )
-    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
 
     with _offline_mode():
         assert hub_constants.HF_HUB_OFFLINE is True
@@ -640,10 +660,9 @@ def test_offline_mode_sets_every_flag_the_version_exposes(monkeypatch) -> None:
 def test_offline_mode_supports_older_datasets_without_the_hub_name(monkeypatch) -> None:
     """Datasets 2.19 exposes only HF_DATASETS_OFFLINE; it must still be enabled."""
 
-    import huggingface_hub.constants as hub_constants
+    hub_constants = _fake_hub_constants(monkeypatch, HF_HUB_OFFLINE=False)
 
     config = _fake_datasets_config(monkeypatch, HF_DATASETS_OFFLINE=False)
-    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
 
     with _offline_mode():
         assert config.HF_DATASETS_OFFLINE is True
@@ -657,10 +676,9 @@ def test_offline_mode_supports_older_datasets_without_the_hub_name(monkeypatch) 
 def test_offline_mode_creates_no_attributes_when_datasets_is_absent(monkeypatch) -> None:
     """A missing datasets.config must not stop offline mode working."""
 
-    import huggingface_hub.constants as hub_constants
+    hub_constants = _fake_hub_constants(monkeypatch, HF_HUB_OFFLINE=False)
 
     monkeypatch.delitem(sys.modules, "datasets.config", raising=False)
-    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
 
     with _offline_mode():
         assert hub_constants.HF_HUB_OFFLINE is True
@@ -671,10 +689,9 @@ def test_offline_mode_creates_no_attributes_when_datasets_is_absent(monkeypatch)
 def test_offline_mode_preserves_a_pre_existing_offline_setting(monkeypatch) -> None:
     """A process already offline must stay offline afterwards."""
 
-    import huggingface_hub.constants as hub_constants
+    hub_constants = _fake_hub_constants(monkeypatch, HF_HUB_OFFLINE=True)
 
     config = _fake_datasets_config(monkeypatch, HF_DATASETS_OFFLINE=True)
-    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     with _offline_mode():
@@ -688,10 +705,9 @@ def test_offline_mode_preserves_a_pre_existing_offline_setting(monkeypatch) -> N
 def test_offline_state_is_restored_after_an_exception(monkeypatch) -> None:
     """A failure inside the context must not leave the process offline."""
 
-    import huggingface_hub.constants as hub_constants
+    hub_constants = _fake_hub_constants(monkeypatch, HF_HUB_OFFLINE=False)
 
     config = _fake_datasets_config(monkeypatch, HF_DATASETS_OFFLINE=False)
-    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
 
     with pytest.raises(RuntimeError):
@@ -702,6 +718,34 @@ def test_offline_state_is_restored_after_an_exception(monkeypatch) -> None:
     assert config.HF_DATASETS_OFFLINE is False
     assert "HF_HUB_OFFLINE" not in os.environ
     assert "HF_DATASETS_OFFLINE" not in os.environ
+
+
+def test_a_broken_hub_install_is_not_treated_as_an_absent_one(
+    monkeypatch, tmp_path
+) -> None:
+    """Only the optional package's own absence may be tolerated.
+
+    An installed ``huggingface_hub`` whose import fails because something it
+    needs is missing is a real fault, not a package the caller declined to
+    install, so the original error must reach the caller unchanged.
+    """
+
+    package = tmp_path / "huggingface_hub"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "constants.py").write_text(
+        "import a_dependency_that_is_not_installed\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(tmp_path)
+    monkeypatch.delitem(sys.modules, "huggingface_hub", raising=False)
+    monkeypatch.delitem(sys.modules, "huggingface_hub.constants", raising=False)
+    importlib.invalidate_caches()
+
+    with pytest.raises(ModuleNotFoundError) as failure:
+        with _offline_mode():
+            pass
+
+    assert failure.value.name == "a_dependency_that_is_not_installed"
 
 
 def test_loader_calls_are_serialized(monkeypatch, tmp_path) -> None:

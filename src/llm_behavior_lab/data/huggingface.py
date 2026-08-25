@@ -191,9 +191,21 @@ def _offline_mode():
     Enforcement still belongs to those libraries; there is no independent
     network barrier here. Callers must hold :data:`_LOADER_LOCK`, because the
     state being changed is process-global.
+
+    ``huggingface_hub`` ships with the optional ``hf`` extra, so it may be
+    absent. Its constant is only worth setting when it is installed, and the
+    loop below already skips a module that is not in :data:`sys.modules`, so
+    its absence is a no-op rather than an error. Only that absence is
+    tolerated: an import that fails for any other reason -- a broken install,
+    or a dependency of the package itself missing -- still propagates, because
+    that is a real fault rather than a package the caller chose not to install.
     """
 
-    import huggingface_hub.constants  # noqa: F401  ensure it is in sys.modules
+    try:
+        import huggingface_hub.constants  # noqa: F401  ensure it is in sys.modules
+    except ModuleNotFoundError as exc:
+        if exc.name not in ("huggingface_hub", "huggingface_hub.constants"):
+            raise
 
     saved_env = {name: os.environ.get(name) for name in _OFFLINE_ENV_VARS}
     for name in _OFFLINE_ENV_VARS:
