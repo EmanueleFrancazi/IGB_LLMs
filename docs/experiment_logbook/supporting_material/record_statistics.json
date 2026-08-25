@@ -1,0 +1,1449 @@
+{
+  "gradients": {
+    "correlations": {
+      "includes_zero_guess_tokens": true,
+      "num_positions": 32768,
+      "num_tokens": 5296,
+      "sensitivity_by_min_occurrences": [
+        {
+          "min_occurrences": 1,
+          "num_tokens": 5296,
+          "spearman_gradient_vs_guess": 0.11907512137455396
+        },
+        {
+          "min_occurrences": 2,
+          "num_tokens": 2762,
+          "spearman_gradient_vs_guess": 0.12488605427191257
+        },
+        {
+          "min_occurrences": 5,
+          "num_tokens": 982,
+          "spearman_gradient_vs_guess": 0.19198623251216787
+        },
+        {
+          "min_occurrences": 10,
+          "num_tokens": 382,
+          "spearman_gradient_vs_guess": 0.28566211693825955
+        },
+        {
+          "min_occurrences": 20,
+          "num_tokens": 174,
+          "spearman_gradient_vs_guess": 0.29017042983632646
+        },
+        {
+          "min_occurrences": 50,
+          "num_tokens": 65,
+          "spearman_gradient_vs_guess": 0.23650872217045465
+        }
+      ],
+      "spearman_gradient_vs_corpus": 0.1409401572533227,
+      "spearman_gradient_vs_guess": 0.11907512137455396,
+      "spearman_guess_vs_corpus": -0.012018008072129226,
+      "strata": [
+        {
+          "max_occurrences": 1,
+          "min_occurrences": 1,
+          "num_tokens": 2534,
+          "spearman_gradient_vs_guess": 0.11797781807767752
+        },
+        {
+          "max_occurrences": 2,
+          "min_occurrences": 2,
+          "num_tokens": 1012,
+          "spearman_gradient_vs_guess": 0.09392357873996231
+        },
+        {
+          "max_occurrences": 4,
+          "min_occurrences": 3,
+          "num_tokens": 768,
+          "spearman_gradient_vs_guess": 0.10109398445233324
+        },
+        {
+          "max_occurrences": 8,
+          "min_occurrences": 5,
+          "num_tokens": 531,
+          "spearman_gradient_vs_guess": 0.11560763095797029
+        },
+        {
+          "max_occurrences": 16,
+          "min_occurrences": 9,
+          "num_tokens": 249,
+          "spearman_gradient_vs_guess": 0.2685043408706954
+        },
+        {
+          "max_occurrences": 64,
+          "min_occurrences": 17,
+          "num_tokens": 149,
+          "spearman_gradient_vs_guess": 0.34974505171347103
+        },
+        {
+          "max_occurrences": null,
+          "min_occurrences": 65,
+          "num_tokens": 53,
+          "spearman_gradient_vs_guess": 0.24819783157606487
+        }
+      ],
+      "weighted": false
+    },
+    "distributions": {
+      "covers_all_positions": true,
+      "eligible_vocab_size": 31997,
+      "gradient_dynamic_range": 1.2928897203037633,
+      "greedy_guess_fraction": {
+        "count": 5296,
+        "mean": 2.3159015574844223e-05,
+        "p00": 0.0,
+        "p01": 0.0,
+        "p05": 0.0,
+        "p100": 0.012786865234375,
+        "p25": 0.0,
+        "p50": 0.0,
+        "p75": 0.0,
+        "p95": 9.1552734375e-05,
+        "p99": 0.000335693359375
+      },
+      "greedy_mass_on_plotted_tokens": 0.122650146484375,
+      "initialization_index": 0,
+      "mean_gradient_norm": {
+        "count": 5296,
+        "mean": 12.198996195997337,
+        "p00": 11.754068729206354,
+        "p01": 11.852432599749333,
+        "p05": 11.92049293272466,
+        "p100": 15.196714631734812,
+        "p25": 12.04298479644825,
+        "p50": 12.150414598911137,
+        "p75": 12.276602610425392,
+        "p95": 12.636870910699445,
+        "p99": 13.275941488053233
+      },
+      "nonpositive_corpus_tokens": 0,
+      "num_plotted_tokens": 5296,
+      "num_positions": 32768,
+      "occurrence_histogram": {
+        "1": 2534,
+        "11_to_100": 309,
+        "2": 1012,
+        "3": 482,
+        "4": 286,
+        "5": 215,
+        "6_to_10": 419,
+        "over_100": 39
+      },
+      "positive_corpus_fraction": {
+        "count": 5296,
+        "mean": 0.00018473017902635182,
+        "p00": 2.195437880085183e-05,
+        "p01": 2.195437880085183e-05,
+        "p05": 2.195437880085183e-05,
+        "p100": 0.04234999670684318,
+        "p25": 2.195437880085183e-05,
+        "p50": 4.390875760170366e-05,
+        "p75": 0.00010977189400425915,
+        "p95": 0.00039517881841533294,
+        "p99": 0.0019758940920766646
+      },
+      "target_occurrence_count": {
+        "count": 5296,
+        "mean": 6.187311178247734,
+        "p00": 1.0,
+        "p01": 1.0,
+        "p05": 1.0,
+        "p100": 1370.0,
+        "p25": 1.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p95": 13.0,
+        "p99": 64.15000000000055
+      },
+      "vocab_size": 32000,
+      "zero_guess_fraction": 0.8021148036253777,
+      "zero_guess_tokens": 4248
+    }
+  },
+  "predictive_probabilities": {
+    "eligible_vocab_size": 31997,
+    "max_probability": {
+      "mean_over_uniform": 8.89055868952872,
+      "median_over_uniform": 8.60901298664976,
+      "per_initialization_mean": "[0.000275   0.0002796  0.0002879  0.00027687 0.00028177 0.00027576\n 0.00027262 0.00027772 0.00027908 0.00027267 0.00027415 0.00028113]",
+      "per_initialization_median": "[0.0002688  0.0002708  0.00028016 0.00027009 0.00027034 0.00026962\n 0.00026343 0.00026838 0.00027005 0.00026585 0.0002636  0.00027037]",
+      "pooled": {
+        "count": 393216,
+        "mean": 0.00027785600804852706,
+        "p00": 0.0001793170376913622,
+        "p05": 0.00022289174012257718,
+        "p100": 0.0008505139849148691,
+        "p25": 0.000246480674832128,
+        "p50": 0.00026905687991529703,
+        "p75": 0.000300172898278106,
+        "p95": 0.00036187579098623246,
+        "p99": 0.00041901742806658125
+      },
+      "uniform_probability": 3.125292996218395e-05
+    },
+    "num_initializations": 12,
+    "num_positions": 32768,
+    "num_zero_ranks": 0,
+    "profile_dynamic_range": 108.22785827839881,
+    "profile_min_positive": 2.567324277394338e-06,
+    "protocol": {
+      "before_sampling": true,
+      "before_top_p": true,
+      "confidence_temperature_note": "Diagnostic only: softmax(z/T) is measured, never sampled and never truncated. argmax softmax(z/T) = argmax z for every positive T, so every temperature describes the SAME greedy decisions. This is not the stochastic nucleus sweep.",
+      "confidence_temperatures": [
+        0.12,
+        0.24,
+        0.36,
+        0.48,
+        0.6,
+        1.0,
+        1.2
+      ],
+      "eligible_vocab_size": 31997,
+      "enabled": true,
+      "from_raw_logits": true,
+      "input_condition": "real",
+      "note": "Softmax of the raw logits restricted to the eligible support, at temperature 1, before any top-p truncation and before any greedy or nucleus selection. NOT the nucleus distribution.",
+      "ranked_profile_order": "rank_within_position_then_average_over_positions",
+      "retains_full_probability_tensor": false,
+      "support": "eligible",
+      "temperature": 1.0,
+      "uniform_probability": 3.125292996218395e-05
+    },
+    "rank1_over_uniform": 8.89055868952872,
+    "ranked_profile_at_rank": {
+      "1": 0.00027785600804852706,
+      "10": 0.000188348993739799,
+      "100": 0.0001273372553174205,
+      "1000": 7.751316126989687e-05,
+      "10000": 3.511449964406036e-05,
+      "2": 0.00024448015909528387,
+      "3": 0.00022821065527878215,
+      "5": 0.0002102382589230789
+    },
+    "target_probability": {
+      "loss": {
+        "count": 393216,
+        "mean": 10.53525614481538,
+        "p00": 8.076759621997104,
+        "p05": 9.584338725102924,
+        "p100": 13.487123374964312,
+        "p25": 10.14728840219244,
+        "p50": 10.535530616112046,
+        "p75": 10.926490960207156,
+        "p95": 11.474927298238669,
+        "p99": 11.870769584217234
+      },
+      "mean_over_uniform": 1.003647885283475,
+      "probability": {
+        "count": 393216,
+        "mean": 3.1366937065458476e-05,
+        "p00": 1.3887265595258214e-06,
+        "p05": 1.038729328683985e-05,
+        "p100": 0.0003106761141680181,
+        "p25": 1.797567756511853e-05,
+        "p50": 2.6575239644444082e-05,
+        "p75": 3.9182184082164895e-05,
+        "p95": 6.879780448798556e-05,
+        "p99": 0.00010293202358297976
+      },
+      "uniform_loss": 10.373397427387058,
+      "uniform_probability": 3.125292996218395e-05
+    },
+    "uniform_probability": 3.125292996218395e-05
+  },
+  "temperature_confidence": {
+    "eligible_vocab_size": 31997,
+    "greedy_identity_is_temperature_invariant": true,
+    "num_initializations": 12,
+    "num_positions": 32768,
+    "rows": [
+      {
+        "effective_support": 24.74898616794177,
+        "is_canonical": false,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.33877312986066005,
+          "p00": 0.03676149249076843,
+          "p05": 0.10594877414405346,
+          "p100": 0.999826967716217,
+          "p25": 0.18040289729833603,
+          "p50": 0.279479444026947,
+          "p75": 0.44975917786359787,
+          "p95": 0.7745741009712219,
+          "p99": 0.9262515574693678
+        },
+        "mean_over_uniform": 10839.723836151541,
+        "mean_predictive_entropy": 3.2087845252642526,
+        "median_over_uniform": 8942.503770530224,
+        "per_initialization_median_max": "[0.27849351 0.29967274 0.31863393 0.27955195 0.2817004  0.27876538\n 0.25755619 0.28568169 0.28570828 0.269647   0.25608906 0.28040059]",
+        "ranked_profile_at_rank": {
+          "1": 0.33877312986066005,
+          "10": 0.014360260852158779,
+          "100": 0.0005672562236185647,
+          "2": 0.11954912427636454,
+          "5": 0.03505760119332155
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 20.720916318314288,
+          "p00": 0.5506859641717541,
+          "p05": 12.699688376260147,
+          "p100": 46.24209620604377,
+          "p25": 17.458675404818358,
+          "p50": 20.719321095534006,
+          "p75": 23.99134001247551,
+          "p95": 28.641811887433455,
+          "p99": 32.008476691905905
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 2.8528951900227704e-05,
+          "p00": 8.266330900733515e-21,
+          "p05": 3.63931080367072e-13,
+          "p100": 0.5765541791915894,
+          "p25": 3.807969130992239e-11,
+          "p50": 1.0039525322191878e-09,
+          "p75": 2.6169390654473546e-08,
+          "p95": 3.0520765221808688e-06,
+          "p99": 8.185330916603491e-05
+        },
+        "temperature": 0.12,
+        "top_k_mass": {
+          "1": 0.33877312986066005,
+          "10": 0.7084846780820855,
+          "100": 0.9275676087516677
+        }
+      },
+      {
+        "effective_support": 2034.904041027856,
+        "is_canonical": false,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.03752415149323814,
+          "p00": 0.006230709608644247,
+          "p05": 0.013788510579615831,
+          "p100": 0.7805391550064087,
+          "p25": 0.020345716271549463,
+          "p50": 0.028665601275861263,
+          "p75": 0.043853151611983776,
+          "p95": 0.08983057737350464,
+          "p99": 0.1538260340690609
+        },
+        "mean_over_uniform": 1200.660275329141,
+        "mean_predictive_entropy": 7.618203942478831,
+        "median_over_uniform": 917.213244023733,
+        "per_initialization_median_max": "[0.02855617 0.02960578 0.03316612 0.02908162 0.02901018 0.02903673\n 0.02651077 0.02835725 0.02902107 0.02742566 0.02642651 0.02907546]",
+        "ranked_profile_at_rank": {
+          "1": 0.03752415149323814,
+          "10": 0.006494597558869645,
+          "100": 0.001261092135082853,
+          "2": 0.02028981050544824,
+          "5": 0.010377673311956196
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 13.20524362461245,
+          "p00": 2.96179611949716,
+          "p05": 9.240444863701232,
+          "p100": 25.595731559498642,
+          "p25": 11.588093704549616,
+          "p50": 13.205183670624475,
+          "p75": 14.83295550401352,
+          "p95": 17.12309101713659,
+          "p99": 18.771460617728565
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 3.1336238476195415e-05,
+          "p00": 7.6544682051094e-12,
+          "p05": 3.6604633102399475e-08,
+          "p100": 0.051725927740335464,
+          "p25": 3.6151745774759547e-07,
+          "p50": 1.8410331108498212e-06,
+          "p75": 9.275874162995024e-06,
+          "p95": 9.703441355668474e-05,
+          "p99": 0.0005118059169035387
+        },
+        "temperature": 0.24,
+        "top_k_mass": {
+          "1": 0.03752415149323814,
+          "10": 0.13357087275256804,
+          "100": 0.34762261999080724
+        }
+      },
+      {
+        "effective_support": 9057.998444707982,
+        "is_canonical": false,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.0063659098242947465,
+          "p00": 0.0018397427629679441,
+          "p05": 0.0032742656185291708,
+          "p100": 0.11866259574890137,
+          "p25": 0.004304590635001659,
+          "p50": 0.005471980897709727,
+          "p75": 0.007380576455034316,
+          "p95": 0.012327446369454265,
+          "p99": 0.018393251486122572
+        },
+        "mean_over_uniform": 203.69001664795903,
+        "mean_predictive_entropy": 9.111403452412455,
+        "median_over_uniform": 175.08697278401817,
+        "per_initialization_median_max": "[0.00546506 0.00557433 0.00609718 0.0055339  0.00553519 0.0055102\n 0.00517057 0.00542498 0.0055261  0.00529228 0.00516387 0.0055417 ]",
+        "ranked_profile_at_rank": {
+          "1": 0.0063659098242947465,
+          "10": 0.00204086090823008,
+          "100": 0.0006848526811732055,
+          "2": 0.004311036545000313,
+          "5": 0.0027840695543419614
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 11.638361803606765,
+          "p00": 4.804915245862676,
+          "p05": 8.99614243842662,
+          "p100": 19.853736736272047,
+          "p25": 10.56088320534207,
+          "p50": 11.638691133603666,
+          "p75": 12.724486253131573,
+          "p95": 14.248757077030259,
+          "p99": 15.349163245144156
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 3.160789421498841e-05,
+          "p00": 2.385787123415639e-09,
+          "p05": 6.484006291884725e-07,
+          "p100": 0.008189395070075989,
+          "p25": 2.977322196784371e-06,
+          "p50": 8.818214610073483e-06,
+          "p75": 2.590995745777036e-05,
+          "p95": 0.00012388678442221135,
+          "p99": 0.00037842711317352933
+        },
+        "temperature": 0.36,
+        "top_k_mass": {
+          "1": 0.0063659098242947465,
+          "10": 0.03145645669696714,
+          "100": 0.12350684746766674
+        }
+      },
+      {
+        "effective_support": 15640.362596389083,
+        "is_canonical": false,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.0020981607639760647,
+          "p00": 0.0008291873964481056,
+          "p05": 0.0012920721201226115,
+          "p100": 0.02060556970536709,
+          "p25": 0.0015903566381894052,
+          "p50": 0.0019070589332841337,
+          "p75": 0.0023925149580463767,
+          "p95": 0.003527511958964169,
+          "p99": 0.00477976400870829
+        },
+        "mean_over_uniform": 67.13484996494215,
+        "mean_predictive_entropy": 9.657610197742905,
+        "median_over_uniform": 61.02016468829243,
+        "per_initialization_median_max": "[0.00190522 0.00193282 0.00207216 0.00192366 0.00192502 0.00191635\n 0.00182607 0.00189518 0.00192143 0.0018593  0.00182672 0.00192608]",
+        "ranked_profile_at_rank": {
+          "1": 0.0020981607639760647,
+          "10": 0.0009094124871242096,
+          "100": 0.000401423698303575,
+          "2": 0.0015827899926038984,
+          "5": 0.0011462929689161072
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 11.084455387829488,
+          "p00": 5.960150954550316,
+          "p05": 9.102698119807942,
+          "p100": 17.239137439203102,
+          "p25": 10.276207573085772,
+          "p50": 11.084789206032003,
+          "p75": 11.899443680774109,
+          "p95": 13.042304249046508,
+          "p99": 13.867251673550221
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 3.1510563164992946e-05,
+          "p00": 3.259400571664628e-08,
+          "p05": 2.166702245176566e-06,
+          "p100": 0.0025795225519686937,
+          "p25": 6.794183491365402e-06,
+          "p50": 1.534395141788991e-05,
+          "p75": 3.4442903597664554e-05,
+          "p95": 0.0001113649268518202,
+          "p99": 0.00025766597391338903
+        },
+        "temperature": 0.48,
+        "top_k_mass": {
+          "1": 0.0020981607639760647,
+          "10": 0.012361129026358922,
+          "100": 0.0607715734315252
+        }
+      },
+      {
+        "effective_support": 20203.157787620858,
+        "is_canonical": false,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.0010055695438655476,
+          "p00": 0.00048035476356744766,
+          "p05": 0.0006874696555314586,
+          "p100": 0.006371711380779743,
+          "p25": 0.000812422382296063,
+          "p50": 0.0009398915572091937,
+          "p75": 0.0011274738644715399,
+          "p95": 0.001539181947009638,
+          "p99": 0.001963584998156875
+        },
+        "mean_over_uniform": 32.17520869506593,
+        "mean_predictive_entropy": 9.913594197291486,
+        "median_over_uniform": 30.073710156022575,
+        "per_initialization_median_max": "[0.00093878 0.00094996 0.00100499 0.00094636 0.00094729 0.00094361\n 0.00090756 0.00093554 0.00094551 0.0009211  0.00090832 0.00094744]",
+        "ranked_profile_at_rank": {
+          "1": 0.0010055695438655476,
+          "10": 0.0005194055182572802,
+          "100": 0.00027018927825391464,
+          "2": 0.000806479563079554,
+          "5": 0.0006246161720003437
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 10.827497058125841,
+          "p00": 6.728743108520135,
+          "p05": 9.24264489143996,
+          "p100": 15.749285918988368,
+          "p25": 10.18076321967225,
+          "p50": 10.827839322670137,
+          "p75": 11.479507179676254,
+          "p95": 12.393653974128439,
+          "p99": 13.053460323007549
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 3.144795593236927e-05,
+          "p00": 1.446012447559042e-07,
+          "p05": 4.1448084857620415e-06,
+          "p100": 0.0011960353003814816,
+          "p25": 1.0339829486838426e-05,
+          "p50": 1.983942729566479e-05,
+          "p75": 3.789227775996551e-05,
+          "p95": 9.682116979092825e-05,
+          "p99": 0.0001895647837955037
+        },
+        "temperature": 0.6,
+        "top_k_mass": {
+          "1": 0.0010055695438655476,
+          "10": 0.00658782035945597,
+          "100": 0.03720099592720306
+        }
+      },
+      {
+        "effective_support": 27097.114441176287,
+        "is_canonical": true,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.00027785600804852706,
+          "p00": 0.0001793170376913622,
+          "p05": 0.00022289174012257718,
+          "p100": 0.0008505139849148691,
+          "p25": 0.000246480674832128,
+          "p50": 0.00026905687991529703,
+          "p75": 0.000300172898278106,
+          "p95": 0.00036187579098623246,
+          "p99": 0.00041901742806658125
+        },
+        "mean_over_uniform": 8.89055868952872,
+        "mean_predictive_entropy": 10.207182523013211,
+        "median_over_uniform": 8.60901298664976,
+        "per_initialization_median_max": "[0.0002688  0.0002708  0.00028016 0.00027009 0.00027034 0.00026962\n 0.00026343 0.00026838 0.00027005 0.00026585 0.0002636  0.00027037]",
+        "ranked_profile_at_rank": {
+          "1": 0.00027785600804852706,
+          "10": 0.000188348993739799,
+          "100": 0.0001273372553174205,
+          "2": 0.00024448015909528387,
+          "5": 0.0002102382589230789
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 10.53525614481538,
+          "p00": 8.076759621997104,
+          "p05": 9.584338725102924,
+          "p100": 13.487123374964312,
+          "p25": 10.14728840219244,
+          "p50": 10.535530616112046,
+          "p75": 10.926490960207156,
+          "p95": 11.474927298238669,
+          "p99": 11.870769584217234
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 3.1366937065458476e-05,
+          "p00": 1.3887265595258214e-06,
+          "p05": 1.038729328683985e-05,
+          "p100": 0.0003106761141680181,
+          "p25": 1.797567756511853e-05,
+          "p50": 2.6575239644444082e-05,
+          "p75": 3.9182184082164895e-05,
+          "p95": 6.879780448798556e-05,
+          "p99": 0.00010293202358297976
+        },
+        "temperature": 1.0,
+        "top_k_mass": {
+          "1": 0.00027785600804852706,
+          "10": 0.0021571922733412867,
+          "100": 0.015267693632393092
+        }
+      },
+      {
+        "effective_support": 28506.56446480875,
+        "is_canonical": false,
+        "max_probability": {
+          "count": 393216,
+          "mean": 0.0001972249324000419,
+          "p00": 0.00013709525228478014,
+          "p05": 0.00016439304090454243,
+          "p100": 0.0005019186646677554,
+          "p25": 0.00017878124344861135,
+          "p50": 0.00019233555940445513,
+          "p75": 0.00021070568254799582,
+          "p95": 0.0002462181873852387,
+          "p99": 0.00027825564320664836
+        },
+        "mean_over_uniform": 6.310606162004142,
+        "mean_predictive_entropy": 10.25788967183293,
+        "median_over_uniform": 6.1541608942643515,
+        "per_initialization_median_max": "[0.00019218 0.00019339 0.00019892 0.00019294 0.0001931  0.00019266\n 0.00018897 0.00019195 0.00019292 0.00019042 0.00018908 0.00019312]",
+        "ranked_profile_at_rank": {
+          "1": 0.0001972249324000419,
+          "10": 0.00014285952901105237,
+          "100": 0.00010310955510075177,
+          "2": 0.00017743057588925915,
+          "5": 0.00015654299129423213
+        },
+        "target_loss": {
+          "count": 393216,
+          "mean": 10.485185956501667,
+          "p00": 8.436591373667977,
+          "p05": 9.69277471523379,
+          "p100": 12.944891849975978,
+          "p25": 10.161898926775372,
+          "p50": 10.485427209911606,
+          "p75": 10.811214312317075,
+          "p95": 11.268304135112203,
+          "p99": 11.598089925459654
+        },
+        "target_probability": {
+          "count": 393216,
+          "mean": 3.134950719273048e-05,
+          "p00": 2.388388111285167e-06,
+          "p05": 1.2771376077580499e-05,
+          "p100": 0.0002167878410546109,
+          "p25": 2.0172014956187923e-05,
+          "p50": 2.794067040667869e-05,
+          "p75": 3.8613873584836256e-05,
+          "p95": 6.172788926050998e-05,
+          "p99": 8.635617923573573e-05
+        },
+        "temperature": 1.2,
+        "top_k_mass": {
+          "1": 0.0001972249324000419,
+          "10": 0.0015974379216754748,
+          "100": 0.0119704081882908
+        }
+      }
+    ],
+    "temperatures": "[0.12 0.24 0.36 0.48 0.6  1.   1.2 ]",
+    "uniform_probability": 3.125292996218395e-05
+  },
+  "temperature_gradients": {
+    "greedy_is_temperature_invariant": true,
+    "num_positions": 32768,
+    "num_tokens": 5296,
+    "rows": [
+      {
+        "is_canonical": false,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 110.26508720792556,
+          "p00": 71.86420209599386,
+          "p01": 101.09354076652576,
+          "p05": 102.18240908602337,
+          "p100": 165.61292772912125,
+          "p25": 104.55118819539865,
+          "p50": 107.59373046246773,
+          "p75": 113.66568387460487,
+          "p95": 127.2607315023603,
+          "p99": 138.04410416621354
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.038875735627601826
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.027197498616517875
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.022354548672017926
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": -0.010129717902178472
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.028503110827294103
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.10836440852861474
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.10551219288143888,
+        "spearman_gradient_vs_guess": 0.038875735627601826,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.051683772352659446
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": -0.0019365152118406333
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.075334629512659
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.02947623524468986
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": -0.02162649224386169
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.04782758019685312
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.04235302447077804
+          }
+        ],
+        "temperature": 0.12,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 110.3116519622187,
+          "p00": 99.92328193735895,
+          "p01": 101.25765926807367,
+          "p05": 102.56797504988087,
+          "p100": 154.32212824685354,
+          "p25": 105.48261708225633,
+          "p50": 108.72954436280838,
+          "p75": 113.1460603905264,
+          "p95": 123.65248703195849,
+          "p99": 135.6656462129779
+        }
+      },
+      {
+        "is_canonical": false,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 50.97874175931602,
+          "p00": 48.82332762701149,
+          "p01": 49.426425546201976,
+          "p05": 49.661782326304106,
+          "p100": 64.780722867434,
+          "p25": 50.15754403190324,
+          "p50": 50.648894873044625,
+          "p75": 51.279489290902816,
+          "p95": 53.471876146958124,
+          "p99": 57.46528265174998
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.11856210840739313
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.12650658580461446
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.1903542439877572
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": 0.27630775643554656
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.2762307940898548
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.22942422893505882
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.13836985148862027,
+        "spearman_gradient_vs_guess": 0.11856210840739313,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.11532025524216781
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": 0.09602863541210567
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.1032364935375318
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.1184937118543032
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": 0.25759875666053766
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.3352726721790774
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.24945020595557713
+          }
+        ],
+        "temperature": 0.24,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 50.94180264786305,
+          "p00": 49.02934193759157,
+          "p01": 49.499914691485785,
+          "p05": 49.76515143848684,
+          "p100": 63.5042066548392,
+          "p25": 50.289105233219516,
+          "p50": 50.733004370859234,
+          "p75": 51.263650942395486,
+          "p95": 52.79563885418284,
+          "p99": 55.414596849359086
+        }
+      },
+      {
+        "is_canonical": false,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 33.91930307404814,
+          "p00": 32.49612910388146,
+          "p01": 32.897460945658224,
+          "p05": 33.04815292916878,
+          "p100": 42.25951368175641,
+          "p25": 33.37817899314368,
+          "p50": 33.701108890981104,
+          "p75": 34.12067508513113,
+          "p95": 35.56522689513687,
+          "p99": 38.29400715500378
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.11890549626836514
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.12439170422015107
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.1918869619405955
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": 0.285072266172006
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.29088095652234874
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.23534686527984974
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.14071457781297061,
+        "spearman_gradient_vs_guess": 0.11890549626836514,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.11810661845429309
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": 0.0934697650935295
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.09997705918003441
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.11601735228629605
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": 0.2663526354197287
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.35026916248581325
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.2474008660618298
+          }
+        ],
+        "temperature": 0.36,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 33.89327278599832,
+          "p00": 32.65582485031867,
+          "p01": 32.9274185865926,
+          "p05": 33.12028319156603,
+          "p100": 42.25951368175641,
+          "p25": 33.460727907385085,
+          "p50": 33.75802919643947,
+          "p75": 34.10864370556209,
+          "p95": 35.11081303624201,
+          "p99": 36.869564339176286
+        }
+      },
+      {
+        "is_canonical": false,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 25.435775026640073,
+          "p00": 24.366898104201315,
+          "p01": 24.668207391391732,
+          "p05": 24.782700470396446,
+          "p100": 31.678918920525984,
+          "p25": 25.02990423939558,
+          "p50": 25.27206902359962,
+          "p75": 25.58663792437473,
+          "p95": 26.671889878209353,
+          "p99": 28.71070898198015
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.11897796080983246
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.12460933489019815
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.191954970355164
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": 0.2854490105376673
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.29007755053096407
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.23650872217045465
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.14081745089195818,
+        "spearman_gradient_vs_guess": 0.11897796080983246,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.11808577740000244
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": 0.09352674060067484
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.10054591736164334
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.11588690965556767
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": 0.26782434494937
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.3492827464567352
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.24819783157606487
+          }
+        ],
+        "temperature": 0.48,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 25.416358119747667,
+          "p00": 24.48717560768529,
+          "p01": 24.692949655123694,
+          "p05": 24.836649642978152,
+          "p100": 31.678918920525984,
+          "p25": 25.091464459040967,
+          "p50": 25.315121015767907,
+          "p75": 25.57778219508228,
+          "p95": 26.328300546329842,
+          "p99": 27.65805515708987
+        }
+      },
+      {
+        "is_canonical": false,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 20.34781236312239,
+          "p00": 19.492169282074844,
+          "p01": 19.73400002162364,
+          "p05": 19.825541073762206,
+          "p100": 25.33671996428279,
+          "p25": 20.023339051159898,
+          "p50": 20.21680317873909,
+          "p75": 20.46820838736805,
+          "p95": 21.337559537577462,
+          "p99": 22.964300327592714
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.11902478426576057
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.12478145097072675
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.1919664674796899
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": 0.28564386791174035
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.29064411429367465
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.23650872217045465
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.1408835755659269,
+        "spearman_gradient_vs_guess": 0.11902478426576057,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.11800494861916694
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": 0.09386276826041914
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.10088046324876804
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.1157361437855626
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": 0.2684251125110439
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.35006149595337577
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.24819783157606487
+          }
+        ],
+        "temperature": 0.6,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 20.332317031719803,
+          "p00": 19.589558051883444,
+          "p01": 19.75371035624045,
+          "p05": 19.868326387674003,
+          "p100": 25.33671996428279,
+          "p25": 20.072580064319588,
+          "p50": 20.251679613259533,
+          "p75": 20.461615415175046,
+          "p95": 21.06236954256189,
+          "p99": 22.12633911178729
+        }
+      },
+      {
+        "is_canonical": true,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 12.208265987490687,
+          "p00": 11.694523633607119,
+          "p01": 11.839958627712157,
+          "p05": 11.895138694934683,
+          "p100": 15.196714631734812,
+          "p25": 12.013564203216214,
+          "p50": 12.129651332009816,
+          "p75": 12.280632435749201,
+          "p95": 12.80222765358194,
+          "p99": 13.775710329307174
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.11907512137455396
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.12488605427191257
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.19198623251216787
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": 0.28566211693825955
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.29017042983632646
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.23650872217045465
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.1409401572533227,
+        "spearman_gradient_vs_guess": 0.11907512137455396,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.11797781807767752
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": 0.09392357873996231
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.10109398445233324
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.11560763095797029
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": 0.2685043408706954
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.34974505171347103
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.24819783157606487
+          }
+        ],
+        "temperature": 1.0,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 12.198996195997337,
+          "p00": 11.754068729206354,
+          "p01": 11.852432599749333,
+          "p05": 11.92049293272466,
+          "p100": 15.196714631734812,
+          "p25": 12.04298479644825,
+          "p50": 12.150414598911137,
+          "p75": 12.276602610425392,
+          "p95": 12.636870910699445,
+          "p99": 13.275941488053233
+        }
+      },
+      {
+        "is_canonical": false,
+        "num_tokens": 5296,
+        "position_gradient_norm": {
+          "count": 32768,
+          "mean": 10.173501108875897,
+          "p00": 9.745325425502724,
+          "p01": 9.866565771369796,
+          "p05": 9.912557139304292,
+          "p100": 12.662964597322135,
+          "p25": 10.011262821964985,
+          "p50": 10.10799253549807,
+          "p75": 10.233766170970753,
+          "p95": 10.668541035350314,
+          "p99": 11.479310550059447
+        },
+        "sensitivity_by_min_occurrences": [
+          {
+            "min_occurrences": 1,
+            "num_tokens": 5296,
+            "spearman_gradient_vs_guess": 0.11907650202469047
+          },
+          {
+            "min_occurrences": 2,
+            "num_tokens": 2762,
+            "spearman_gradient_vs_guess": 0.12490637983670519
+          },
+          {
+            "min_occurrences": 5,
+            "num_tokens": 982,
+            "spearman_gradient_vs_guess": 0.1919516205069365
+          },
+          {
+            "min_occurrences": 10,
+            "num_tokens": 382,
+            "spearman_gradient_vs_guess": 0.2856103862267216
+          },
+          {
+            "min_occurrences": 20,
+            "num_tokens": 174,
+            "spearman_gradient_vs_guess": 0.29041036804184595
+          },
+          {
+            "min_occurrences": 50,
+            "num_tokens": 65,
+            "spearman_gradient_vs_guess": 0.23650872217045465
+          }
+        ],
+        "spearman_gradient_vs_corpus": 0.14094020128123042,
+        "spearman_gradient_vs_guess": 0.11907650202469047,
+        "strata": [
+          {
+            "max_occurrences": 1,
+            "min_occurrences": 1,
+            "num_tokens": 2534,
+            "spearman_gradient_vs_guess": 0.11795354927398337
+          },
+          {
+            "max_occurrences": 2,
+            "min_occurrences": 2,
+            "num_tokens": 1012,
+            "spearman_gradient_vs_guess": 0.09394146669846225
+          },
+          {
+            "max_occurrences": 4,
+            "min_occurrences": 3,
+            "num_tokens": 768,
+            "spearman_gradient_vs_guess": 0.10120404522727759
+          },
+          {
+            "max_occurrences": 8,
+            "min_occurrences": 5,
+            "num_tokens": 531,
+            "spearman_gradient_vs_guess": 0.11557072347299305
+          },
+          {
+            "max_occurrences": 16,
+            "min_occurrences": 9,
+            "num_tokens": 249,
+            "spearman_gradient_vs_guess": 0.2682444262519826
+          },
+          {
+            "max_occurrences": 64,
+            "min_occurrences": 17,
+            "num_tokens": 149,
+            "spearman_gradient_vs_guess": 0.34974505171347103
+          },
+          {
+            "max_occurrences": null,
+            "min_occurrences": 65,
+            "num_tokens": 53,
+            "spearman_gradient_vs_guess": 0.24819783157606487
+          }
+        ],
+        "temperature": 1.2,
+        "token_gradient_norm": {
+          "count": 5296,
+          "mean": 10.165781256916752,
+          "p00": 9.795159233189102,
+          "p01": 9.877040613856463,
+          "p05": 9.933833371504996,
+          "p100": 12.662964597322135,
+          "p25": 10.035778082589026,
+          "p50": 10.125256118789457,
+          "p75": 10.230570670279224,
+          "p95": 10.530756181980875,
+          "p99": 11.063292748891286
+        }
+      }
+    ],
+    "target_occurrence_count": {
+      "count": 5296,
+      "mean": 6.187311178247734,
+      "p00": 1.0,
+      "p01": 1.0,
+      "p05": 1.0,
+      "p100": 1370.0,
+      "p25": 1.0,
+      "p50": 2.0,
+      "p75": 3.0,
+      "p95": 13.0,
+      "p99": 64.15000000000055
+    },
+    "temperatures": "[0.12 0.24 0.36 0.48 0.6  1.   1.2 ]"
+  }
+}

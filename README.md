@@ -46,6 +46,12 @@ sampling seed and replicates averaged within an initialization.
 [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) is the authoritative scientific
 document: every definition, every measure, and the validated baseline and pilot history.
 
+[`docs/experiment_logbook/`](docs/experiment_logbook/EXPERIMENT_LOGBOOK.md) is the running
+logbook of individual experiments: one entry per experiment, with its provenance, exact
+commands, figures, findings, caveats, and a claim ledger recording what the evidence does and
+does not support. The two are complements — `EXPERIMENT_LOG.md` defines the quantities, the
+logbook records what particular runs measured.
+
 ## Repository structure
 
 ```text
@@ -82,6 +88,11 @@ IGB_LLMs/
 
   docs/
     EXPERIMENT_LOG.md
+    experiment_logbook/
+      EXPERIMENT_LOGBOOK.md
+      figures/
+      data/
+      supporting_material/
 
   notebooks/
     initialization_distribution.ipynb
@@ -193,7 +204,7 @@ IGB_LLMs/
 | `configs/` | YAML files controlling model size, data source, batching, seed, device, experiment persistence, and experiment protocols. |
 | `data/` | Local raw/downloaded datasets for smoke tests, inference checks, and initialization analysis.. See [`data/README.md`](data/README.md) for dataset-source details, config usage, and data-pipeline commands. |
 | `scripts/` | Runnable entry points for sanity checks, inference, initialization analysis, and experiment-tracking checks. See [`scripts/README.md`](scripts/README.md) for the script-by-script guide, options, and expected outputs. |
-| `docs/` | The scientific experiment log. See [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md). |
+| `docs/` | The scientific experiment log, [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md), and the per-experiment logbook, [`docs/experiment_logbook/`](docs/experiment_logbook/EXPERIMENT_LOGBOOK.md). |
 | `notebooks/` | Readable scientific logs that load a persisted experiment record and explain it. Computation lives in the package, not in cells. See [`notebooks/README.md`](notebooks/README.md). |
 | `src/` | Reusable Python package code. See [`src/README.md`](src/README.md) for source-module navigation and extension guidance. |
 | `tests/` | Lightweight tests covering imports, model shapes, data pipeline, inference, evaluation, gradient norms, experiment persistence, and the persisted-analysis workflow. See [`tests/README.md`](tests/README.md) for detailed test-suite guidance. |

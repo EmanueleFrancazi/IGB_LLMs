@@ -1,0 +1,14 @@
+gradient_temperatures                  [0.12, 0.24, 0.36, 0.48, 0.6, 1.0, 1.2]
+gradient_temperature_position_norms    (7, 32768) float64
+gradient_temperature_position_sketches (7, 32768, 512) float32
+gradient_position_norms                (32768,)
+gradient_position_sketches             (32768, 512)
+canonical T_g=1 row                    index 5, both slices EXACT
+  T_g=0.12 identical to canonical: False
+  T_g=0.24 identical to canonical: False
+  T_g=0.36 identical to canonical: False
+  T_g=0.48 identical to canonical: False
+  T_g=0.60 identical to canonical: False
+  T_g=1.20 identical to canonical: False
+temperature sketch field logical size  448.0 MiB
+RAW RECORD VALIDATION PASSED

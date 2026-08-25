@@ -1,0 +1,17 @@
+quantity	value
+c_same	-0.0015078885
+c_different	0.0011628681
+delta_cross	-0.0026707566
+num_same_pairs	27852
+num_different_pairs	1073681204
+null_delta_mean	-0.0009199756
+null_delta_low	-0.0047153651
+null_delta_high	0.0025341410
+null_permutations	256
+null_seed	20240919
+contingency_cells	20513
+mixture_num_classes	3166
+mixture_median	0.3853171854
+mixture_q1	0.1703671455
+mixture_q3	0.6627515715
+mixture_support_weighted_mean	0.5185553776

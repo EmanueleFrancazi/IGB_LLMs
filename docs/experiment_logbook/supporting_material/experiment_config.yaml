@@ -1,0 +1,59 @@
+experiment:
+  name: initialization_distribution
+  output_dir: outputs
+  phase: initialization_distribution
+  seed: 1234
+  notes: null
+  tags:
+  - initialization
+  - token-distribution
+  - guessing-policies
+logging:
+  log_every_steps: 10
+  evaluate_every_steps: 100
+  flush_every_records: 1
+  training_metrics_filename: training_metrics.jsonl
+  evaluation_metrics_filename: evaluation_metrics.jsonl
+checkpointing:
+  enabled: false
+  save_every_steps: 500
+  save_latest_pointer: true
+  filename_width: 6
+initialization:
+  num_initializations: 12
+  base_seed: 1000
+  seed_stride: 1
+positions:
+  num_windows: 512
+  block_size: 64
+  split: train
+sampling:
+  method: temperature_top_p
+  temperature: 0.6
+  top_p: 0.9
+  seed: 20240601
+  num_replicates: 1
+  common_random_numbers: true
+uniform_null:
+  enabled: true
+  seed: 20260812
+  replicates: 256
+temperature_sweep:
+  enabled: true
+  temperatures:
+  - 0.12
+  - 0.24
+  - 0.36
+  - 0.48
+  - 0.6
+  - 1.2
+input_structure:
+  enabled: true
+  shuffle_seed: 60001
+  gaussian_seed: 60002
+gradient_analysis:
+  enabled: false
+  initialization_index: 0
+  num_windows: null
+runtime:
+  forward_batch_size: 32

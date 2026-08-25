@@ -1,0 +1,150 @@
+Recovering nucleus labels: initialization 0 (seed 1000), 32,768 positions, T_s = 0.12, 0.24, 0.36, 0.48, 0.6, 1.2
+Loss temperatures: T_g = 0.12, 0.24, 0.36, 0.48, 0.6, 1.2
+  measured directional fields at T_g = 0.12, 0.24, 0.36, 0.48, 0.6, 1, 1.2
+Forward batch size: 4 (historical realized metadata)
+
+Exact histogram gate, per sampling temperature:
+       T  exact match    bins  max diff  sum |diff|
+    0.12          yes       0         0           0
+    0.24          yes       0         0           0
+    0.36          yes       0         0           0
+    0.48          yes       0         0           0
+    0.60          yes       0         0           0
+    1.20          yes       0         0           0
+  all 6 temperatures reproduce the recorded counts exactly.
+{
+  "by_temperature": [
+    {
+      "between": 0.0016553999002457652,
+      "delta": 0.2739331721585582,
+      "fraction_positions_in_qualifying": 0.80255126953125,
+      "loss_temperature": 0.12,
+      "null_delta_high": 0.00029332383084746544,
+      "null_delta_low": -0.0002693720503109811,
+      "num_qualifying_classes": 4641,
+      "sampling_temperature": 0.12,
+      "singleton_fraction": 0.5823058230582305,
+      "within": 0.275588572058804
+    },
+    {
+      "between": 0.0012640282901975927,
+      "delta": 0.051485335582366204,
+      "fraction_positions_in_qualifying": 0.677337646484375,
+      "loss_temperature": 0.24,
+      "null_delta_high": 0.000562444284951647,
+      "null_delta_low": -0.0005490506606901191,
+      "num_qualifying_classes": 7982,
+      "sampling_temperature": 0.24,
+      "singleton_fraction": 0.5698194556723255,
+      "within": 0.0527493638725638
+    },
+    {
+      "between": 0.0012035012885396278,
+      "delta": 0.010745333755177512,
+      "fraction_positions_in_qualifying": 0.65142822265625,
+      "loss_temperature": 0.36,
+      "null_delta_high": 0.0007558795376796679,
+      "null_delta_low": -0.0008455469775510043,
+      "num_qualifying_classes": 8604,
+      "sampling_temperature": 0.36,
+      "singleton_fraction": 0.5703585339059223,
+      "within": 0.011948835043717139
+    },
+    {
+      "between": 0.0011839758299438642,
+      "delta": 0.0037104823696725636,
+      "fraction_positions_in_qualifying": 0.6455078125,
+      "loss_temperature": 0.48,
+      "null_delta_high": 0.0007598912113797448,
+      "null_delta_low": -0.0007495939081308239,
+      "num_qualifying_classes": 8739,
+      "sampling_temperature": 0.48,
+      "singleton_fraction": 0.5706705969049374,
+      "within": 0.0048944581996164275
+    },
+    {
+      "between": 0.0011744126386275544,
+      "delta": 0.0015581403041887182,
+      "fraction_positions_in_qualifying": 0.645416259765625,
+      "loss_temperature": 0.6,
+      "null_delta_high": 0.000838817110156192,
+      "null_delta_low": -0.0008756720262418558,
+      "num_qualifying_classes": 8768,
+      "sampling_temperature": 0.6,
+      "singleton_fraction": 0.569922009123461,
+      "within": 0.0027325529428162726
+    },
+    {
+      "between": 0.0011606611246928137,
+      "delta": 0.00028944699188237664,
+      "fraction_positions_in_qualifying": 0.642242431640625,
+      "loss_temperature": 1.2,
+      "null_delta_high": 0.0007445543531786011,
+      "null_delta_low": -0.0009497620678473452,
+      "num_qualifying_classes": 8733,
+      "sampling_temperature": 1.2,
+      "singleton_fraction": 0.573083691826359,
+      "within": 0.0014501081165751903
+    }
+  ],
+  "forward_batch_size": 4,
+  "forward_batch_size_source": "historical",
+  "histogram_gate": "exact match at every temperature",
+  "historical_forward_batch_size": 4,
+  "initialization_index": 0,
+  "loss_temperatures": [
+    0.12,
+    0.24,
+    0.36,
+    0.48,
+    0.6,
+    1.2
+  ],
+  "model_seed": 1000,
+  "num_directional_fields_read": 6,
+  "num_pairs_reused": 0,
+  "num_positions": 32768,
+  "num_unique_loss_temperatures": 6,
+  "num_unique_sampling_temperatures": 6,
+  "permutations": 256,
+  "references": {
+    "greedy": 0.24528139678909938,
+    "target": 0.12697792939532765
+  },
+  "references_by_loss_temperature": {
+    "0.12": {
+      "greedy": 0.24528139678909938,
+      "target": 0.12697792939532765
+    },
+    "0.24": {
+      "greedy": 0.12158900222036007,
+      "target": 0.1296587296814792
+    },
+    "0.36": {
+      "greedy": 0.11839364664916653,
+      "target": 0.12977217081677483
+    },
+    "0.48": {
+      "greedy": 0.11812771577317559,
+      "target": 0.12981734802259023
+    },
+    "0.6": {
+      "greedy": 0.11804962823046206,
+      "target": 0.12984121603135895
+    },
+    "1.2": {
+      "greedy": 0.11795954003738711,
+      "target": 0.1298816701518467
+    }
+  },
+  "sampling_temperatures": [
+    0.12,
+    0.24,
+    0.36,
+    0.48,
+    0.6,
+    1.2
+  ]
+}
+
+Artifact written: /home/EAWAG/francaem/restored/IGB_LLMs_LossTempGeometry_7ef6b4a_20260824-181907/outputs/full_loss_temperature_geometry/initialization_distribution/20260824-174741__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N32768-I12-R1__c230733d/analyses/nucleus_gradient_clustering.npz

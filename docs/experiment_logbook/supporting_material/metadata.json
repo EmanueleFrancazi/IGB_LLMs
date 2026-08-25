@@ -1,0 +1,935 @@
+{
+  "analysis": {
+    "corpus_token_count": 45549,
+    "eligible_vocab_size": 31997,
+    "evaluation_positions": {
+      "block_size": 64,
+      "first_start": 0,
+      "last_start": 45484,
+      "num_positions": 32768,
+      "num_windows": 512,
+      "strategy": "evenly_spaced_deterministic"
+    },
+    "excluded_special_token_ids": [
+      0,
+      1,
+      2
+    ],
+    "forward_batch_size": 4,
+    "gaussian_embedding_moments": [
+      {
+        "mean": -0.00014534032379742712,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 1.000010371208191
+      },
+      {
+        "mean": -0.0007530320435762405,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 1.0003846883773804
+      },
+      {
+        "mean": -0.00016803594189696014,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 1.0003843307495117
+      },
+      {
+        "mean": -0.00015221672947518528,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 1.000349760055542
+      },
+      {
+        "mean": 0.0005250597023405135,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 1.0000511407852173
+      },
+      {
+        "mean": -0.00044644271838478744,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 0.9996095299720764
+      },
+      {
+        "mean": -0.00019038229947909713,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 0.9998550415039062
+      },
+      {
+        "mean": 0.00027698228950612247,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 0.9998642206192017
+      },
+      {
+        "mean": 0.0002854957419913262,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 1.0003886222839355
+      },
+      {
+        "mean": 0.0004270784556865692,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 0.9993708729743958
+      },
+      {
+        "mean": -0.0005396762862801552,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 0.9999920129776001
+      },
+      {
+        "mean": -0.00010575195483397692,
+        "num_rows": 31997,
+        "rule": "eligible embedding rows only, entry-wise mean and std",
+        "std": 0.9998846054077148
+      }
+    ],
+    "gaussian_seed": 60002,
+    "gradient_analysis": {
+      "block_size": 64,
+      "canonical_temperature": 1.0,
+      "compensating_t_squared_factor": false,
+      "covers_all_positions": true,
+      "definition": "l2_norm_of_gradient_of_single_position_next_token_cross_entropy_with_respect_to_all_trainable_parameters",
+      "enabled": true,
+      "gradient_sketch": {
+        "dimension": 512,
+        "parameter_count": 8585856,
+        "preserves": "inner_products_in_expectation",
+        "projection": "count_sketch_signed_feature_hashing",
+        "seed": 20240917,
+        "temperature": 1.0
+      },
+      "guessing_policy": "greedy",
+      "includes_all_trainable_parameters": true,
+      "initialization_index": 0,
+      "input_condition": "real",
+      "mean_gradient_norm": 12.208265987490687,
+      "mean_loss": 10.56332105473848,
+      "model_seed": 1000,
+      "num_parameter_tensors": 21,
+      "num_positions": 32768,
+      "num_windows": 512,
+      "parameter_count": 8585856,
+      "seconds": 2861.92,
+      "softmax_support": "eligible",
+      "temperature_enters_the_loss": true,
+      "temperatures": [
+        0.12,
+        0.24,
+        0.36,
+        0.48,
+        0.6,
+        1.0,
+        1.2
+      ],
+      "vector_split": {
+        "cosine": -0.0036252424403093605,
+        "dot": -609.6032726745993,
+        "norm_correct": 12.233942473507268,
+        "norm_total": 13744.93121897925,
+        "norm_wrong": 13744.970125528369,
+        "num_correct": 1,
+        "num_wrong": 32767,
+        "temperature": 1.0
+      }
+    },
+    "input_conditions": [
+      "real",
+      "shuffled",
+      "gaussian"
+    ],
+    "model_seeds": [
+      1000,
+      1001,
+      1002,
+      1003,
+      1004,
+      1005,
+      1006,
+      1007,
+      1008,
+      1009,
+      1010,
+      1011
+    ],
+    "num_initializations": 12,
+    "num_positions": 32768,
+    "predictive_probabilities": {
+      "before_sampling": true,
+      "before_top_p": true,
+      "confidence_temperature_note": "Diagnostic only: softmax(z/T) is measured, never sampled and never truncated. argmax softmax(z/T) = argmax z for every positive T, so every temperature describes the SAME greedy decisions. This is not the stochastic nucleus sweep.",
+      "confidence_temperatures": [
+        0.12,
+        0.24,
+        0.36,
+        0.48,
+        0.6,
+        1.0,
+        1.2
+      ],
+      "eligible_vocab_size": 31997,
+      "enabled": true,
+      "from_raw_logits": true,
+      "input_condition": "real",
+      "note": "Softmax of the raw logits restricted to the eligible support, at temperature 1, before any top-p truncation and before any greedy or nucleus selection. NOT the nucleus distribution.",
+      "ranked_profile_order": "rank_within_position_then_average_over_positions",
+      "retains_full_probability_tensor": false,
+      "support": "eligible",
+      "temperature": 1.0,
+      "uniform_probability": 3.125292996218395e-05
+    },
+    "raw_logits": [
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": -0.00023363984494509206,
+        "model_seed": 1000,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.468240713351406,
+          "mean": 2.329795513412016,
+          "median": 2.3178241147397785,
+          "min": 1.9380931713385507,
+          "p05": 2.110536438442068,
+          "p95": 2.579747917613713
+        },
+        "per_position_std": {
+          "max": 0.5873400097025724,
+          "mean": 0.5768919910564736,
+          "median": 0.5770134952346659,
+          "min": 0.5679849605299968,
+          "p05": 0.5733011645560787,
+          "p95": 0.5805300550823995
+        },
+        "std": 0.5768990858036805,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": -0.0001626331343801248,
+        "model_seed": 1001,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.399742690846324,
+          "mean": 2.3476396669504345,
+          "median": 2.3261243783927057,
+          "min": 1.9554011751897633,
+          "p05": 2.150360697857104,
+          "p95": 2.5987956618657333
+        },
+        "per_position_std": {
+          "max": 0.5861772372198669,
+          "mean": 0.5774758318929144,
+          "median": 0.5775338429619133,
+          "min": 0.5698148753307458,
+          "p05": 0.5735605071979346,
+          "p95": 0.5811334711502738
+        },
+        "std": 0.5774796255662764,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": 0.0001896108830602678,
+        "model_seed": 1002,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.19150636397535,
+          "mean": 2.373668991527609,
+          "median": 2.3594436878338456,
+          "min": 1.9399335216730833,
+          "p05": 2.135955599520821,
+          "p95": 2.6717217577621337
+        },
+        "per_position_std": {
+          "max": 0.585157589391583,
+          "mean": 0.5771560577204413,
+          "median": 0.577183900221379,
+          "min": 0.569246894176105,
+          "p05": 0.5734928395976118,
+          "p95": 0.5808961919286565
+        },
+        "std": 0.5771624831718634,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": 0.0004835258295623257,
+        "model_seed": 1003,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.4313724276871653,
+          "mean": 2.3371535936162156,
+          "median": 2.3231170846993336,
+          "min": 1.9508474697358906,
+          "p05": 2.1283213667302334,
+          "p95": 2.5904354280792177
+        },
+        "per_position_std": {
+          "max": 0.5851135233368222,
+          "mean": 0.576923506832005,
+          "median": 0.5767271926112489,
+          "min": 0.5702153270941847,
+          "p05": 0.5734103733268098,
+          "p95": 0.5804426792828739
+        },
+        "std": 0.5769264450496487,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": 4.975352407185939e-05,
+        "model_seed": 1004,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.2538288709474728,
+          "mean": 2.3502162423160136,
+          "median": 2.3242040985496715,
+          "min": 1.9593375599361025,
+          "p05": 2.1228531175875105,
+          "p95": 2.6404335030179933
+        },
+        "per_position_std": {
+          "max": 0.5856998928599163,
+          "mean": 0.5768297750254499,
+          "median": 0.5769006704632801,
+          "min": 0.5676456261204919,
+          "p05": 0.5734124592762578,
+          "p95": 0.5804460326673828
+        },
+        "std": 0.5768364273460868,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": 9.34604512010004e-05,
+        "model_seed": 1005,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.195890989038162,
+          "mean": 2.333800085427444,
+          "median": 2.3212015454191715,
+          "min": 1.9865616948809475,
+          "p05": 2.13212781281909,
+          "p95": 2.5765230175573377
+        },
+        "per_position_std": {
+          "max": 0.5866358702122734,
+          "mean": 0.5771291889047934,
+          "median": 0.5770989361881853,
+          "min": 0.5699354316513999,
+          "p05": 0.5736976771914352,
+          "p95": 0.5810696853451361
+        },
+        "std": 0.5771344721065406,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": -2.3922503348326394e-05,
+        "model_seed": 1006,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.270926239900291,
+          "mean": 2.3223960228772507,
+          "median": 2.2976706188346725,
+          "min": 1.9714783505769446,
+          "p05": 2.140953841106966,
+          "p95": 2.574385228811297
+        },
+        "per_position_std": {
+          "max": 0.5855933791549862,
+          "mean": 0.5768847082279642,
+          "median": 0.5767142263343009,
+          "min": 0.5690598284932349,
+          "p05": 0.5732354963663316,
+          "p95": 0.5809670488687945
+        },
+        "std": 0.5768894490860055,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": 0.0006070041297067296,
+        "model_seed": 1007,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.1665924267144874,
+          "mean": 2.339459383732295,
+          "median": 2.3173380364314653,
+          "min": 1.9646836784668267,
+          "p05": 2.1252995240847667,
+          "p95": 2.6061417281569446
+        },
+        "per_position_std": {
+          "max": 0.5857769174332201,
+          "mean": 0.5777994431450564,
+          "median": 0.5776597213584512,
+          "min": 0.5701330889077435,
+          "p05": 0.5746684085482893,
+          "p95": 0.5817002105059751
+        },
+        "std": 0.5778029076676445,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": -6.545923458704839e-05,
+        "model_seed": 1008,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.2078672517091036,
+          "mean": 2.3435932824740946,
+          "median": 2.3236517002806067,
+          "min": 1.9492361769080162,
+          "p05": 2.131521487329155,
+          "p95": 2.6174865004257297
+        },
+        "per_position_std": {
+          "max": 0.5849513577676064,
+          "mean": 0.5771956975720899,
+          "median": 0.5775020412923044,
+          "min": 0.567569090685687,
+          "p05": 0.5728778848961347,
+          "p95": 0.5807103704730133
+        },
+        "std": 0.577200482491885,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": -0.0004031422427573319,
+        "model_seed": 1009,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.130094641353935,
+          "mean": 2.3224220581175503,
+          "median": 2.3072993832756765,
+          "min": 1.9079308337531984,
+          "p05": 2.126574034261284,
+          "p95": 2.5760778573385323
+        },
+        "per_position_std": {
+          "max": 0.586387658990515,
+          "mean": 0.5775110101295633,
+          "median": 0.5774301010240132,
+          "min": 0.5689533232597789,
+          "p05": 0.5735893402405259,
+          "p95": 0.5819421958715096
+        },
+        "std": 0.5775158272461096,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": -0.0005707027009823323,
+        "model_seed": 1010,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.19154888112098,
+          "mean": 2.3266330760360256,
+          "median": 2.299139640526846,
+          "min": 1.955119081074372,
+          "p05": 2.1348959113820456,
+          "p95": 2.6155486316152743
+        },
+        "per_position_std": {
+          "max": 0.5864754895336343,
+          "mean": 0.5774244549230956,
+          "median": 0.5773449740405405,
+          "min": 0.5673209052814031,
+          "p05": 0.5737278573905329,
+          "p95": 0.5809793105517621
+        },
+        "std": 0.5774298779792505,
+        "support": "eligible",
+        "temperature_independent": true
+      },
+      {
+        "eligible_vocab_size": 31997,
+        "excludes_masked_entries": true,
+        "mean": 8.456697570287059e-05,
+        "model_seed": 1011,
+        "note": "Computed from the finite eligible logits only. Ineligible entries are masked to -inf before this point, so a mean or standard deviation taken over the unmasked tensor would be meaningless.",
+        "num_positions": 32768,
+        "per_position_max_minus_median": {
+          "max": 3.325583170633763,
+          "mean": 2.3497092775017476,
+          "median": 2.3240452651516534,
+          "min": 1.991884721443057,
+          "p05": 2.1316467730503064,
+          "p95": 2.666717429406708
+        },
+        "per_position_std": {
+          "max": 0.5867569092221496,
+          "mean": 0.5773214388643382,
+          "median": 0.5773393074701672,
+          "min": 0.568479113814218,
+          "p05": 0.572996959200504,
+          "p95": 0.5811444591330199
+        },
+        "std": 0.577325974526866,
+        "support": "eligible",
+        "temperature_independent": true
+      }
+    ],
+    "retains_all_position_logits": false,
+    "sampling": {
+      "common_random_numbers": true,
+      "method": "temperature_top_p",
+      "num_replicates": 1,
+      "sampling_seed": 20240601,
+      "temperature": 0.6,
+      "top_p": 0.9
+    },
+    "shuffle_seed": 60001,
+    "split": "train",
+    "split_token_count": 45549,
+    "temperature_sweep": {
+      "canonical_temperature": 0.6,
+      "enabled": true,
+      "shares_logits_with_canonical": true,
+      "shares_uniforms_with_canonical": true,
+      "temperatures": [
+        0.12,
+        0.24,
+        0.36,
+        0.48,
+        0.6,
+        1.2
+      ],
+      "top_p": 0.9
+    },
+    "transient_logits_shape": [
+      4,
+      64,
+      32000
+    ],
+    "vocab_size": 32000
+  },
+  "created_at": "2026-08-24T17:47:41.164417+00:00",
+  "dataset": {
+    "manifest": {
+      "created_at": "2026-08-11T22:53:04.802384+00:00",
+      "document_separator": "\n\n",
+      "manifest_version": 1,
+      "max_characters": 200000,
+      "max_examples": 1000,
+      "name": "wikitext2_raw_train1k",
+      "num_characters": 200000,
+      "num_documents": 485,
+      "repo_id": "Salesforce/wikitext",
+      "resolved": {
+        "config_name": "wikitext-2-raw-v1",
+        "dataset_size": 13526093,
+        "download_size": 7747362,
+        "fingerprint": "a8acf55bc5243efd",
+        "split": "train[:1000]",
+        "version": "0.0.0"
+      },
+      "revision": null,
+      "sha256": "3466782d4646bbe286e2a63d60b47fbf1add0208558403e989c04fd3a3f0c42c",
+      "source": "huggingface",
+      "split": "train[:1000]",
+      "streaming": false,
+      "subset": "wikitext-2-raw-v1",
+      "text_field": "text"
+    },
+    "name": "wikitext2_raw_train1k",
+    "path": "/home/EAWAG/francaem/.cache/llm-behavior-lab/prepared/wikitext2_raw_train1k/text.txt",
+    "prepared_dir": "/home/EAWAG/francaem/.cache/llm-behavior-lab/prepared/wikitext2_raw_train1k",
+    "route": "data_root_prepared",
+    "source": "huggingface"
+  },
+  "dataset_path": "/home/EAWAG/francaem/.cache/llm-behavior-lab/prepared/wikitext2_raw_train1k/text.txt",
+  "device": "cuda",
+  "environment": {
+    "numpy_version": "2.4.6",
+    "platform": "Linux-5.10.0-44-amd64-x86_64-with-glibc2.31",
+    "process_id": 247804,
+    "python_executable": "/home/EAWAG/francaem/miniforge3/envs/igb-llms/bin/python",
+    "python_version": "3.11.15",
+    "torch_version": "2.12.1+cu126"
+  },
+  "experiment_name": "initialization_distribution",
+  "experiment_type": "initialization_distribution",
+  "git_commit": null,
+  "initialization_scale": {
+    "alpha": 1.0,
+    "applied": {
+      "alpha": 1.0,
+      "is_no_op": true,
+      "note": "alpha multiplies every audited zero-centred random tensor. There is no single architecture-wide sigma_w: the embedding is normal_(0,1) and every linear is kaiming_uniform_(a=sqrt(5)) with a fan-in dependent scale, so alpha is the analogue of a sigma_w intervention rather than a rescaling of one value.",
+      "num_scaled_elements": 8585216,
+      "num_scaled_tensors": 16,
+      "scaled_parameters": [
+        "tok_embeddings.weight",
+        "layers.0.attention.wq.weight",
+        "layers.0.attention.wk.weight",
+        "layers.0.attention.wv.weight",
+        "layers.0.attention.wo.weight",
+        "layers.0.feed_forward.w1.weight",
+        "layers.0.feed_forward.w2.weight",
+        "layers.0.feed_forward.w3.weight",
+        "layers.1.attention.wq.weight",
+        "layers.1.attention.wk.weight",
+        "layers.1.attention.wv.weight",
+        "layers.1.attention.wo.weight",
+        "layers.1.feed_forward.w1.weight",
+        "layers.1.feed_forward.w2.weight",
+        "layers.1.feed_forward.w3.weight",
+        "output.weight"
+      ],
+      "unscaled_parameters": [
+        "layers.0.attention_norm.weight",
+        "layers.0.ffn_norm.weight",
+        "layers.1.attention_norm.weight",
+        "layers.1.ffn_norm.weight",
+        "norm.weight"
+      ]
+    },
+    "has_single_sigma_w": false,
+    "is_no_op": true,
+    "note": "alpha is a global multiplier on every audited zero-centred random weight. The architecture has no single sigma_w: the embedding is normal_(0,1) and every linear is kaiming_uniform_(a=sqrt(5)) with a fan-in dependent scale. Deterministic RMSNorm gains are not scaled, and the architecture contains no bias parameters at all.",
+    "parameter_groups": {
+      "alpha": 1.0,
+      "groups": [
+        {
+          "baseline_std": 1.0000115633010864,
+          "effective_std": 1.0000115633010864,
+          "effective_variance": 1.0000231267358828,
+          "name": "tok_embeddings.weight",
+          "numel": 4096000,
+          "scaled": true,
+          "shape": [
+            32000,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.051089949905872345,
+          "effective_std": 0.051089949905872345,
+          "effective_variance": 0.0026101829813845456,
+          "name": "layers.0.attention.wq.weight",
+          "numel": 16384,
+          "scaled": true,
+          "shape": [
+            128,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.05082070082426071,
+          "effective_std": 0.05082070082426071,
+          "effective_variance": 0.0025827436322690134,
+          "name": "layers.0.attention.wk.weight",
+          "numel": 8192,
+          "scaled": true,
+          "shape": [
+            64,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.05114535614848137,
+          "effective_std": 0.05114535614848137,
+          "effective_variance": 0.002615847455555001,
+          "name": "layers.0.attention.wv.weight",
+          "numel": 8192,
+          "scaled": true,
+          "shape": [
+            64,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0509069487452507,
+          "effective_std": 0.0509069487452507,
+          "effective_variance": 0.002591517430551582,
+          "name": "layers.0.attention.wo.weight",
+          "numel": 16384,
+          "scaled": true,
+          "shape": [
+            128,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.050947900861501694,
+          "effective_std": 0.050947900861501694,
+          "effective_variance": 0.002595688602193405,
+          "name": "layers.0.feed_forward.w1.weight",
+          "numel": 49152,
+          "scaled": true,
+          "shape": [
+            384,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.029275422915816307,
+          "effective_std": 0.029275422915816307,
+          "effective_variance": 0.0008570503868999026,
+          "name": "layers.0.feed_forward.w2.weight",
+          "numel": 49152,
+          "scaled": true,
+          "shape": [
+            128,
+            384
+          ]
+        },
+        {
+          "baseline_std": 0.051186926662921906,
+          "effective_std": 0.051186926662921906,
+          "effective_variance": 0.0026201014611953455,
+          "name": "layers.0.feed_forward.w3.weight",
+          "numel": 49152,
+          "scaled": true,
+          "shape": [
+            384,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0,
+          "effective_std": 0.0,
+          "effective_variance": 0.0,
+          "name": "layers.0.attention_norm.weight",
+          "numel": 128,
+          "scaled": false,
+          "shape": [
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0,
+          "effective_std": 0.0,
+          "effective_variance": 0.0,
+          "name": "layers.0.ffn_norm.weight",
+          "numel": 128,
+          "scaled": false,
+          "shape": [
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.05097079277038574,
+          "effective_std": 0.05097079277038574,
+          "effective_variance": 0.0025980217156416074,
+          "name": "layers.1.attention.wq.weight",
+          "numel": 16384,
+          "scaled": true,
+          "shape": [
+            128,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.05076140537858009,
+          "effective_std": 0.05076140537858009,
+          "effective_variance": 0.00257672027600854,
+          "name": "layers.1.attention.wk.weight",
+          "numel": 8192,
+          "scaled": true,
+          "shape": [
+            64,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.051450975239276886,
+          "effective_std": 0.051450975239276886,
+          "effective_variance": 0.002647202853072683,
+          "name": "layers.1.attention.wv.weight",
+          "numel": 8192,
+          "scaled": true,
+          "shape": [
+            64,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0510462149977684,
+          "effective_std": 0.0510462149977684,
+          "effective_variance": 0.0026057160655983957,
+          "name": "layers.1.attention.wo.weight",
+          "numel": 16384,
+          "scaled": true,
+          "shape": [
+            128,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.050913017243146896,
+          "effective_std": 0.050913017243146896,
+          "effective_variance": 0.002592135324800973,
+          "name": "layers.1.feed_forward.w1.weight",
+          "numel": 49152,
+          "scaled": true,
+          "shape": [
+            384,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.02947814017534256,
+          "effective_std": 0.02947814017534256,
+          "effective_variance": 0.0008689607481971451,
+          "name": "layers.1.feed_forward.w2.weight",
+          "numel": 49152,
+          "scaled": true,
+          "shape": [
+            128,
+            384
+          ]
+        },
+        {
+          "baseline_std": 0.050983209162950516,
+          "effective_std": 0.050983209162950516,
+          "effective_variance": 0.0025992876165531614,
+          "name": "layers.1.feed_forward.w3.weight",
+          "numel": 49152,
+          "scaled": true,
+          "shape": [
+            384,
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0,
+          "effective_std": 0.0,
+          "effective_variance": 0.0,
+          "name": "layers.1.attention_norm.weight",
+          "numel": 128,
+          "scaled": false,
+          "shape": [
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0,
+          "effective_std": 0.0,
+          "effective_variance": 0.0,
+          "name": "layers.1.ffn_norm.weight",
+          "numel": 128,
+          "scaled": false,
+          "shape": [
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.0,
+          "effective_std": 0.0,
+          "effective_variance": 0.0,
+          "name": "norm.weight",
+          "numel": 128,
+          "scaled": false,
+          "shape": [
+            128
+          ]
+        },
+        {
+          "baseline_std": 0.05100956931710243,
+          "effective_std": 0.05100956931710243,
+          "effective_variance": 0.002601976161916278,
+          "name": "output.weight",
+          "numel": 4096000,
+          "scaled": true,
+          "shape": [
+            32000,
+            128
+          ]
+        }
+      ],
+      "has_single_sigma_w": false,
+      "num_scaled_elements": 8585216,
+      "num_unscaled_elements": 640,
+      "variance_factor": 1.0
+    },
+    "variance_factor": 1.0
+  },
+  "model_name": "llama_tiny",
+  "model_parameter_count": 8585856,
+  "model_vocab_size": 32000,
+  "notes": null,
+  "phase": "initialization_distribution",
+  "run_id": "20260824-174741__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N32768-I12-R1__c230733d",
+  "runtime": {
+    "measurement_seconds": 3016.799,
+    "peak_rss_mib": 2205.4
+  },
+  "seed": 1234,
+  "tags": [
+    "initialization",
+    "token-distribution",
+    "guessing-policies"
+  ],
+  "tokenizer": {
+    "adds_special_tokens_on_encode": false,
+    "backend": "transformers.AutoTokenizer",
+    "eligible_vocab_size": 31997,
+    "identifier": "mistralai/Mistral-7B-v0.1",
+    "requested_revision": "27d67f1b5f57dc0953326b2601d68371d40ea8da",
+    "resolved_revision": null,
+    "source": "local cache /home/EAWAG/francaem/.cache/llm-behavior-lab/tokenizers",
+    "special_token_ids": [
+      0,
+      1,
+      2
+    ],
+    "special_tokens": {
+      "bos_token": {
+        "<s>": 1
+      },
+      "eos_token": {
+        "</s>": 2
+      },
+      "unk_token": {
+        "<unk>": 0
+      }
+    },
+    "tokenizer_class": "TokenizersBackend",
+    "transformers_version": "5.15.0",
+    "type": "pretrained",
+    "vocab_size": 32000
+  }
+}

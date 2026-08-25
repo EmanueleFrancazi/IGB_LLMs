@@ -1,0 +1,28 @@
+source record sha256 at measurement : 711a8ae508072e1626bd5395b70dfd2631d6a63e5370f9e6a507f615617a30bf
+source record sha256 after analyses : 711a8ae508072e1626bd5395b70dfd2631d6a63e5370f9e6a507f615617a30bf
+source record UNCHANGED
+
+-- required figures --
+  present  figures/main/figure20_gradient_directional_clustering.svg
+  present  figures/main/figure22_nucleus_temperature_clustering.svg
+  present  figures/diagnostics/figure24_cross_partition_geometry.svg
+  present  figures/diagnostics/figure21_correction_provenance.svg
+  figure23 is produced by the separate CountSketch sanity run (see notes)
+
+-- artifacts --
+  present  analyses/initialization_distribution.npz
+  present  analyses/nucleus_gradient_clustering.npz
+  present  analyses/nucleus_gradient_clustering_control_Tg1.npz
+  present  analyses/nucleus_gradient_clustering_matched_TsTg.npz
+  present  analyses/nucleus_control_vs_matched.tsv
+  present  analyses/gradient_cross_partition.npz
+  present  analyses/directional_temperature_sanity.tsv
+
+-- sizes --
+594212529 bytes  /home/EAWAG/francaem/restored/IGB_LLMs_LossTempGeometry_7ef6b4a_20260824-181907/outputs/full_loss_temperature_geometry/initialization_distribution/20260824-174741__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N32768-I12-R1__c230733d/analyses/initialization_distribution.npz
+574M	/home/EAWAG/francaem/restored/IGB_LLMs_LossTempGeometry_7ef6b4a_20260824-181907/outputs/full_loss_temperature_geometry/initialization_distribution/20260824-174741__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N32768-I12-R1__c230733d
+570M	/home/EAWAG/francaem/restored/IGB_LLMs_LossTempGeometry_7ef6b4a_20260824-181907/outputs/full_loss_temperature_geometry/initialization_distribution/20260824-174741__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N32768-I12-R1__c230733d/analyses
+4.5M	/home/EAWAG/francaem/restored/IGB_LLMs_LossTempGeometry_7ef6b4a_20260824-181907/outputs/full_loss_temperature_geometry/initialization_distribution/20260824-174741__wikitext2-raw-train1k__mistral-7b-v0.1-32k__llama-tiny-32k__N32768-I12-R1__c230733d/figures
+memory.used [MiB], memory.total [MiB]
+1 MiB, 11264 MiB
+1 MiB, 11264 MiB
