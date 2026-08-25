@@ -44,9 +44,18 @@ PANELS = [value for value in GRAD_T if value != 1.0]
 
 
 def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
-                num_replicates=1):
-    """A record carrying gradients, the sweep, and the mean token statistic."""
+                num_replicates=1, sweep_grid=None, confidence_grid=None):
+    """A record carrying gradients, the sweep, and the mean token statistic.
 
+    ``sweep_grid`` and ``confidence_grid`` default to grids that contain every
+    panel temperature. They are overridable because the three axes -- gradient,
+    nucleus sweep, and the fixed confidence grid -- are configured independently
+    in a real run, so a record can legitimately carry a gradient temperature
+    that one of the other two never covered.
+    """
+
+    sweep_t = list(SWEEP_T if sweep_grid is None else sweep_grid)
+    confidence_t = tuple(GRAD_T if confidence_grid is None else confidence_grid)
     rng = np.random.default_rng(11)
     targets = rng.choice(ELIGIBLE, size=D)
     greedy = rng.choice(ELIGIBLE[:6], size=D)
@@ -91,26 +100,26 @@ def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
         sweeps = {}
         agreement = {}
         for condition in ("real",):
-            counts = np.zeros((INITS, len(SWEEP_T), VOCAB), dtype=np.int64)
+            counts = np.zeros((INITS, len(sweep_t), VOCAB), dtype=np.int64)
             for s_ in range(INITS):
-                for t_ in range(len(SWEEP_T)):
+                for t_ in range(len(sweep_t)):
                     counts[s_, t_, ELIGIBLE] = rng.multinomial(
                         D, rng.dirichlet(np.ones(K)))
             sweeps[condition] = counts
-            agreement[condition] = rng.random((INITS, len(SWEEP_T)))
+            agreement[condition] = rng.random((INITS, len(sweep_t)))
         metadata["analysis"]["temperature_sweep"] = {
-            "enabled": True, "temperatures": SWEEP_T}
+            "enabled": True, "temperatures": sweep_t}
         metadata["analysis"]["sampling"] = {"temperature": 0.6, "top_p": 0.9}
     else:
         sweeps, agreement = {}, {}
 
     if with_mean_tokens:
-        mean_tokens = np.zeros((INITS, len(GRAD_T), VOCAB))
+        mean_tokens = np.zeros((INITS, len(confidence_t), VOCAB))
         for s_ in range(INITS):
-            for t_ in range(len(GRAD_T)):
+            for t_ in range(len(confidence_t)):
                 row = rng.dirichlet(np.ones(K))
                 mean_tokens[s_, t_, ELIGIBLE] = row
-        canonical = GRAD_T.index(1.00)
+        canonical = confidence_t.index(1.00)
         ranked = np.sort(mean_tokens[:, :, ELIGIBLE], axis=-1)[:, :, ::-1]
         # The record requires rank 1 to equal the mean stored maximum for each
         # (initialization, temperature): a flat p_max vector at that value makes
@@ -122,12 +131,12 @@ def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
             predictive_max_probabilities=maxima[:, canonical],
             predictive_target_probabilities=targets_p[:, canonical],
             predictive_target_losses=-np.log(targets_p[:, canonical]),
-            predictive_temperatures=np.asarray(GRAD_T),
+            predictive_temperatures=np.asarray(confidence_t),
             predictive_temperature_ranked_probabilities=ranked,
             predictive_temperature_max_probabilities=maxima,
             predictive_temperature_target_probabilities=targets_p,
             predictive_temperature_target_losses=-np.log(targets_p),
-            predictive_temperature_mean_entropy=np.ones((INITS, len(GRAD_T))),
+            predictive_temperature_mean_entropy=np.ones((INITS, len(confidence_t))),
             predictive_temperature_mean_token_probabilities=mean_tokens,
         )
         mean_predicted = mean_tokens[:, canonical, :]
@@ -332,6 +341,48 @@ def test_a_subset_gradient_record_still_renders_the_rest(tmp_path) -> None:
     names = [path.name for path in written]
     assert any("figure10" in name for name in names)
     assert not any("figure15" in name or "figure16" in name for name in names)
+
+
+def test_a_gradient_temperature_the_sweep_missed_omits_only_figure_15(tmp_path) -> None:
+    """The three temperature axes are configured independently.
+
+    A gradient temperature the nucleus sweep never sampled leaves figure 15
+    undefined, exactly as R != 1 or a subset run does. The measurement is still
+    valid, so the rest of the set -- including figure 16, whose own axis does
+    cover the temperature -- must still be drawn rather than the whole run
+    failing after the record has been written.
+    """
+
+    record = full_record(sweep_grid=[value for value in SWEEP_T if value != 0.12])
+
+    written = generate_all_figures(record, tmp_path)
+
+    names = [path.name for path in written]
+    assert any("figure10" in name for name in names)
+    assert not any("figure15" in name for name in names)
+    assert any("figure16" in name for name in names)
+
+
+def test_a_gradient_temperature_off_the_confidence_grid_omits_only_figure_16(
+    tmp_path,
+) -> None:
+    """The mirror case: figure 16 reads the fixed confidence grid.
+
+    That grid is a module constant with no command-line flag, so a gradient
+    temperature can miss it however the run was configured. Figure 15, whose
+    axis does cover the temperature, must still be drawn.
+    """
+
+    record = full_record(
+        confidence_grid=tuple(0.13 if value == 0.12 else value for value in GRAD_T)
+    )
+
+    written = generate_all_figures(record, tmp_path)
+
+    names = [path.name for path in written]
+    assert any("figure10" in name for name in names)
+    assert any("figure15" in name for name in names)
+    assert not any("figure16" in name for name in names)
 
 
 # -- R = 1 is part of the definition ----------------------------------------

@@ -1489,9 +1489,17 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     # position. A subset run draws figures 0-14 and simply omits these two.
     if record.has_temperature_gradient_analysis and _covers_all_gradient_positions(record):
         # R != 1 leaves figure 15 undefined; the rest of the set still renders.
-        if record.has_temperature_sweep and record.num_replicates == 1:
+        # So does a panel temperature the sweep never sampled: these two figures
+        # read a second temperature axis, and each axis is configured on its own.
+        if (
+            record.has_temperature_sweep
+            and record.num_replicates == 1
+            and _panels_lie_on(record, record.sweep_temperatures)
+        ):
             written.extend(plot_gradient_vs_nucleus_guess_bias(record, directory))
-        if record.has_mean_token_probabilities:
+        if record.has_mean_token_probabilities and _panels_lie_on(
+            record, record.confidence_temperatures
+        ):
             written.extend(plot_gradient_vs_mean_probability(record, directory))
 
     # Figures 17-21. They read the gradient table against whole-experiment
@@ -1508,6 +1516,28 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
             # asks how figure 20's two groupings relate to each other.
             written.extend(plot_cross_partition_geometry(record, directory))
     return written
+
+
+def _panels_lie_on(record: Any, grid: Sequence[float]) -> bool:
+    """Whether every displayed panel temperature is present on ``grid``.
+
+    Figures 15 and 16 take their panels from the gradient grid but read their y
+    quantity off another axis: the nucleus sweep for 15, the fixed confidence
+    grid for 16. All three are configured independently, so a gradient
+    temperature need not appear on either, and the missing quantity cannot be
+    derived from anything else the record holds.
+
+    The panel set is shared with figure 10 so the three read as one controlled
+    sequence, which is why this asks whether *every* panel is covered rather
+    than dropping the panels that are not: a partial figure 15 would no longer
+    line up with figure 10.
+    """
+
+    available = {float(value) for value in grid}
+    return all(
+        float(value) in available
+        for value in _gradient_panel_temperatures(record, None)
+    )
 
 
 def _supports_initial_gradient_figures(record: Any) -> bool:
