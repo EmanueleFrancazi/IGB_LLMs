@@ -482,7 +482,7 @@ The diagnostic is disabled by default because it requires a backward pass.
 The default untrained-model analysis follows this path:
 
 1. Load data and model configs.
-   - Code path: `scripts/analyze_untrained_model.py` → `load_yaml_config`
+   - Code path: `scripts/analyze_untrained_model.py` → `utils/config.py` (`load_yaml_config`)
    - Files: `configs/data/tiny_text.yaml`, `configs/model/tiny_llama.yaml`
 
 2. Load the tiny local text corpus.
@@ -663,7 +663,7 @@ This standalone path is intentionally lightweight and remains the default. When 
 
 | Symptom | Where to look |
 |---|---|
-| Config file not found or malformed | `scripts/analyze_untrained_model.py` (`load_yaml_config`), `configs/data/tiny_text.yaml`, `configs/model/tiny_llama.yaml` |
+| Config file not found or malformed | `utils/config.py` (`load_yaml_config`), `configs/data/tiny_text.yaml`, `configs/model/tiny_llama.yaml` |
 | Dataset path error | `resolve_repo_path`, `data/text_dataset.py` (`load_text_file`) |
 | Tokenizer cannot decode a token ID | `data/tokenizer.py` (`decode`), check whether logits were restricted to `tokenizer.vocab_size` |
 | Train/validation split too small | `data/text_dataset.py` (`split_token_ids`), `configs/data/tiny_text.yaml` |

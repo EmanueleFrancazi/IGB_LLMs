@@ -21,7 +21,7 @@ Quick subfolder overview:
 | `src/llm_behavior_lab/data/` | Text loading, tokenization, splitting, and causal LM batching utilities. |
 | `src/llm_behavior_lab/inference/` | Prompt preparation, logits extraction, probability extraction, decoding, and generation. |
 | `src/llm_behavior_lab/evaluation/` | Output-distribution, token-frequency, untrained-analysis, and gradient-norm diagnostics. |
-| `src/llm_behavior_lab/utils/` | Shared helpers for seeds, device selection, and parameter counting. |
+| `src/llm_behavior_lab/utils/` | Shared helpers for seeds, device selection, parameter counting, and config loading. |
 
 ---
 
@@ -129,6 +129,7 @@ src/llm_behavior_lab/
 
   utils/
     __init__.py
+    config.py
     device.py
     params.py
     seed.py
@@ -882,6 +883,7 @@ Current files:
 ```text
 src/llm_behavior_lab/utils/
   __init__.py
+  config.py
   device.py
   params.py
   seed.py
@@ -907,6 +909,7 @@ seed_everything
 
 | Task | File |
 |---|---|
+| Change config-loading behavior | `utils/config.py` |
 | Change device selection policy | `utils/device.py` |
 | Change parameter-count formatting | `utils/params.py` |
 | Change seeding behavior | `utils/seed.py` |
@@ -1368,7 +1371,7 @@ Use:
 src/llm_behavior_lab/utils/
 ```
 
-Current helpers cover device selection, parameter counting, and seeding.
+Current helpers cover config loading, device selection, parameter counting, and seeding.
 
 ---
 
