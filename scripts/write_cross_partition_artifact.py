@@ -22,13 +22,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from llm_behavior_lab.analysis import load_record
-from llm_behavior_lab.analysis.gradient_clustering import unit_sketches
-from llm_behavior_lab.analysis.gradient_cross_partition import (
+# Allow running from the repository root before editable installation.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from llm_behavior_lab.analysis import load_record  # noqa: E402
+from llm_behavior_lab.analysis.gradient_clustering import unit_sketches  # noqa: E402
+from llm_behavior_lab.analysis.gradient_cross_partition import (  # noqa: E402
     contingency_summary,
     cross_identity_null,
     cross_partition_matrix,

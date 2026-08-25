@@ -212,3 +212,45 @@ def test_shipped_external_configs_bound_their_acquisition() -> None:
         assert sliced or dataset.streaming, f"{name} bounds neither split nor iteration"
         assert dataset.max_examples is not None
         assert dataset.max_characters is not None
+
+
+# -- direct execution from a source checkout ---------------------------------
+
+
+#: Every tracked command-line script. The README documents them all as
+#: ``python3 scripts/<name>.py``, and pyproject defines no console entry point,
+#: so running them straight out of a checkout is the supported invocation.
+SCRIPT_NAMES = sorted(path.name for path in SCRIPTS.glob("*.py"))
+
+
+@pytest.mark.parametrize("script", SCRIPT_NAMES)
+def test_scripts_run_from_a_checkout_without_pythonpath(script, tmp_path) -> None:
+    """``--help`` must work with no environment preparation.
+
+    A source checkout is a supported starting point: ten scripts already put
+    ``src`` on ``sys.path`` themselves under the comment "Allow running from the
+    repository root before editable installation", no console entry point exists,
+    and no tracked document ever tells the reader to set ``PYTHONPATH``.
+
+    Run as a real subprocess with ``PYTHONPATH`` stripped, from a directory
+    outside the repository and by absolute path, so neither an inherited
+    environment nor the working directory can mask a missing bootstrap.
+    ``--help`` exits before any measurement, so this stays cheap.
+    """
+
+    import os
+    import subprocess
+
+    environment = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPTS / script), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, (
+        f"{script} cannot run from a checkout: {completed.stderr.strip().splitlines()[-1:]}"
+    )
+    assert "usage:" in completed.stdout.lower()
