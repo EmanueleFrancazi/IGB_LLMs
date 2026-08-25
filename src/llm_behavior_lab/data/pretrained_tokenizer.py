@@ -26,7 +26,6 @@ Two policies are made explicit rather than inherited from library defaults:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -336,26 +335,3 @@ def load_pretrained_tokenizer(
             "special IDs, which cannot be right. Check the tokenizer files."
         )
     return loaded
-
-
-def tokenizer_cache_footprint(data_root: str | Path | None = None) -> dict[str, Any]:
-    """Summarize what the tokenizer cache holds, for reporting.
-
-    Used by the experiment script to state the on-disk cost honestly: this is
-    disk usage, not bytes transferred.
-    """
-
-    from llm_behavior_lab.data.config import resolve_data_root
-
-    cache_dir = tokenizer_cache_directory(resolve_data_root(data_root))
-    if not cache_dir.exists():
-        return {"path": str(cache_dir), "exists": False, "num_files": 0, "bytes": 0}
-    total = 0
-    files = 0
-    for root, _directories, names in os.walk(cache_dir):
-        for name in names:
-            path = Path(root) / name
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
-                files += 1
-    return {"path": str(cache_dir), "exists": True, "num_files": files, "bytes": total}
