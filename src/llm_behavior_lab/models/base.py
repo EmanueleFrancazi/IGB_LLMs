@@ -14,6 +14,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from llm_behavior_lab.utils.params import count_parameters
+
 
 @dataclass
 class ModelOutput:
@@ -88,7 +90,4 @@ class BaseLanguageModel(nn.Module, ABC):
             Total number of selected parameters.
         """
 
-        parameters = self.parameters()
-        if only_trainable:
-            parameters = (p for p in parameters if p.requires_grad)
-        return sum(p.numel() for p in parameters)
+        return count_parameters(self, only_trainable=only_trainable)
