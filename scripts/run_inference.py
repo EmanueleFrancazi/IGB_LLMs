@@ -10,9 +10,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 # Allow running from the repository root before editable installation.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,22 +33,7 @@ from llm_behavior_lab.inference import (  # noqa: E402
     top_k_predictions,
 )
 from llm_behavior_lab.models import build_model_from_config, list_models  # noqa: E402
-from llm_behavior_lab.utils import format_parameter_count, get_device, seed_everything  # noqa: E402
-
-
-def load_yaml_config(path: Path) -> dict[str, Any]:
-    """Load a YAML file into a dictionary."""
-
-    if not path.exists():
-        raise FileNotFoundError(f"Config file does not exist: {path}")
-
-    with path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-
-    if not isinstance(config, dict):
-        raise TypeError(f"Expected config dictionary, got {type(config)!r}")
-
-    return config
+from llm_behavior_lab.utils import format_parameter_count, get_device, load_yaml_config, seed_everything  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
