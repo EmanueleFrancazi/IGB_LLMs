@@ -44,18 +44,22 @@ PANELS = [value for value in GRAD_T if value != 1.0]
 
 
 def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
-                num_replicates=1, sweep_grid=None, confidence_grid=None):
+                num_replicates=1, sweep_grid=None, confidence_grid=None,
+                gradient_grid=None):
     """A record carrying gradients, the sweep, and the mean token statistic.
 
-    ``sweep_grid`` and ``confidence_grid`` default to grids that contain every
-    panel temperature. They are overridable because the three axes -- gradient,
-    nucleus sweep, and the fixed confidence grid -- are configured independently
-    in a real run, so a record can legitimately carry a gradient temperature
-    that one of the other two never covered.
+    The three temperature axes -- gradient, nucleus sweep, and the fixed
+    confidence grid -- are configured independently in a real run, so each is
+    overridable here. By default they line up. ``sweep_grid`` and
+    ``confidence_grid`` let a gradient temperature fall outside an axis that
+    some figure reads; ``gradient_grid`` lets the gradient axis itself carry
+    only the canonical ``T_g = 1``, which the runner produces whenever a grid is
+    given without it.
     """
 
     sweep_t = list(SWEEP_T if sweep_grid is None else sweep_grid)
     confidence_t = tuple(GRAD_T if confidence_grid is None else confidence_grid)
+    gradient_t = tuple(GRAD_T if gradient_grid is None else gradient_grid)
     rng = np.random.default_rng(11)
     targets = rng.choice(ELIGIBLE, size=D)
     greedy = rng.choice(ELIGIBLE[:6], size=D)
@@ -65,7 +69,7 @@ def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
     corpus[targets] = np.maximum(corpus[targets], 1)
 
     base = rng.lognormal(0.0, 0.5, size=D)
-    per_temperature = np.stack([base / value for value in GRAD_T])
+    per_temperature = np.stack([base / value for value in gradient_t])
 
     greedy_counts = np.stack(
         [np.bincount(rng.choice(ELIGIBLE, size=D), minlength=VOCAB) for _ in range(INITS)]
@@ -86,7 +90,7 @@ def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
                 "input_condition": "real",
                 "covers_all_positions": covers_all,
                 "parameter_count": 8_585_856,
-                "temperatures": list(GRAD_T),
+                "temperatures": list(gradient_t),
             },
         },
     }
@@ -163,8 +167,8 @@ def full_record(*, covers_all=True, with_sweep=True, with_mean_tokens=True,
         gradient_position_indices=np.arange(D),
         gradient_position_target_ids=targets,
         gradient_position_greedy_ids=greedy,
-        gradient_position_norms=per_temperature[GRAD_T.index(1.00)],
-        gradient_temperatures=np.asarray(GRAD_T),
+        gradient_position_norms=per_temperature[gradient_t.index(1.00)],
+        gradient_temperatures=np.asarray(gradient_t),
         gradient_temperature_position_norms=per_temperature,
         **arrays,
     )
@@ -341,6 +345,30 @@ def test_a_subset_gradient_record_still_renders_the_rest(tmp_path) -> None:
     names = [path.name for path in written]
     assert any("figure10" in name for name in names)
     assert not any("figure15" in name or "figure16" in name for name in names)
+
+
+def test_a_canonical_only_gradient_grid_draws_the_supplementary_scatter(tmp_path) -> None:
+    """``--gradient-temperatures 1.0`` is a supported run, not a broken one.
+
+    The runner rejects only an empty gradient grid, and it *adds* the canonical
+    temperature to any grid that omits it, so a canonical-only grid is a
+    configuration it deliberately produces. Figure 10 compares panels across
+    loss temperature and has none to compare here, but the canonical observable
+    it would have anchored is exactly what the supplementary single-temperature
+    scatter draws, and everything downstream of it still holds.
+    """
+
+    record = full_record(gradient_grid=(1.0,))
+
+    written = generate_all_figures(record, tmp_path)
+
+    names = [path.name for path in written]
+    assert not any("figure10" in name for name in names)
+    assert any("supplementary_t1" in name for name in names)
+    # Figures 15 and 16 panel on the same noncanonical temperatures.
+    assert not any("figure15" in name or "figure16" in name for name in names)
+    # The rest of the set is unaffected: rendering continues past figure 10.
+    assert any("figure14" in name for name in names)
 
 
 def test_a_gradient_temperature_the_sweep_missed_omits_only_figure_15(tmp_path) -> None:

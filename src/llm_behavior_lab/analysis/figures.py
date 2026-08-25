@@ -1472,11 +1472,12 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     if record.has_predictive_probability_analysis:
         written.extend(plot_ranked_predictive_probabilities(record, directory))
         written.extend(plot_max_predictive_probability(record, directory))
-    if record.has_temperature_gradient_analysis:
+    if record.has_temperature_gradient_analysis and _has_noncanonical_panels(record):
         written.extend(plot_temperature_gradient_vs_guess_bias(record, directory))
     elif record.has_position_gradients:
-        # Older records carry only the canonical slice; draw the supplementary
-        # single-temperature scatter rather than nothing.
+        # Older records carry only the canonical slice, and so does a run whose
+        # gradient grid is the canonical temperature alone; draw the
+        # supplementary single-temperature scatter rather than nothing.
         written.extend(plot_gradient_vs_guess_bias(record, directory))
     if record.has_temperature_confidence_analysis:
         written.extend(plot_temperature_ranked_predictive_probabilities(record, directory))
@@ -1487,7 +1488,11 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
     # Figures 15 and 16 pair whole-experiment statistics with the gradient
     # table, so they exist only when the gradient analysis covered every
     # position. A subset run draws figures 0-14 and simply omits these two.
-    if record.has_temperature_gradient_analysis and _covers_all_gradient_positions(record):
+    if (
+        record.has_temperature_gradient_analysis
+        and _has_noncanonical_panels(record)
+        and _covers_all_gradient_positions(record)
+    ):
         # R != 1 leaves figure 15 undefined; the rest of the set still renders.
         # So does a panel temperature the sweep never sampled: these two figures
         # read a second temperature axis, and each axis is configured on its own.
@@ -1516,6 +1521,24 @@ def generate_all_figures(record: Any, directory: str | Path) -> list[Path]:
             # asks how figure 20's two groupings relate to each other.
             written.extend(plot_cross_partition_geometry(record, directory))
     return written
+
+
+def _has_noncanonical_panels(record: Any) -> bool:
+    """Whether the gradient grid holds a temperature other than the canonical one.
+
+    Figures 10, 15 and 16 all panel over the gradient grid *without* ``T = 1``,
+    and what they show is the comparison across loss temperature. The canonical
+    temperature is guaranteed to be in the grid -- the runner adds it to any
+    grid that omits it, because the record's canonical norm and sketch fields
+    are that row -- so a grid of the canonical temperature alone is a supported
+    configuration that leaves those three figures with nothing to compare.
+
+    The canonical observable itself is still measured, and
+    :func:`plot_gradient_vs_guess_bias` is the figure for it, so a record like
+    that follows the same path as one from before the temperature grid existed.
+    """
+
+    return any(float(value) != 1.0 for value in record.gradient_temperature_grid)
 
 
 def _panels_lie_on(record: Any, grid: Sequence[float]) -> bool:
