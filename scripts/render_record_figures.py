@@ -73,6 +73,7 @@ FIGURES = {
     "figure21": "plot_correction_provenance",
     "figure23": "plot_countsketch_fidelity",
     "figure22": "plot_nucleus_temperature_clustering",
+    "figure22-matched": "plot_nucleus_temperature_clustering",
     "figure24": "plot_cross_partition_geometry",
 }
 
@@ -453,7 +454,59 @@ def report_gradient_clustering(record: Any, *, display_classes: int = 40) -> dic
 
 
 
-def _render_nucleus_clustering(figure_module, record, record_dir, figures_dir):
+#: Figure 23 is not derivable from the persisted record. Its inputs are the
+#: complete gradients of a handful of positions, retained only when the run was
+#: launched with --countsketch-fidelity-sanity. If that was not done, the data
+#: no longer exist anywhere, and no amount of re-rendering recovers them -- the
+#: honest statement is that this run cannot produce the figure at all.
+_FIGURE23_UNAVAILABLE = (
+    "  figure23 (CountSketch fidelity) -- no sanity/countsketch_fidelity.npz.\n"
+    "    This figure needs exact gradients captured during measurement, which\n"
+    "    only a run launched with --countsketch-fidelity-sanity retains. It\n"
+    "    cannot be reconstructed from the persisted record, and this renderer\n"
+    "    does not recompute it. Fidelity is validated by a separate small\n"
+    "    methodological run."
+)
+
+
+def _nucleus_unavailable(label: str, matched: bool, record_dir) -> str:
+    """Why a figure-22 variant is missing, and how to produce it.
+
+    Unlike figure 23 this one *is* generatable from the finished run, so the
+    message names the writer and the flags for this specific condition. The
+    config snapshots live beside the record; they are referenced only if the run
+    actually kept them, so the command is never a guess.
+    """
+
+    from pathlib import Path
+
+    artifact = (
+        "nucleus_gradient_clustering_matched_TsTg.npz" if matched
+        else "nucleus_gradient_clustering.npz"
+    )
+    design = "matched T_g = T_s" if matched else "control T_g = 1"
+    lines = [f"  {label} ({design}) -- no analyses/{artifact}."]
+    config = Path(record_dir).parent / "config"
+    if (config / "data_config.yaml").exists() and (config / "model_config.yaml").exists():
+        loss = "--loss-temperatures matched" if matched else "--loss-temperatures 1.0 ..."
+        lines.append(
+            "    Produce it with:\n"
+            f"      python3 scripts/write_nucleus_clustering_artifact.py {record_dir} \\\n"
+            f"        --data-config {config / 'data_config.yaml'} \\\n"
+            f"        --model-config {config / 'model_config.yaml'} \\\n"
+            f"        {loss}"
+        )
+    else:
+        lines.append(
+            "    Produce it with scripts/write_nucleus_clustering_artifact.py; this\n"
+            "    run kept no config snapshots, so supply the configs it was launched with."
+        )
+    return "\n".join(lines)
+
+
+def _render_nucleus_clustering(
+    figure_module, record, record_dir, figures_dir, *, matched: bool = False
+):
     """Draw figure 22 from the run's nucleus-clustering artifact.
 
     Like figure 23, this one is not backed by the record alone: recovering which
@@ -461,15 +514,23 @@ def _render_nucleus_clustering(figure_module, record, record_dir, figures_dir):
     ``scripts/write_nucleus_clustering_artifact.py`` -- which gates the recovered
     labels against the recorded histogram -- and cached beside the record. Here
     the artifact is only read back.
+
+    ``matched`` selects the ``T_g = T_s`` condition instead of the fixed
+    ``T_g = 1`` control. Both belong to the figure-22 family and differ only in
+    which artifact they read and which stem they write.
     """
 
     from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        ARTIFACT_NAME,
+        MATCHED_ARTIFACT_NAME,
         load_nucleus_clustering_artifact,
     )
 
-    result = load_nucleus_clustering_artifact(record_dir)
+    name = MATCHED_ARTIFACT_NAME if matched else ARTIFACT_NAME
+    result = load_nucleus_clustering_artifact(record_dir, name)
     return figure_module.plot_nucleus_temperature_clustering(
-        result, figures_dir, record=record
+        result, figures_dir, record=record,
+        stem_suffix="_matched_TsTg" if matched else "",
     )
 
 
@@ -535,20 +596,28 @@ def main() -> None:
 
     if args.only == "all":
         written = figure_module.generate_all_figures(record, figures_dir)
-        # Backed by a separate artifact, so it joins the set only when a sanity
-        # run actually produced one. Its absence must never break the rest.
+        # Artifact-backed figures. A missing artifact is reported rather than
+        # swallowed: "not applicable to this run" and "quietly absent" look
+        # identical otherwise, and the two have very different remedies.
+        skipped: list[str] = []
         try:
             written = written + _render_countsketch_fidelity(
                 figure_module, args.record_dir, figures_dir
             )
         except FileNotFoundError:
-            pass
-        try:
-            written = written + _render_nucleus_clustering(
-                figure_module, record, args.record_dir, figures_dir
-            )
-        except FileNotFoundError:
-            pass
+            skipped.append(_FIGURE23_UNAVAILABLE)
+        for label, matched in (("figure22", False), ("figure22-matched", True)):
+            try:
+                written = written + _render_nucleus_clustering(
+                    figure_module, record, args.record_dir, figures_dir,
+                    matched=matched,
+                )
+            except FileNotFoundError:
+                skipped.append(_nucleus_unavailable(label, matched, args.record_dir))
+        if skipped:
+            print("\nNot rendered:")
+            for note in skipped:
+                print(note)
     else:
         required = CONDITIONAL_FIGURES.get(args.only)
         if required is not None and not getattr(record, required):
@@ -556,14 +625,15 @@ def main() -> None:
                 f"This record does not carry the analysis behind {args.only} "
                 f"({required} is false), so it cannot be drawn from it."
             )
-        if args.only in ("figure22", "figure23"):
+        if args.only in ("figure22", "figure22-matched", "figure23"):
             written = (
                 _render_countsketch_fidelity(
                     figure_module, args.record_dir, figures_dir
                 )
                 if args.only == "figure23"
                 else _render_nucleus_clustering(
-                    figure_module, record, args.record_dir, figures_dir
+                    figure_module, record, args.record_dir, figures_dir,
+                    matched=args.only == "figure22-matched",
                 )
             )
             print()

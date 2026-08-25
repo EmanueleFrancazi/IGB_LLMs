@@ -25,10 +25,21 @@ from llm_behavior_lab.analysis.temperature_pairs import (
     validate_pair_aligned,
 )
 
-__all__ = ["ARTIFACT_NAME", "load_nucleus_clustering_artifact"]
+__all__ = [
+    "ARTIFACT_NAME",
+    "MATCHED_ARTIFACT_NAME",
+    "load_nucleus_clustering_artifact",
+]
 
-#: Where the writer leaves its output, relative to the record directory.
+#: Where the writer leaves the control design, relative to the record
+#: directory. Figure 22 reads this name, and it means what it has always
+#: meant: ``T_s`` varying against the canonical ``T_g``.
 ARTIFACT_NAME = "nucleus_gradient_clustering.npz"
+
+#: The matched design, ``T_g = T_s`` elementwise. A separate name so the two
+#: conditions coexist instead of overwriting each other; both belong to the
+#: same figure-22 family and are read by the same loader.
+MATCHED_ARTIFACT_NAME = "nucleus_gradient_clustering_matched_TsTg.npz"
 
 #: Loss temperature attributed to an artifact written before ``T_s`` and ``T_g``
 #: were stored separately. Every such artifact came from the canonical ``T = 1``
@@ -38,8 +49,15 @@ ARTIFACT_NAME = "nucleus_gradient_clustering.npz"
 HISTORICAL_LOSS_TEMPERATURE = 1.0
 
 
-def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
-    """Rebuild the sweep result from ``<record_dir>/nucleus_gradient_clustering.npz``.
+def load_nucleus_clustering_artifact(
+    record_dir: str | Path, name: str = ARTIFACT_NAME
+) -> dict[str, Any]:
+    """Rebuild the sweep result from ``<record_dir>/<name>``.
+
+    ``name`` selects which design to read -- :data:`ARTIFACT_NAME` for the
+    control, :data:`MATCHED_ARTIFACT_NAME` for the matched one. It defaults to
+    the control, so every caller written before the two coexisted keeps its
+    behaviour unchanged.
 
     Raises:
         FileNotFoundError: When no artifact has been written for this run. The
@@ -47,7 +65,7 @@ def load_nucleus_clustering_artifact(record_dir: str | Path) -> dict[str, Any]:
             simply means this figure is not part of that record's set.
     """
 
-    path = Path(record_dir) / ARTIFACT_NAME
+    path = Path(record_dir) / name
     if not path.exists():
         raise FileNotFoundError(
             f"No nucleus-clustering artifact at {path}. Write one with "

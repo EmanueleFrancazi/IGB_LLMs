@@ -1011,7 +1011,6 @@ def test_figure_twenty_two_names_both_temperatures(tmp_path) -> None:
     record = _sketch_record()
     result = _nucleus_result(record)
     result["loss_temperatures"] = np.ones(len(result["by_temperature"]))
-    result["pairing"] = "T_g = 1 fixed"
 
     figure, _ = _held_figure(
         plot_nucleus_temperature_clustering,
@@ -1026,15 +1025,19 @@ def test_figure_twenty_two_names_both_temperatures(tmp_path) -> None:
         assert "T_s" in label
 
     subtitle = " ".join(text.get_text() for text in figure.texts)
-    assert "T_g = 1 fixed" in subtitle
-    assert "$T_s$" in subtitle or "T_s" in subtitle
+    # The condition is stated in the title, not buried in a subtitle clause.
+    assert "fixed gradient field" in subtitle
+    assert "$T_g$ = 1" in subtitle
+    assert "$T_s$" in subtitle
 
 
 def test_figure_twenty_two_states_a_matched_sweep_as_matched(tmp_path) -> None:
     record = _sketch_record()
-    result = _nucleus_result(record)
-    result["loss_temperatures"] = np.asarray(result["sampling_temperatures"])
-    result["pairing"] = None       # forced to derive it
+    # A varying-T_g result must carry its per-loss reference axis, so this is
+    # built through the paired helper rather than by relabelling a pinned one.
+    result = _paired_result(
+        record, list(_nucleus_result(record)["sampling_temperatures"])
+    )
 
     figure, _ = _held_figure(
         plot_nucleus_temperature_clustering,
@@ -1042,7 +1045,8 @@ def test_figure_twenty_two_states_a_matched_sweep_as_matched(tmp_path) -> None:
     )
 
     subtitle = " ".join(text.get_text() for text in figure.texts)
-    assert "T_g = T_s (matched)" in subtitle
+    assert "matched gradient field" in subtitle
+    assert "$T_g$ = $T_s$" in subtitle
 
 
 def test_figure_twenty_two_falls_back_for_a_pre_split_result(tmp_path) -> None:
@@ -1061,4 +1065,171 @@ def test_figure_twenty_two_falls_back_for_a_pre_split_result(tmp_path) -> None:
     )
 
     subtitle = " ".join(text.get_text() for text in figure.texts)
-    assert "T_g = 1 fixed" in subtitle
+    assert "fixed gradient field" in subtitle
+    assert "$T_g$ = 1" in subtitle
+
+
+# -- the two figure-22 conditions --------------------------------------------
+#
+# Control and matched are different experiments sharing one figure family. What
+# has to hold is that they stay distinguishable and that each is read against
+# the gradient field it was actually computed in.
+
+
+def _paired_result(record, loss):
+    """A figure-22 result with an explicit T_g per point and per-T_g references."""
+
+    result = _nucleus_result(record)
+    sampling = np.asarray(result["sampling_temperatures"], dtype=float)
+    loss = np.asarray(loss, dtype=float)
+    result["loss_temperatures"] = loss
+    for entry, value in zip(result["by_temperature"], loss):
+        entry["loss_temperature"] = float(value)
+    # A distinct reference per T_g, so reading the wrong one is visible.
+    result["references_by_loss_temperature"] = {
+        float(value): {
+            grouping: {
+                "population": {"delta": base + 0.1 * index},
+                "null": {"delta_low": -1e-4, "delta_high": 1e-4},
+            }
+            for grouping, base in (("target", 0.13), ("greedy", 0.11))
+        }
+        for index, value in enumerate(sorted(set(loss.tolist())))
+    }
+    return result
+
+
+def _reference_series(figure, label_fragment):
+    """The y-data of the reference artist whose legend label matches."""
+
+    for axes in _data_axes(figure):
+        for line in axes.get_lines():
+            if label_fragment in (line.get_label() or ""):
+                return np.asarray(line.get_ydata(), dtype=float)
+    return None
+
+
+def test_a_pinned_loss_temperature_draws_flat_reference_lines(tmp_path) -> None:
+    """The control's established behaviour, unchanged."""
+
+    record = _sketch_record()
+    result = _paired_result(record, [1.0] * 4)
+
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        result, tmp_path, record=record, display_classes=10,
+    )
+
+    # axhline artists carry two-point y-data at a constant height. Matched on
+    # the exact reference labels, since the trajectory itself is also labelled
+    # "... grouping" and is deliberately not flat.
+    flat = [
+        np.asarray(line.get_ydata(), dtype=float)
+        for axes in _data_axes(figure)
+        for line in axes.get_lines()
+        if (line.get_label() or "") in ("target grouping", "greedy grouping")
+    ]
+    assert len(flat) == 2
+    for series in flat:
+        assert np.ptp(series) == 0.0
+
+
+def test_a_varying_loss_temperature_draws_a_reference_per_pair(tmp_path) -> None:
+    """The bug this phase exists to fix.
+
+    With T_g varying, a flat line taken from one T_g compares most of the sweep
+    against a geometry it was never computed in. Each point must be read against
+    the reference measured at its own T_g.
+    """
+
+    record = _sketch_record()
+    sampling = list(_nucleus_result(record)["sampling_temperatures"])
+    result = _paired_result(record, sampling)          # matched: T_g = T_s
+
+    figure, _ = _held_figure(
+        plot_nucleus_temperature_clustering,
+        result, tmp_path, record=record, display_classes=10,
+    )
+
+    for grouping, base in (("target", 0.13), ("greedy", 0.11)):
+        series = _reference_series(figure, f"{grouping} grouping")
+        assert series is not None, f"no {grouping} reference drawn"
+        assert series.size == len(sampling)
+        # Distinct per T_g, and in the order the pairs were requested.
+        assert np.ptp(series) > 0.0
+        expected = [base + 0.1 * index for index in range(len(sampling))]
+        assert np.allclose(series, expected)
+
+
+def test_the_matched_variant_writes_its_own_stem(tmp_path) -> None:
+    """Both conditions coexist instead of overwriting one another."""
+
+    record = _sketch_record()
+    sampling = list(_nucleus_result(record)["sampling_temperatures"])
+
+    control = plot_nucleus_temperature_clustering(
+        _paired_result(record, [1.0] * len(sampling)), tmp_path,
+        record=record, display_classes=10,
+    )
+    matched = plot_nucleus_temperature_clustering(
+        _paired_result(record, sampling), tmp_path,
+        record=record, display_classes=10, stem_suffix="_matched_TsTg",
+    )
+
+    assert control[0].name == "figure22_nucleus_temperature_clustering.svg"
+    assert matched[0].name == (
+        "figure22_nucleus_temperature_clustering_matched_TsTg.svg"
+    )
+    # Same family, so both belong in the same category directory.
+    assert control[0].parent.name == matched[0].parent.name == "main"
+    assert control[0] != matched[0]
+
+
+def test_a_varying_sweep_refuses_a_missing_reference_temperature(tmp_path) -> None:
+    """Snapping to the nearest measured T_g would be the wrong failure mode.
+
+    A reference measured in a different gradient field describes different
+    geometry, so a plotted T_g with no reference of its own must stop the figure
+    rather than borrow the closest one.
+    """
+
+    record = _sketch_record()
+    sampling = list(_nucleus_result(record)["sampling_temperatures"])
+    result = _paired_result(record, sampling)
+
+    # Drop one temperature from the reference axis, leaving the pairs intact.
+    missing = sorted(result["references_by_loss_temperature"])[1]
+    del result["references_by_loss_temperature"][missing]
+
+    with pytest.raises(ValueError, match="No .* reference was measured"):
+        plot_nucleus_temperature_clustering(
+            result, tmp_path, record=record, display_classes=10
+        )
+
+
+def test_a_varying_sweep_refuses_a_result_with_no_reference_axis(tmp_path) -> None:
+    """The scalar reference cannot stand in for six different gradient fields."""
+
+    record = _sketch_record()
+    sampling = list(_nucleus_result(record)["sampling_temperatures"])
+    result = _paired_result(record, sampling)
+    result["references_by_loss_temperature"] = {}
+
+    with pytest.raises(ValueError, match="no per-loss reference axis"):
+        plot_nucleus_temperature_clustering(
+            result, tmp_path, record=record, display_classes=10
+        )
+
+
+def test_a_pinned_sweep_still_needs_no_reference_axis(tmp_path) -> None:
+    """Historical compatibility: the control draws from the scalar as before."""
+
+    record = _sketch_record()
+    result = _paired_result(record, [1.0] * 4)
+    result["references_by_loss_temperature"] = {}
+
+    written = plot_nucleus_temperature_clustering(
+        result, tmp_path, record=record, display_classes=10
+    )
+
+    assert written[0].name == "figure22_nucleus_temperature_clustering.svg"

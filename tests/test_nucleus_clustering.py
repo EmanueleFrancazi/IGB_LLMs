@@ -898,3 +898,108 @@ def test_an_artifact_without_the_reference_axis_still_loads(tmp_path) -> None:
     assert loaded["references"]["greedy"]["population"]["delta"] == pytest.approx(
         live["references"]["greedy"]["population"]["delta"], abs=1e-12
     )
+
+
+# -- which artifact each design writes to -------------------------------------
+#
+# The control and the matched design must coexist rather than overwrite each
+# other. Everything else the CLI already accepts has to keep working exactly as
+# before: this phase adds a name, it does not narrow what may be requested.
+
+
+def _artifact_name_for():
+    """The writer's naming rule, loaded without importing PyTorch."""
+
+    import ast
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "write_nucleus_clustering_artifact.py"
+    )
+    tree = ast.parse(script.read_text())
+    wanted = {"artifact_name_for"}
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    assert functions, "artifact_name_for is missing from the writer"
+    namespace = {
+        "np": np,
+        "ARTIFACT_NAME": "nucleus_gradient_clustering.npz",
+        "MATCHED_ARTIFACT_NAME": "nucleus_gradient_clustering_matched_TsTg.npz",
+    }
+    exec(  # noqa: S102 - reading one pure function out of a torch-importing script
+        compile(ast.Module(body=functions, type_ignores=[]), "<writer>", "exec"),
+        namespace,
+    )
+    return namespace["artifact_name_for"]
+
+
+SWEEP = [0.12, 0.24, 0.36, 0.48, 0.60, 1.20]
+
+
+def test_the_control_keeps_the_canonical_artifact_name() -> None:
+    """Figure 22 reads this name and must keep finding the control there."""
+
+    assert _artifact_name_for()(SWEEP, [1.0] * 6) == "nucleus_gradient_clustering.npz"
+
+
+def test_the_matched_design_gets_its_own_artifact_name() -> None:
+    assert _artifact_name_for()(SWEEP, SWEEP) == (
+        "nucleus_gradient_clustering_matched_TsTg.npz"
+    )
+
+
+def test_an_arbitrary_explicit_pairing_is_still_accepted() -> None:
+    """No CLI regression.
+
+    --loss-temperatures already accepts any explicit equal-length list. Such a
+    pairing is neither the control nor the matched design; it must keep working
+    and keep the name it has always written to, rather than being refused for
+    being awkward to name.
+    """
+
+    name = _artifact_name_for()([0.12, 0.60], [1.0, 0.12])
+
+    assert name == "nucleus_gradient_clustering.npz"
+
+
+def test_a_single_point_matched_sweep_is_still_matched() -> None:
+    assert _artifact_name_for()([0.36], [0.36]) == (
+        "nucleus_gradient_clustering_matched_TsTg.npz"
+    )
+
+
+def test_the_loader_reads_whichever_artifact_it_is_given(tmp_path) -> None:
+    from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
+        ARTIFACT_NAME,
+        MATCHED_ARTIFACT_NAME,
+        load_nucleus_clustering_artifact,
+    )
+
+    record = _record(loss_temperatures=True)
+    greedy = np.asarray(record.gradient_position_greedy_ids)
+    control = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.60],
+        loss_temperatures=[1.0, 1.0], permutations=8, display_classes=5,
+    )
+    matched = nucleus_clustering(
+        record, np.stack([greedy] * 2), [0.12, 0.60],
+        loss_temperatures=[0.12, 0.60], permutations=8, display_classes=5,
+    )
+    # The paired layout, so both temperature arrays are actually stored.
+    _write_paired_artifact(control, tmp_path)
+    (tmp_path / ARTIFACT_NAME).rename(tmp_path / "control_tmp.npz")
+    _write_paired_artifact(matched, tmp_path)
+    (tmp_path / ARTIFACT_NAME).rename(tmp_path / MATCHED_ARTIFACT_NAME)
+    (tmp_path / "control_tmp.npz").rename(tmp_path / ARTIFACT_NAME)
+
+    default = load_nucleus_clustering_artifact(tmp_path)
+    explicit = load_nucleus_clustering_artifact(tmp_path, MATCHED_ARTIFACT_NAME)
+
+    assert np.all(default["loss_temperatures"] == 1.0)
+    assert np.array_equal(
+        explicit["loss_temperatures"], explicit["sampling_temperatures"]
+    )

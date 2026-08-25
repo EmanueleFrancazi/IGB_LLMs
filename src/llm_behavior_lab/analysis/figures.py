@@ -3042,7 +3042,7 @@ def plot_gradient_directional_clustering(
     panels = figure.subplots(1, 2)
     left = _clustering_heatmap(
         panels[0], record, target,
-        "(a) grouped by ground-truth target token", extent=extent,
+        "(a) grouped by true-target token", extent=extent,
     )
     _clustering_heatmap(
         panels[1], record, greedy,
@@ -3063,19 +3063,18 @@ def plot_gradient_directional_clustering(
 
     figure.suptitle(
         "Directional clustering of per-position gradients  "
-        f"(T = 1, CountSketch K = {target['sketch_dimension']})",
+        f"($T_g$ = 1, CountSketch K = {target['sketch_dimension']})",
         fontsize=12,
     )
     figure.text(
         0.5, 0.90,
-        "same gradients, same exact norms, same sketch realization -- only the "
-        "grouping label differs   |   diagonal is within-class over DISTINCT "
-        "pairs, not self-similarity   |   "
-        f"heatmap: {target['display']['num_classes']} most supported of "
-        f"{target['population']['num_classes']:,} classes with n >= "
-        f"{target['min_support']} (target), "
-        f"{greedy['display']['num_classes']} of "
-        f"{greedy['population']['num_classes']:,} (greedy)",
+        "one gradient population, two groupings -- same gradients, same exact "
+        "norms, same sketch; only the label differs\n"
+        "diagonal is within-class over distinct pairs, not self-similarity"
+        f"   |   heatmap: {target['display']['num_classes']} most supported "
+        f"classes of {target['population']['num_classes']:,} (target) and "
+        f"{greedy['population']['num_classes']:,} (greedy) with n >= "
+        f"{target['min_support']}",
         ha="center", fontsize=7, color="#444444",
     )
     figure.subplots_adjust(top=0.83, bottom=0.22, left=0.06, right=0.89, wspace=0.22)
@@ -3457,10 +3456,10 @@ def plot_cross_partition_geometry(
     )
     figure.text(
         0.5, 0.918,
-        "rows: target token   columns: greedy-predicted token   |   "
-        "every shared position removed per cell, off-diagonal included   |   "
-        f"displayed: {shown.size} tokens by min(target, greedy) support >= {min_support}"
-        f"   |   {contingency['num_true_positive_positions']:,} of "
+        "rows: true-target token   columns: greedy-predicted token   |   "
+        "every shared position removed per cell, off-diagonal included\n"
+        f"displayed: {shown.size} tokens by min(target, greedy) support >= "
+        f"{min_support}   |   {contingency['num_true_positive_positions']:,} of "
         f"{contingency['num_positions']:,} positions have target == greedy",
         ha="center", fontsize=7, color="#444444",
     )
@@ -3475,12 +3474,67 @@ def plot_cross_partition_geometry(
     return save_figure(figure, directory, "figure24_cross_partition_geometry")
 
 
+def _reference_by_pair(
+    result: dict[str, Any], grouping: str, loss_temperatures: Any
+) -> Any:
+    """The ``grouping`` reference measured at each pair's own ``T_g``.
+
+    Reached only when ``T_g`` varies, where a reference is meaningful only if it
+    was measured in that point's own gradient field. Both ways of not having one
+    therefore raise rather than substitute:
+
+    * no per-loss reference axis at all -- a result that cannot support a
+      varying-``T_g`` figure, so drawing the sweep-wide scalar would put a
+      single field's reference against six different geometries;
+    * an axis that omits a plotted ``T_g`` -- snapping to the nearest measured
+      temperature would silently compare a point against a field it was not
+      computed in, which is the very error this figure exists to avoid.
+
+    Matching uses the repository's established temperature tolerance, so a value
+    that has round-tripped through float32 still resolves, while a genuinely
+    different temperature does not.
+    """
+
+    from llm_behavior_lab.analysis.directional_fields import (
+        TEMPERATURE_MATCH_TOLERANCE,
+    )
+
+    by_loss = result.get("references_by_loss_temperature") or {}
+    if not by_loss:
+        raise ValueError(
+            "This result pairs several loss temperatures but carries no "
+            "per-loss reference axis, so a reference measured at each point's "
+            "own T_g is not available. Drawing the sweep-wide scalar instead "
+            "would compare every point against one field's geometry. Rewrite "
+            "the artifact with a writer that stores reference_loss_temperatures."
+        )
+
+    keys = sorted(by_loss)
+    available = np.asarray(keys, dtype=np.float64)
+    values = []
+    for value in np.asarray(loss_temperatures, dtype=np.float64):
+        close = np.flatnonzero(np.abs(available - value) <= TEMPERATURE_MATCH_TOLERANCE)
+        if close.size != 1:
+            listed = ", ".join(f"{item:g}" for item in keys)
+            raise ValueError(
+                f"No {grouping} reference was measured at loss temperature "
+                f"T_g = {value:g}; the artifact carries references at {listed}. "
+                "A reference from a different T_g describes a different gradient "
+                "field, so it is not substituted."
+            )
+        values.append(
+            float(by_loss[keys[int(close[0])]][grouping]["population"]["delta"])
+        )
+    return np.asarray(values, dtype=np.float64)
+
+
 def plot_nucleus_temperature_clustering(
     result: dict[str, Any],
     directory: str | Path,
     *,
     record: Any = None,
     display_classes: int = 24,
+    stem_suffix: str = "",
 ) -> list[Path]:
     """Figure 22 -- directional clustering as the grouping is heated.
 
@@ -3509,20 +3563,15 @@ def plot_nucleus_temperature_clustering(
 
     by_temperature = result["by_temperature"]
     references = result["references"]
-    # Two temperatures exist and the axis carries only one of them, so the
-    # sweep says which. A result assembled before the pair split carries only
-    # the sampling temperatures; the loss temperature is then stated at the
-    # established historical value rather than left ambiguous.
-    from llm_behavior_lab.analysis.temperature_pairs import describe_pairing
-
+    # Two temperatures exist and the axis carries only one of them, so the title
+    # says which gradient field produced the points. A result assembled before
+    # the pair split carries only the sampling temperatures; the loss
+    # temperature is then read at the established historical value.
     temperatures = np.asarray(
         result.get("sampling_temperatures", result["temperatures"]), dtype=float
     )
     loss_temperatures = np.asarray(
         result.get("loss_temperatures", np.ones_like(temperatures)), dtype=float
-    )
-    pairing = result.get("pairing") or describe_pairing(
-        temperatures, loss_temperatures
     )
 
     delta = np.array([entry["population"]["delta"] for entry in by_temperature])
@@ -3575,13 +3624,29 @@ def plot_nucleus_temperature_clustering(
             edgecolors="#1f77b4", linewidths=1.2, zorder=5,
             label="< 50% of positions in a qualifying class",
         )
+    # A reference belongs to a gradient field, so it is only a constant when
+    # every point shares one. With T_g pinned these are the two horizontal lines
+    # figure 22 has always drawn. Once T_g varies with T_s they are not: each
+    # point must be read against the reference measured at *its own* T_g, and
+    # drawing the lowest T_g's value flat across the axis would compare most of
+    # the sweep against a geometry it was never computed in.
+    pinned = np.unique(loss_temperatures).size == 1
     for grouping, colour, style in (
         ("target", "#d62728", "--"), ("greedy", "#2ca02c", "-."),
     ):
-        trajectory.axhline(
-            references[grouping]["population"]["delta"], color=colour,
-            linewidth=1.1, linestyle=style, zorder=3,
-            label=f"{grouping} grouping",
+        if pinned:
+            trajectory.axhline(
+                references[grouping]["population"]["delta"], color=colour,
+                linewidth=1.1, linestyle=style, zorder=3,
+                label=f"{grouping} grouping",
+            )
+            continue
+        trajectory.plot(
+            temperatures,
+            _reference_by_pair(result, grouping, loss_temperatures),
+            color=colour, linewidth=1.1, linestyle=style, zorder=3,
+            marker="^", markersize=3.5,
+            label=f"{grouping} grouping at each $T_g$",
         )
     trajectory.axhline(0.0, color="#333333", linewidth=0.8, zorder=2)
     trajectory.set_xlabel("Nucleus sampling temperature  $T_s$")
@@ -3589,7 +3654,7 @@ def plot_nucleus_temperature_clustering(
     trajectory.set_title(
         "(a) clustering against sampling temperature $T_s$", fontsize=10, pad=8
     )
-    trajectory.legend(loc="upper left", fontsize=7, frameon=True, framealpha=0.9)
+    trajectory.legend(loc="upper right", fontsize=7, frameon=True, framealpha=0.9)
     trajectory.margins(y=0.16)
     trajectory.grid(True, alpha=0.20)
 
@@ -3669,15 +3734,26 @@ def plot_nucleus_temperature_clustering(
     colourbar.set_label("Estimated gradient cosine similarity", fontsize=8)
     colourbar.ax.tick_params(labelsize=7)
 
+    # The two conditions are different experiments and must be tellable apart at
+    # a glance, not by reading a clause in the subtitle. The title states which
+    # gradient field was used; the subtitle carries the rest.
+    if pinned:
+        held = np.unique(loss_temperatures)[0]
+        condition = f"fixed gradient field, $T_g$ = {held:g}"
+    else:
+        condition = "matched gradient field, $T_g$ = $T_s$"
     figure.suptitle(
-        "Gradient clustering under the sampled-token grouping", fontsize=12
+        f"Gradient clustering under the sampled-token grouping  ({condition})",
+        fontsize=12,
     )
     figure.text(
         0.5, 0.938,
-        f"grouping varies with sampling temperature $T_s$; {pairing}   |   "
+        "grouping varies with sampling temperature $T_s$   |   "
         f"{by_temperature[0]['num_positions']:,} positions, "
         f"K = {by_temperature[0]['sketch_dimension']}   |   "
         f"null: {result['permutations']} label permutations per pair",
         ha="center", fontsize=7, color="#444444",
     )
-    return save_figure(figure, directory, "figure22_nucleus_temperature_clustering")
+    return save_figure(
+        figure, directory, f"figure22_nucleus_temperature_clustering{stem_suffix}"
+    )

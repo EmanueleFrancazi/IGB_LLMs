@@ -29,7 +29,11 @@ run; the snapshots are what it was actually launched with::
         --data-config <run>/config/data_config.yaml \\
         --model-config <run>/config/model_config.yaml
 
-writes ``<run>/analyses/nucleus_gradient_clustering.npz``.
+The control design writes ``<run>/analyses/nucleus_gradient_clustering.npz``;
+the matched ``T_g = T_s`` design writes
+``<run>/analyses/nucleus_gradient_clustering_matched_TsTg.npz``, so the two
+coexist instead of overwriting each other. Any other explicit pairing keeps
+the canonical name it has always used.
 """
 
 from __future__ import annotations
@@ -78,8 +82,34 @@ from llm_behavior_lab.models.initialization_scale import (  # noqa: E402
 )
 from llm_behavior_lab.utils import get_device, seed_everything  # noqa: E402
 
-#: Name of the derived artifact, inside the record's own directory.
+#: Name of the derived artifact, inside the record's own directory. Every
+#: design except the exact matched one writes here, which is what the control
+#: and every previously supported explicit pairing have always done.
 ARTIFACT_NAME = "nucleus_gradient_clustering.npz"
+
+#: The exact matched design, ``T_g = T_s`` elementwise, gets its own name so
+#: it stops overwriting the control. This is the only added case: no other
+#: pairing changes destination, so no previously accepted input is refused or
+#: silently rerouted.
+MATCHED_ARTIFACT_NAME = "nucleus_gradient_clustering_matched_TsTg.npz"
+
+
+def artifact_name_for(sampling_temperatures, loss_temperatures) -> str:
+    """Which artifact a resolved pairing writes to.
+
+    Exactly one rule beyond the historical behaviour: an elementwise
+    ``T_g = T_s`` sweep is the matched design and gets the matched name.
+    Everything else -- the canonical-pinned control, and any other explicit
+    equal-length pairing the CLI already accepts -- keeps the canonical name
+    it has always used. Nothing is rejected for being awkward to name.
+    """
+
+    sampling = np.asarray(sampling_temperatures, dtype=float)
+    loss = np.asarray(loss_temperatures, dtype=float)
+    if sampling.shape == loss.shape and np.array_equal(sampling, loss):
+        return MATCHED_ARTIFACT_NAME
+    return ARTIFACT_NAME
+
 
 #: Loss temperature to assume for a record that predates the explicit field.
 #: Every such record was measured at the canonical T = 1, which is what figure 22
@@ -433,7 +463,9 @@ def main() -> None:
                 dtype=float,
             )
 
-    destination = args.record_dir / ARTIFACT_NAME
+    destination = args.record_dir / artifact_name_for(
+        result["sampling_temperatures"], result["loss_temperatures"]
+    )
     np.savez_compressed(destination, **arrays)
 
     summary = {
