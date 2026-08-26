@@ -733,3 +733,395 @@ def test_both_estimators_are_measured_against_the_same_exact_matrix() -> None:
         assert comparison[name]["num_pairs"] == 21
     # The bounded one cannot report out-of-range values, by construction.
     assert comparison["projected_space_estimator"]["fraction_outside_unit_interval"] == 0.0
+
+
+# -- methodology: sketch width against independent map ensembles --------------
+#
+# The design question is where a fixed coordinate budget should go. These tests
+# guard the machinery that answers it: folding must be an identity rather than a
+# subsample, ensembles must be plain arithmetic means, and every configuration
+# must see the same gradients and the same pairs.
+
+
+def _production_factory():
+    """The real production map builder, as the sweep must be given it."""
+
+    from llm_behavior_lab.evaluation.position_gradients import production_sketch_map
+
+    sizes = [1024, 2048, 1024]
+    assert sum(sizes) == P
+    return sizes, lambda dimension, seed: production_sketch_map(sizes, dimension, seed)
+
+
+def test_folding_uses_every_source_bucket_exactly_once() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import fold_sketches
+
+    # A one-hot per bucket: folding must place each of them in exactly one
+    # target bucket, so the folded matrix is a partition indicator.
+    wide = np.eye(64, dtype=np.float64)
+    folded = fold_sketches(wide, 16)
+
+    assert folded.shape == (64, 16)
+    assert np.array_equal(folded.sum(axis=1), np.ones(64))
+    # Each target bucket receives exactly K_max / K sources -- nothing dropped,
+    # nothing counted twice.
+    assert np.array_equal(folded.sum(axis=0), np.full(16, 4.0))
+
+
+def test_folding_is_not_coordinate_subsampling() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import fold_sketches
+
+    wide = np.arange(1, 17, dtype=np.float64).reshape(1, 16)
+    folded = fold_sketches(wide, 4)
+
+    # Subsampling would return four of the sixteen entries; folding returns sums
+    # over residue classes, so the total mass is preserved exactly.
+    assert folded.sum() == wide.sum()
+    assert np.array_equal(folded, np.array([[1 + 5 + 9 + 13, 2 + 6 + 10 + 14,
+                                             3 + 7 + 11 + 15, 4 + 8 + 12 + 16]]))
+
+
+def test_folding_a_sketch_equals_applying_the_folded_bucket_map() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        fold_sketches,
+        sketch_gradients,
+    )
+
+    _, factory = _production_factory()
+    values, _ = _gradients(rows=5)
+    buckets, signs = factory(1024, 4242)
+
+    wide = sketch_gradients(values, buckets, signs, 1024)
+    folded = fold_sketches(wide, 256)
+    direct = sketch_gradients(values, buckets % 256, signs, 256)
+
+    assert np.allclose(folded, direct, rtol=0, atol=1e-9)
+
+
+def test_a_folded_width_must_divide_the_source_width() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import fold_sketches
+
+    with pytest.raises(ValueError, match="must divide"):
+        fold_sketches(np.zeros((2, 96)), 64)
+
+
+def test_the_production_map_is_unchanged_by_this_work() -> None:
+    """The historical realization must stay bit-identical, folding aside."""
+
+    sizes, factory = _production_factory()
+    buckets, signs = factory(512, 20240917)
+
+    from llm_behavior_lab.evaluation.position_gradients import production_sketch_map
+
+    expected_buckets, expected_signs = production_sketch_map(sizes, 512, 20240917)
+    assert np.array_equal(buckets, expected_buckets)
+    assert np.array_equal(signs, expected_signs)
+    assert set(np.unique(signs)) == {-1.0, 1.0}
+
+
+def test_power_of_two_widths_fold_out_of_the_wider_draw() -> None:
+    """An observed property of this construction, pinned so a change is noticed.
+
+    ``torch.randint`` over a power-of-two range takes the low bits, so the map
+    drawn directly at ``K`` happens to equal the ``K_max`` map folded. Nothing in
+    the sweep relies on it -- folding is done explicitly -- but it means the
+    folded ``K = 512`` row IS the historical production map rather than merely a
+    statistical twin, which is worth knowing when reading the results.
+    """
+
+    sizes, factory = _production_factory()
+    wide, wide_signs = factory(4096, 20240917)
+    for dimension in (512, 1024, 2048):
+        narrow, narrow_signs = factory(dimension, 20240917)
+        assert np.array_equal(wide % dimension, narrow)
+        assert np.array_equal(wide_signs, narrow_signs)
+
+
+def test_the_fast_projection_matches_the_scatter_add_projection() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        _project,
+        sketch_gradients,
+    )
+
+    _, factory = _production_factory()
+    values, _ = _gradients(rows=4)
+    buckets, signs = factory(256, 11)
+
+    assert np.allclose(
+        sketch_gradients(values, buckets, signs, 256),
+        _project(values, buckets, signs, 256),
+        rtol=0, atol=1e-9,
+    )
+
+
+def test_the_single_map_ensemble_reproduces_the_production_estimator() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        cosines_from_sketches,
+        sketch_gradients,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=6)
+    buckets, signs = factory(512, 20240917)
+
+    through_sketches = cosines_from_sketches(
+        sketch_gradients(values, buckets, signs, 512), norms
+    )
+    production = sketch_estimated_cosines(
+        values, norms, dimension=512, seed=20240917, sketch_map=(buckets, signs)
+    )
+
+    assert np.allclose(through_sketches, production, rtol=0, atol=1e-9)
+
+
+def test_the_ensemble_estimate_is_the_arithmetic_mean_of_its_members() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        METHODOLOGY_SEEDS,
+        methodology_sweep,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=6)
+    targets, greedy = _labels(rows=6)
+
+    report = methodology_sweep(
+        values, norms, targets, greedy,
+        map_factory=factory, k_max=512, dimensions=(256, 512),
+        ensemble_sizes=(1, 2), seeds=METHODOLOGY_SEEDS[:4],
+    )
+
+    cell = next(
+        entry for entry in report["grid"]
+        if entry["dimension"] == 256 and entry["ensemble_size"] == 2
+    )
+    members = report["per_map_cosines"][256]
+    expected = (members[0] + members[1]) / 2.0
+    first = cell["ensembles"][0]
+    from llm_behavior_lab.analysis.countsketch_fidelity import deviation_report
+
+    assert first["seeds"] == tuple(METHODOLOGY_SEEDS[:2])
+    assert first["deviation"] == deviation_report(report["exact_cosines"], expected)
+
+
+def test_disjoint_ensembles_never_share_a_map() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        METHODOLOGY_SEEDS,
+        methodology_sweep,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=5)
+    targets, greedy = _labels(rows=5)
+
+    report = methodology_sweep(
+        values, norms, targets, greedy,
+        map_factory=factory, k_max=512, dimensions=(512,),
+        ensemble_sizes=(2,), seeds=METHODOLOGY_SEEDS[:6],
+    )
+
+    cell = report["grid"][0]
+    assert cell["num_ensembles"] == 3
+    seen = [seed for member in cell["ensembles"] for seed in member["seeds"]]
+    assert len(seen) == len(set(seen))
+
+
+def test_the_seed_bank_excludes_the_production_and_alternate_seeds() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import METHODOLOGY_SEEDS
+
+    assert 20240917 not in METHODOLOGY_SEEDS
+    assert not set(METHODOLOGY_SEEDS) & set(ALTERNATE_SKETCH_SEEDS)
+    assert len(set(METHODOLOGY_SEEDS)) == len(METHODOLOGY_SEEDS)
+    # Every studied ensemble size has to divide the bank, or an M would be
+    # measured over fewer disjoint ensembles than intended.
+    for size in (1, 2, 4, 8):
+        assert len(METHODOLOGY_SEEDS) % size == 0
+
+
+def test_different_seeds_give_genuinely_different_realizations() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        METHODOLOGY_SEEDS,
+        cosines_from_sketches,
+        sketch_gradients,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=6)
+
+    matrices = []
+    for seed in METHODOLOGY_SEEDS[:3]:
+        buckets, signs = factory(256, seed)
+        matrices.append(cosines_from_sketches(
+            sketch_gradients(values, buckets, signs, 256), norms
+        ))
+
+    upper = np.triu_indices(6, 1)
+    for i in range(3):
+        for j in range(i + 1, 3):
+            assert not np.allclose(matrices[i], matrices[j])
+            # Errors from independent maps must not line up.
+            assert abs(np.corrcoef(matrices[i][upper], matrices[j][upper])[0, 1]) < 0.999
+
+
+def test_every_configuration_shares_the_same_gradients_and_pair_count() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        METHODOLOGY_SEEDS,
+        methodology_sweep,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=7)
+    targets, greedy = _labels(rows=7)
+
+    report = methodology_sweep(
+        values, norms, targets, greedy,
+        map_factory=factory, k_max=1024, dimensions=(256, 512, 1024),
+        ensemble_sizes=(1, 2, 4), seeds=METHODOLOGY_SEEDS[:8],
+    )
+
+    assert report["num_gradients"] == 7
+    for entry in report["grid"]:
+        assert entry["budget"] == entry["dimension"] * entry["ensemble_size"]
+        for member in entry["ensembles"]:
+            assert member["deviation"]["num_pairs"] == 21
+            assert member["statistics"]["cross"]["num_same_pairs"] + \
+                member["statistics"]["cross"]["num_different_pairs"] == 7 * 6
+
+
+def test_the_sweep_never_clips_estimates() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        METHODOLOGY_SEEDS,
+        methodology_sweep,
+    )
+
+    _, factory = _production_factory()
+    # Deliberately narrow, so some estimate must leave the unit interval.
+    values, norms = _gradients(rows=8)
+    targets, greedy = _labels(rows=8)
+
+    report = methodology_sweep(
+        values, norms, targets, greedy,
+        map_factory=factory, k_max=8, dimensions=(4, 8),
+        ensemble_sizes=(1,), seeds=METHODOLOGY_SEEDS[:4],
+    )
+
+    escaped = [
+        member["deviation"]["fraction_outside_unit_interval"] > 0
+        for entry in report["grid"] for member in entry["ensembles"]
+    ]
+    assert any(escaped), "an 8-bucket sketch should leave [-1, 1] somewhere"
+
+
+def test_class_means_from_a_cosine_matrix_match_the_row_based_version() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import class_means_from_cosines
+    from llm_behavior_lab.analysis.gradient_clustering import class_similarity_matrix
+
+    generator = np.random.default_rng(3)
+    # Row norms deliberately far from 1, which is the case the sketch produces.
+    unit = generator.normal(size=(9, 16)) * generator.uniform(0.3, 2.0, size=(9, 1))
+    labels = np.array([1, 1, 1, 2, 2, 3, 3, 4, 4], dtype=np.int64)
+    classes = np.unique(labels)
+
+    expected = class_similarity_matrix(unit, labels, classes)["matrix"]
+    actual = class_means_from_cosines(unit @ unit.T, labels, classes)
+
+    assert np.allclose(actual, expected, rtol=0, atol=1e-12, equal_nan=True)
+
+
+def test_a_single_member_class_has_no_measurable_diagonal() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import class_means_from_cosines
+
+    cosines = np.eye(3)
+    labels = np.array([1, 2, 2], dtype=np.int64)
+    matrix = class_means_from_cosines(cosines, labels, np.array([1, 2]))
+
+    assert np.isnan(matrix[0, 0])
+    assert np.isfinite(matrix[1, 1])
+
+
+def test_cross_partition_from_a_cosine_matrix_matches_the_pooled_statistic() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        cross_partition_from_cosines,
+    )
+    from llm_behavior_lab.analysis.gradient_cross_partition import (
+        pooled_cross_statistic,
+    )
+
+    generator = np.random.default_rng(11)
+    rows = generator.normal(size=(10, 12))
+    targets = np.array([1, 1, 2, 3, 3, 2, 4, 4, 1, 2], dtype=np.int64)
+    greedy = np.array([2, 3, 2, 1, 4, 4, 3, 1, 1, 3], dtype=np.int64)
+
+    expected = pooled_cross_statistic(rows, targets, greedy)
+    actual = cross_partition_from_cosines(rows @ rows.T, targets, greedy)
+
+    assert actual["num_same_pairs"] == expected["num_same_pairs"]
+    assert actual["num_different_pairs"] == expected["num_different_pairs"]
+    for key in ("c_same", "c_different", "delta_cross"):
+        assert actual[key] == pytest.approx(expected[key], rel=0, abs=1e-12)
+
+
+def test_final_statistics_use_the_same_pairs_on_exact_and_estimated() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        final_statistics,
+        sketch_estimated_cosines,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=8)
+    targets, greedy = _labels(rows=8)
+    buckets, signs = factory(256, 5)
+
+    exact = final_statistics(cosine_from_gram(values, norms), targets, greedy)
+    estimated = final_statistics(
+        sketch_estimated_cosines(values, norms, dimension=256, seed=5,
+                                 sketch_map=(buckets, signs)),
+        targets, greedy,
+    )
+
+    for name in ("target", "greedy"):
+        assert exact[name]["num_within_pairs"] == estimated[name]["num_within_pairs"]
+        assert exact[name]["num_between_pairs"] == estimated[name]["num_between_pairs"]
+    assert exact["cross"]["num_same_pairs"] == estimated["cross"]["num_same_pairs"]
+    assert exact["cross"]["num_different_pairs"] == estimated["cross"]["num_different_pairs"]
+
+
+def test_the_sweep_is_deterministic() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        METHODOLOGY_SEEDS,
+        methodology_sweep,
+    )
+
+    _, factory = _production_factory()
+    values, norms = _gradients(rows=6)
+    targets, greedy = _labels(rows=6)
+    arguments = dict(
+        map_factory=factory, k_max=512, dimensions=(256, 512),
+        ensemble_sizes=(1, 2), seeds=METHODOLOGY_SEEDS[:4],
+    )
+
+    first = methodology_sweep(values, norms, targets, greedy, **arguments)
+    second = methodology_sweep(values, norms, targets, greedy, **arguments)
+
+    assert np.array_equal(first["exact_cosines"], second["exact_cosines"])
+    assert first["production"]["deviation"] == second["production"]["deviation"]
+    # repr rather than ==: this fixture has no position whose target is another's
+    # greedy token, so ``c_same`` is legitimately NaN, and NaN != NaN would read
+    # as nondeterminism.
+    assert repr(first["grid"]) == repr(second["grid"])
+
+
+def test_an_absent_cross_pair_kind_is_reported_as_nan_not_fabricated() -> None:
+    from llm_behavior_lab.analysis.countsketch_fidelity import (
+        cross_partition_from_cosines,
+    )
+
+    cosines = np.full((3, 3), 0.5)
+    # No position's target is any position's greedy token.
+    result = cross_partition_from_cosines(
+        cosines, np.array([1, 1, 2]), np.array([7, 8, 9])
+    )
+
+    assert result["num_same_pairs"] == 0
+    assert np.isnan(result["c_same"])
+    assert np.isnan(result["delta_cross"])
+    assert result["num_different_pairs"] == 6

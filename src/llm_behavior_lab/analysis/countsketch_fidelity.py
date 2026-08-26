@@ -52,6 +52,15 @@ __all__ = [
     "subgroup_delta",
     "select_sanity_positions",
     "sketch_estimated_cosines",
+    # Methodology: sketch width against independent map ensembles.
+    "METHODOLOGY_SEEDS",
+    "class_means_from_cosines",
+    "cosines_from_sketches",
+    "cross_partition_from_cosines",
+    "final_statistics",
+    "fold_sketches",
+    "methodology_sweep",
+    "sketch_gradients",
 ]
 
 #: Deterministic alternate realizations for the offline multi-seed check. The
@@ -627,4 +636,292 @@ def estimator_comparison(exact: np.ndarray, production: np.ndarray) -> dict[str,
         "exact_norm_estimator": deviation_report(exact, production),
         "projected_space_estimator": deviation_report(exact, projected),
         "projected_cosines": projected,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Methodology: sketch width against independent map ensembles
+#
+# Everything above measures the one map the experiment used. What follows asks a
+# design question instead -- given a fixed coordinate budget, is it better spent
+# on one wide CountSketch or on several narrow independent ones? -- and answers
+# it on the same captured gradients. None of it changes the production map, the
+# production width, the exact-norm denominator, or the record.
+# ---------------------------------------------------------------------------
+
+#: Independent map realizations for the methodology sweep. Deliberately disjoint
+#: from ``ALTERNATE_SKETCH_SEEDS`` and from the production seed, so an ensemble
+#: never quietly contains the realization the experiment actually used. Thirty-two
+#: of them divides evenly by every ensemble size studied, which is what lets each
+#: ``M`` be measured over several *disjoint* ensembles rather than one.
+METHODOLOGY_SEEDS = tuple(90_000_000 + 7919 * index for index in range(32))
+
+
+def fold_sketches(sketches: np.ndarray, dimension: int) -> np.ndarray:
+    """Narrow a ``[N, K_max]`` sketch to ``[N, K]`` by summing residue classes.
+
+    ``h_K(j) = h_Kmax(j) mod K``, so::
+
+        S_K(g)[r] = sum_{b = r (mod K)} S_Kmax(g)[b]
+                  = sum_j s(j) g_j 1[h_K(j) = r]
+
+    This is an identity, not an approximation: every source bucket lands in
+    exactly one target bucket, so every parameter still contributes. That is what
+    separates folding from coordinate subsampling, which would drop parameters
+    outright and need a rescaling to stay unbiased.
+
+    Requires ``K`` to divide ``K_max``. Both are powers of two here, so the
+    folded hash stays exactly uniform on ``[0, K)`` -- each residue receives
+    ``K_max / K`` source buckets -- and the signs are untouched, leaving a valid
+    CountSketch map.
+    """
+
+    sketches = np.asarray(sketches, dtype=np.float64)
+    width = sketches.shape[-1]
+    dimension = int(dimension)
+    if dimension < 1 or width % dimension:
+        raise ValueError(
+            f"A folded width must divide the source width; {dimension} does not "
+            f"divide {width}."
+        )
+    if dimension == width:
+        return sketches.copy()
+    # Bucket b = q * K + r folds into r, so the residue class is the leading axis.
+    return sketches.reshape(sketches.shape[0], width // dimension, dimension).sum(axis=1)
+
+
+def sketch_gradients(
+    gradients: np.ndarray, buckets: np.ndarray, signs: np.ndarray, dimension: int
+) -> np.ndarray:
+    """Project every gradient through one map, as ``[N, K]``.
+
+    Identical in meaning to the scatter-add used by the single-map report; a
+    weighted ``bincount`` is the same sum written in a form that survives being
+    called a few thousand times. A test holds the two to the same values.
+    """
+
+    gradients = np.asarray(gradients, dtype=np.float64)
+    signs = np.asarray(signs, dtype=np.float64)
+    return np.stack([
+        np.bincount(buckets, weights=row * signs, minlength=int(dimension))
+        for row in gradients
+    ])
+
+
+def cosines_from_sketches(sketches: np.ndarray, norms: np.ndarray) -> np.ndarray:
+    """The production estimator on already-projected sketches.
+
+    Exact norms in the denominator, as everywhere else, so the result estimates
+    ``cos(g_a, g_b)`` without bias and is not confined to ``[-1, 1]``.
+    """
+
+    sketches = np.asarray(sketches, dtype=np.float64)
+    norms = np.asarray(norms, dtype=np.float64)
+    return (sketches @ sketches.T) / np.outer(norms, norms)
+
+
+def class_means_from_cosines(
+    cosines: np.ndarray, labels: np.ndarray, classes: np.ndarray
+) -> np.ndarray:
+    """The class-by-class mean-cosine matrix, from a cosine matrix.
+
+    Same cell definition as the sketch-row version in ``gradient_clustering``:
+    off-diagonal cells average every cross pair, and the diagonal averages the
+    **distinct** pairs inside a class rather than putting a conventional 1 there.
+    A class with one member has no distinct pair and stays NaN.
+
+    A separate implementation is unavoidable here because the exact side has no
+    rows to sum -- there is a full-gradient cosine matrix and nothing else. A
+    test pins it to the row-based version on the same data.
+    """
+
+    cosines = np.asarray(cosines, dtype=np.float64)
+    labels = np.asarray(labels)
+    classes = np.asarray(classes)
+    size = classes.size
+    matrix = np.full((size, size), np.nan, dtype=np.float64)
+    members = [np.flatnonzero(labels == value) for value in classes]
+    for i, rows in enumerate(members):
+        for j, columns in enumerate(members):
+            if rows.size == 0 or columns.size == 0:
+                continue
+            block = cosines[np.ix_(rows, columns)]
+            if i == j:
+                if rows.size < 2:
+                    continue
+                total = block.sum() - np.trace(block)
+                matrix[i, j] = total / (rows.size * (rows.size - 1))
+            else:
+                matrix[i, j] = block.mean()
+    return matrix
+
+
+def cross_partition_from_cosines(
+    cosines: np.ndarray, target_ids: np.ndarray, greedy_ids: np.ndarray
+) -> dict[str, Any]:
+    """``C_same``, ``C_different`` and ``delta_cross`` from a cosine matrix.
+
+    The same statistic ``gradient_cross_partition.pooled_cross_statistic``
+    computes from class sums, written for the case where only a cosine matrix
+    exists. Ordered pairs ``(a, b)`` with ``a != b``: ``a`` contributes its target
+    role and ``b`` its greedy role, and a pair is "same" when ``a``'s target is
+    ``b``'s greedy token. Self-pairs are excluded, exactly as there -- without
+    that, every position would be compared against itself.
+    """
+
+    cosines = np.asarray(cosines, dtype=np.float64)
+    target_ids = np.asarray(target_ids)
+    greedy_ids = np.asarray(greedy_ids)
+    size = cosines.shape[0]
+    same = target_ids[:, None] == greedy_ids[None, :]
+    distinct = ~np.eye(size, dtype=bool)
+    same_mask = same & distinct
+    different_mask = (~same) & distinct
+    return {
+        "c_same": float(cosines[same_mask].mean()) if same_mask.any() else float("nan"),
+        "c_different": (
+            float(cosines[different_mask].mean()) if different_mask.any() else float("nan")
+        ),
+        "delta_cross": (
+            float(cosines[same_mask].mean() - cosines[different_mask].mean())
+            if same_mask.any() and different_mask.any()
+            else float("nan")
+        ),
+        "num_same_pairs": int(same_mask.sum()),
+        "num_different_pairs": int(different_mask.sum()),
+    }
+
+
+def final_statistics(
+    cosines: np.ndarray, target_ids: np.ndarray, greedy_ids: np.ndarray
+) -> dict[str, Any]:
+    """The grouped quantities the science actually reports, from one cosine matrix.
+
+    Pairwise error is not the observable. These are: the target and greedy
+    within/between contrasts of figures 20 and 22, and the cross-partition
+    contrast of figure 24. Computed identically on the exact and the estimated
+    matrix so the difference is attributable to the projection alone.
+    """
+
+    out: dict[str, Any] = {}
+    for name, labels in (("target", target_ids), ("greedy", greedy_ids)):
+        out[name] = subgroup_delta(cosines, labels)
+    out["cross"] = cross_partition_from_cosines(cosines, target_ids, greedy_ids)
+    return out
+
+
+def _disjoint_ensembles(count: int, size: int) -> list[tuple[int, ...]]:
+    """Consecutive disjoint blocks of map indices; the remainder is dropped.
+
+    Disjoint rather than resampled: two ensembles sharing a map share its error,
+    and the spread between them would understate how much a fresh ensemble could
+    move.
+    """
+
+    return [
+        tuple(range(start, start + size))
+        for start in range(0, count - count % size, size)
+    ]
+
+
+def methodology_sweep(
+    gradients: np.ndarray,
+    norms: np.ndarray,
+    target_ids: np.ndarray,
+    greedy_ids: np.ndarray,
+    *,
+    map_factory: Any,
+    k_max: int = 4096,
+    dimensions: Sequence[int] = (512, 1024, 2048, 4096),
+    ensemble_sizes: Sequence[int] = (1, 2, 4, 8),
+    seeds: Sequence[int] = METHODOLOGY_SEEDS,
+    production_dimension: int = 512,
+    production_map: tuple[np.ndarray, np.ndarray] | None = None,
+    production_seed: int = 20240917,
+) -> dict[str, Any]:
+    """Every ``(K, M)`` configuration, on one set of captured gradients.
+
+    ``map_factory(dimension, seed) -> (buckets, signs)`` must be the production
+    construction; anything else measures a different projection family and cannot
+    be read as advice about this one.
+
+    Each map is projected **once** at ``k_max`` and every narrower ``K`` is folded
+    out of that projection, so the whole grid costs one pass per map rather than
+    one per cell. Every configuration therefore sees identical gradients, labels
+    and pair sets, which is what makes the comparison between them meaningful.
+
+    Nothing is clipped anywhere.
+    """
+
+    gradients = np.asarray(gradients)
+    norms = np.asarray(norms, dtype=np.float64)
+    dimensions = tuple(int(value) for value in dimensions)
+    for dimension in dimensions:
+        if k_max % dimension:
+            raise ValueError(
+                f"Every evaluated width must divide k_max; {dimension} does not "
+                f"divide {k_max}."
+            )
+
+    exact = cosine_from_gram(gradients, norms)
+    exact_statistics = final_statistics(exact, target_ids, greedy_ids)
+
+    # The realized production map, reported on its own and never folded into an
+    # ensemble: the experiment used that one draw, and its error is not a sample
+    # anybody gets to average away.
+    production_cosines = sketch_estimated_cosines(
+        gradients, norms, dimension=production_dimension, seed=production_seed,
+        sketch_map=production_map,
+    )
+
+    per_map: dict[int, list[np.ndarray]] = {value: [] for value in dimensions}
+    for seed in seeds:
+        buckets, signs = map_factory(k_max, seed)
+        wide = sketch_gradients(gradients, buckets, signs, k_max)
+        for dimension in dimensions:
+            per_map[dimension].append(
+                cosines_from_sketches(fold_sketches(wide, dimension), norms)
+            )
+
+    grid = []
+    for dimension in dimensions:
+        matrices = per_map[dimension]
+        for size in ensemble_sizes:
+            groups = _disjoint_ensembles(len(matrices), int(size))
+            if not groups:
+                continue
+            members = []
+            for group in groups:
+                estimated = np.mean([matrices[index] for index in group], axis=0)
+                members.append({
+                    "seeds": tuple(int(seeds[index]) for index in group),
+                    "deviation": deviation_report(exact, estimated),
+                    "statistics": final_statistics(estimated, target_ids, greedy_ids),
+                })
+            grid.append({
+                "dimension": int(dimension),
+                "ensemble_size": int(size),
+                "budget": int(dimension) * int(size),
+                "num_ensembles": len(members),
+                "ensembles": members,
+            })
+
+    return {
+        "num_gradients": int(gradients.shape[0]),
+        "num_parameters": int(gradients.shape[1]),
+        "k_max": int(k_max),
+        "dimensions": dimensions,
+        "ensemble_sizes": tuple(int(value) for value in ensemble_sizes),
+        "seeds": tuple(int(value) for value in seeds),
+        "exact_cosines": exact,
+        "exact_statistics": exact_statistics,
+        "production": {
+            "dimension": int(production_dimension),
+            "seed": int(production_seed),
+            "cosines": production_cosines,
+            "deviation": deviation_report(exact, production_cosines),
+            "statistics": final_statistics(production_cosines, target_ids, greedy_ids),
+        },
+        "per_map_cosines": per_map,
+        "grid": grid,
     }
