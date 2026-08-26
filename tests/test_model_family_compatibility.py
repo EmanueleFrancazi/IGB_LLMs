@@ -22,6 +22,7 @@ section.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -44,7 +45,12 @@ from llm_behavior_lab.evaluation.input_conditions import (
 )
 from llm_behavior_lab.evaluation.position_gradients import compute_position_gradient_norms
 from llm_behavior_lab.models import build_model, build_model_from_config, list_models
-from llm_behavior_lab.utils import seed_everything
+from llm_behavior_lab.models.initialization_scale import (
+    initialization_note,
+    initialization_scale_report,
+    scale_initialization,
+)
+from llm_behavior_lab.utils import describe_device, seed_everything
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = REPO_ROOT / "configs" / "model"
@@ -246,6 +252,162 @@ def test_the_runner_resolves_both_arms_through_one_construction_seam() -> None:
         config = yaml.safe_load((CONFIG_DIR / config_name).read_text(encoding="utf-8"))
         assert config["model"]["name"] == expected_name
         assert expected_name in registered
+
+
+def _scale_orchestrator():
+    """Import the initialization-scale driver the way the runner is imported."""
+
+    path = REPO_ROOT / "scripts" / "run_initialization_scale_experiment.py"
+    spec = importlib.util.spec_from_file_location("initialization_scale_driver", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _parent_manifest(tmp_path, extra_argv=()):
+    """Run the orchestrator in dry-run mode and return the manifest it wrote.
+
+    Dry run launches no child process, so this exercises the real manifest
+    construction without running an experiment.
+    """
+
+    module = _scale_orchestrator()
+    argv = sys.argv
+    try:
+        sys.argv = [
+            "run_initialization_scale_experiment.py",
+            "--dry-run",
+            "--output-root",
+            str(tmp_path),
+            "--run-id",
+            "manifest_test",
+            *extra_argv,
+        ]
+        module.main()
+    finally:
+        sys.argv = argv
+    return json.loads((tmp_path / "manifest_test" / "manifest.json").read_text())
+
+
+def test_the_parent_manifest_makes_no_model_specific_initialization_claim(
+    tmp_path,
+) -> None:
+    """The driver never builds a model, so it cannot describe one truthfully.
+
+    It used to assert which tensor classes are scaled, that RMSNorm gains are the
+    deterministic ones, that no biases exist, and that linears are
+    kaiming-uniform. Every one of those is false for the GPT arm, and the driver
+    accepts ``--model-config`` as a passthrough argument, so it could be pointed
+    at that arm.
+    """
+
+    manifest = _parent_manifest(
+        tmp_path, ("--model-config", "configs/model/gpt2_12x768.yaml")
+    )
+    pairing = manifest["pairing"]
+
+    for removed in (
+        "scaled_parameter_classes",
+        "unscaled_parameter_classes",
+        "bias_parameters",
+        "sigma_w_note",
+    ):
+        assert removed not in pairing, removed
+
+    # Removed outright, not blanked: an empty list or a placeholder string would
+    # keep the ambiguous semantics while looking answered.
+    serialized = json.dumps(manifest)
+    for claim in ("kaiming_uniform", "RMSNorm", "normal_(0,1)", "bias=False"):
+        assert claim not in serialized, claim
+
+
+def test_the_parent_manifest_points_at_the_child_metadata(tmp_path) -> None:
+    """Orchestration facts here; model provenance where the model was built."""
+
+    manifest = _parent_manifest(tmp_path)
+    provenance = manifest["initialization_provenance"]
+
+    assert provenance["source"] == "child_run_metadata"
+    assert provenance["metadata_file"] == "metadata.json"
+    assert provenance["metadata_path"] == "initialization_scale"
+
+    # The orchestration facts it *can* state are still stated.
+    assert manifest["scales"] == [1.0, 0.5, 0.25]
+    assert manifest["pairing"]["alpha_1_is_literal_no_op"] is True
+    assert "conditions" in manifest
+
+
+def test_the_manifest_retains_its_orchestration_fields(tmp_path) -> None:
+    """What the driver genuinely knows, it still records.
+
+    ``conditions``, ``scales`` and ``alpha_1_is_literal_no_op`` are facts about
+    the orchestration itself -- which multipliers were requested, which child
+    processes ran, and that alpha = 1 is a literal no-op in the intervention.
+    None of them describes a model, so none of them moved.
+    """
+
+    manifest = _parent_manifest(tmp_path)
+
+    assert isinstance(manifest["conditions"], list)
+    assert isinstance(manifest["scales"], list)
+    assert manifest["pairing"]["alpha_1_is_literal_no_op"] is True
+    assert manifest["pairing"]["same_underlying_random_draw"] is True
+
+
+@FAMILIES
+def test_the_persisted_single_sigma_flag_comes_from_the_shared_report(build) -> None:
+    """The runner persists what the report computed, not a literal beside it.
+
+    This is also what makes the parent manifest's compatibility mirror currently
+    truthful: both families supported today resolve ``False``, so the fixed
+    literal the driver writes agrees with what every child run derives from its
+    own model.
+
+    It is a statement about **these two families**, not a guarantee about future
+    ones. A family with a single initializer standard deviation everywhere would
+    resolve ``True``, its child metadata would say so, and the mirror would then
+    be wrong -- which is exactly why the mirror is documented as temporary and
+    the child value is the authoritative one.
+    """
+
+    model = build()
+    report = initialization_scale_report(model, 1.0)
+
+    assert "has_single_sigma_w" in report
+    assert report["has_single_sigma_w"] is False
+
+
+def test_the_runner_consumes_the_shared_provenance_helpers() -> None:
+    """The runner must resolve provenance, not restate it.
+
+    Object identity against the package functions: if the runner ever grew its
+    own copy of either -- as it previously carried its own hand-written
+    initialization prose -- a record could describe a run differently from the
+    scale report attached to the same run.
+    """
+
+    module = _experiment_script()
+
+    assert module.scale_initialization is scale_initialization
+    assert module.describe_device is describe_device
+
+
+@FAMILIES
+def test_the_persisted_note_follows_the_model_that_was_built(build) -> None:
+    """What the runner writes is what the resolver returned for this model.
+
+    The runner persists ``scale_applied["note"]`` under both
+    ``initialization_scale.note`` and ``initialization_scale.applied.note``, so
+    the two are the same string by construction rather than by agreement between
+    two authors.
+    """
+
+    model = build()
+    applied = scale_initialization(model, 1.0)
+
+    assert applied["note"] == initialization_note(model)
+    assert applied["is_no_op"] is True
 
 
 @FAMILIES
@@ -609,3 +771,47 @@ def test_layer_gradient_reporting_consumes_model_layers_without_a_branch(build) 
     )
     assert torch.isfinite(torch.tensor(result.mean_loss))
     assert result.num_batches == 1
+
+
+# -- the parent manifest's provenance pointer --------------------------------
+#
+# The pointer is descriptive provenance: it documents where authoritative
+# per-child initialization data lives. No tracked code reads it, so nothing
+# here asserts that a consumer follows it -- only that the driver writes it.
+
+
+def test_the_parent_manifest_keeps_a_labelled_compatibility_mirror(tmp_path) -> None:
+    """One model-specific field survives, deliberately and with its terms stated.
+
+    ``pairing.has_single_sigma_w`` is a fixed literal that an existing local
+    validation script still reads. Removing it would break that script the moment
+    this driver wrote a manifest, so it stays until the script is made portable
+    and updated to read child provenance. What matters is that the manifest says
+    so: the pointer records that this is a mirror, not a derived value, and names
+    the authoritative source.
+    """
+
+    manifest = _parent_manifest(tmp_path)
+    provenance = manifest["initialization_provenance"]
+
+    assert manifest["pairing"]["has_single_sigma_w"] is False
+
+    mirror = provenance["legacy_compatibility_mirror"]
+    assert "retained temporarily" in mirror
+    assert "NOT derived from a model" in mirror
+    assert "metadata.json -> initialization_scale -> has_single_sigma_w" in mirror
+    assert "Remove the mirror" in mirror
+
+    # The authoritative location is still the child metadata, unchanged.
+    assert provenance["source"] == "child_run_metadata"
+    assert provenance["metadata_path"] == "initialization_scale"
+
+
+def test_the_deferred_layerwise_statement_is_model_generic(tmp_path) -> None:
+    """No fixed block count, no Tiny-LLaMA-specific claim."""
+
+    deferred = _parent_manifest(tmp_path)["deferred"]["layerwise_gradient_stability"]
+
+    assert "architecture-aware" in deferred
+    for claim in ("two transformer blocks", "two", "shallow", "LLaMA"):
+        assert claim not in deferred, claim

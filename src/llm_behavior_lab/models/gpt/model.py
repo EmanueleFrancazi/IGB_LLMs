@@ -175,6 +175,29 @@ class GPTForCausalLM(BaseLanguageModel):
         "c_fc.bias",
     )
 
+    #: How this family initializes itself, persisted with every run that uses it.
+    #: Read through
+    #: :func:`llm_behavior_lab.models.initialization_scale.initialization_note`,
+    #: which is the single source both the scale report and the experiment's
+    #: metadata consume. Without it a GPT record would inherit the LLaMA-family
+    #: default and claim kaiming-uniform linears and an architecture with no
+    #: biases -- neither true here, and initialization is one of the variables a
+    #: cross-architecture comparison is deliberately changing.
+    INITIALIZATION_NOTE = (
+        "This family states its own initialization rather than inheriting "
+        "PyTorch's per-class defaults. Token embeddings, learned positional "
+        "embeddings, and every attention and MLP weight are drawn from "
+        "normal_(0, 0.02); the residual c_proj weights are then redrawn with "
+        "standard deviation 0.02/sqrt(2 * n_layers). LayerNorm gains are "
+        "initialized to one and LayerNorm biases to zero, and every linear bias "
+        "is zero. The token embedding and the output head share one parameter. "
+        "alpha multiplies the randomly initialized tensors only: LayerNorm gains "
+        "and biases and the zeroed linear biases are left unscaled, and the tied "
+        "vocabulary tensor is scaled exactly once. There is no single "
+        "architecture-wide sigma_w, because the residual projections carry a "
+        "depth-dependent scale."
+    )
+
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         config.validate()

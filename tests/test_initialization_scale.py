@@ -17,10 +17,13 @@ import pytest
 import torch
 from torch import nn
 
+from llm_behavior_lab.models.gpt import GPTConfig, GPTForCausalLM
 from llm_behavior_lab.models.initialization_scale import (
+    DEFAULT_INITIALIZATION_NOTE,
     DETERMINISTIC_PARAMETER_SUFFIXES,
     classify_parameters,
     deterministic_parameter_suffixes,
+    initialization_note,
     initialization_scale_report,
     scale_initialization,
 )
@@ -425,6 +428,137 @@ def test_a_declaration_of_non_strings_is_rejected() -> None:
 
     with pytest.raises(TypeError, match="non-empty string"):
         classify_parameters(model)
+
+
+# -- initialization provenance ------------------------------------------------
+#
+# The note is persisted into every run's metadata and outlives the run. A model
+# that inherited another family's note would misdescribe the very thing a
+# cross-architecture comparison varies, so the resolution is pinned here in the
+# same way the deterministic set is.
+
+
+def _gpt(**overrides) -> GPTForCausalLM:
+    settings = {
+        "vocab_size": 32,
+        "dim": 16,
+        "n_layers": 2,
+        "n_heads": 4,
+        "max_seq_len": 8,
+        "bias": True,
+        "dropout": 0.0,
+    }
+    settings.update(overrides)
+    seed_everything(SEED)
+    return GPTForCausalLM(GPTConfig(**settings))
+
+
+def test_the_llama_family_resolves_to_the_default_note() -> None:
+    """Identity again: LLaMA declares nothing and falls through."""
+
+    assert initialization_note(_model()) is DEFAULT_INITIALIZATION_NOTE
+
+
+def test_the_default_note_describes_this_repositorys_llama_implementation() -> None:
+    """Every claim in it is checkable against the model, and is checked here.
+
+    A provenance string is only worth persisting if it is true, so the assertions
+    below read the actual model rather than trusting the prose.
+    """
+
+    note = DEFAULT_INITIALIZATION_NOTE
+    model = _model()
+
+    assert "normal_(0,1)" in note
+    assert "kaiming_uniform_(a=sqrt(5))" in note
+    assert "no bias parameters at all" in note
+    assert "RMSNorm gains are initialized to one and are not scaled" in note
+    assert "untied" in note
+    # It must not claim the upstream explicit initialization this repository
+    # deliberately does not use.
+    assert "0.02" in note and "deliberately retained" in note
+
+    assert [name for name, _ in model.named_parameters() if "bias" in name] == []
+    assert model.tok_embeddings.weight.data_ptr() != model.output.weight.data_ptr()
+    for name, parameter in model.named_parameters():
+        if any(name.endswith(s) for s in DETERMINISTIC_PARAMETER_SUFFIXES):
+            assert torch.equal(parameter, torch.ones_like(parameter)), name
+
+
+def test_the_gpt_family_declares_its_own_note() -> None:
+    model = _gpt()
+
+    note = initialization_note(model)
+
+    assert note == GPTForCausalLM.INITIALIZATION_NOTE
+    assert note != DEFAULT_INITIALIZATION_NOTE
+
+
+def test_the_gpt_note_states_its_convention_and_makes_no_llama_claim() -> None:
+    """None of the three LLaMA-only claims may survive into a GPT record."""
+
+    note = initialization_note(_gpt())
+
+    for claim in (
+        "kaiming_uniform",
+        "normal_(0,1)",
+        "no bias parameters at all",
+        "RMSNorm",
+        "untied",
+    ):
+        assert claim not in note, claim
+
+    for stated in (
+        "normal_(0, 0.02)",
+        "0.02/sqrt(2 * n_layers)",
+        "LayerNorm gains are initialized to one",
+        "LayerNorm biases to zero",
+        "every linear bias",
+        "share one parameter",
+        "scaled exactly once",
+    ):
+        assert stated in note, stated
+
+
+def test_the_scale_report_note_is_the_resolved_one_for_each_family() -> None:
+    """One source: the report cannot disagree with the resolver."""
+
+    llama = _model()
+    gpt = _gpt()
+
+    assert scale_initialization(llama, 0.5)["note"] == initialization_note(llama)
+    assert scale_initialization(gpt, 0.5)["note"] == initialization_note(gpt)
+    assert scale_initialization(_model(), 1.0)["note"] == DEFAULT_INITIALIZATION_NOTE
+
+
+def test_a_malformed_note_declaration_is_rejected() -> None:
+    """Fail loudly rather than persist misleading or empty provenance."""
+
+    model = _gpt()
+
+    model.INITIALIZATION_NOTE = 42
+    with pytest.raises(TypeError, match="must be a string"):
+        scale_initialization(model, 0.5)
+
+    model.INITIALIZATION_NOTE = "   "
+    with pytest.raises(TypeError, match="must not be empty"):
+        scale_initialization(model, 0.5)
+
+
+def test_the_scale_report_keys_are_unchanged() -> None:
+    """No serialized key added, removed or renamed by this change."""
+
+    applied = scale_initialization(_model(), 0.5)
+
+    assert sorted(applied) == [
+        "alpha",
+        "is_no_op",
+        "note",
+        "num_scaled_elements",
+        "num_scaled_tensors",
+        "scaled_parameters",
+        "unscaled_parameters",
+    ]
 
 
 # -- reporting ---------------------------------------------------------------

@@ -9,11 +9,15 @@ zero-centred random weight:
     alpha = 0.5   sigma / 2              variance / 4
     alpha = 0.25  sigma / 4              variance / 16
 
-**There is no single architecture-wide ``sigma_w``.** The token embedding is
-``normal_(0, 1)`` while every linear is ``kaiming_uniform_(a=sqrt(5))`` with a
-fan-in dependent scale, so ``alpha`` is the analogue of an intervention on one
-``sigma_w``, not a rescaling of one value. Standard deviations are therefore
-reported per parameter group, never as one number.
+**There is no single architecture-wide ``sigma_w``**, so ``alpha`` is the
+analogue of an intervention on one, not a rescaling of one value. Standard
+deviations are therefore reported per parameter group, never as one number.
+
+How each family initializes itself, and which of its tensors ``alpha`` touches,
+is a property of the model -- and this driver never builds one. That provenance
+is written by each child run into its own ``metadata.json`` under
+``initialization_scale``; the parent manifest points at it rather than restating
+it, because a restatement here could only describe one architecture.
 
 Everything else is held identical across the three conditions: dataset,
 tokenizer and its pinned revision, eligible vocabulary, architecture, seed list,
@@ -175,32 +179,51 @@ def main() -> None:
                 "shared; only the magnitude differs."
             ),
             "alpha_1_is_literal_no_op": True,
-            "scaled_parameter_classes": [
-                "token embeddings",
-                "attention query/key/value/output projections",
-                "feed-forward projections",
-                "output head",
-            ],
-            "unscaled_parameter_classes": [
-                "RMSNorm gains (deterministic, initialized to one)",
-            ],
-            "bias_parameters": (
-                "none exist: every nn.Linear is constructed bias=False, so the "
-                "zero-bias condition is identical to every historical experiment"
-            ),
+            # Legacy compatibility mirror, not a derived value. See
+            # initialization_provenance below for what it is and when it goes.
             "has_single_sigma_w": False,
-            "sigma_w_note": (
-                "The embedding is normal_(0,1) and every linear is "
-                "kaiming_uniform_(a=sqrt(5)) with a fan-in dependent scale, so no "
-                "single sigma_w describes the architecture. alpha is the analogue "
-                "of a sigma_w intervention; standard deviations are reported per "
-                "parameter group."
+        },
+        # This driver never builds a model -- it launches the runner as a
+        # subprocess -- so it cannot know which parameter tensors a family
+        # scales, how they were initialized, or whether the architecture has
+        # biases at all. It previously asserted all three anyway, in prose that
+        # described only the LLaMA family; pointed at a GPT configuration it
+        # would have written provenance that was simply false.
+        #
+        # The responsibility boundary is now explicit: orchestration facts here,
+        # model-specific initialization provenance in each child's own
+        # metadata.json, which is written by the process that actually built the
+        # model and resolved the note from it.
+        "initialization_provenance": {
+            "source": "child_run_metadata",
+            "metadata_file": "metadata.json",
+            "metadata_path": "initialization_scale",
+            "note": (
+                "Model-specific initialization provenance is recorded per child "
+                "run, not here. Each condition directory listed under "
+                "'conditions' holds a metadata.json whose 'initialization_scale' "
+                "object carries the family-resolved note, has_single_sigma_w, the "
+                "scaled and unscaled parameter names, and the per-group standard "
+                "deviations for the model that condition actually built. Read it "
+                "from a condition whose returncode is 0."
+            ),
+            "legacy_compatibility_mirror": (
+                "pairing.has_single_sigma_w is retained temporarily so an "
+                "existing local validation script keeps working. It is a fixed "
+                "literal, NOT derived from a model: this driver launches the "
+                "runner as a subprocess and never builds one. It is correct for "
+                "both campaign arms supported today, and is asserted so by the "
+                "test suite. The authoritative, model-derived value is "
+                "metadata.json -> initialization_scale -> has_single_sigma_w in "
+                "each child run. Remove the mirror once that validator is made "
+                "portable, tracked, and updated to read child provenance."
             ),
         },
         "deferred": {
             "layerwise_gradient_stability": (
-                "Not implemented in this phase. The model has two transformer "
-                "blocks, which is too shallow for a depth-propagation claim."
+                "Layerwise gradient stability is not evaluated by this "
+                "initialization-scale sweep; any depth-propagation claim requires "
+                "a separate architecture-aware analysis."
             ),
             "cross_scale_figures": (
                 "Not implemented in this phase. Three complete figure sets are "

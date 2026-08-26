@@ -50,10 +50,12 @@ import torch
 from torch import nn
 
 __all__ = [
+    "DEFAULT_INITIALIZATION_NOTE",
     "DETERMINISTIC_PARAMETER_SUFFIXES",
     "ParameterGroupReport",
     "classify_parameters",
     "deterministic_parameter_suffixes",
+    "initialization_note",
     "initialization_scale_report",
     "scale_initialization",
 ]
@@ -72,6 +74,64 @@ DETERMINISTIC_PARAMETER_SUFFIXES = (
     "attention_norm.weight",
     "ffn_norm.weight",
 )
+
+
+#: How the LLaMA family in this repository initializes itself, and what ``alpha``
+#: therefore does to it. This is the note for any model that does not declare its
+#: own -- see :func:`initialization_note` -- and the LLaMA family declares
+#: nothing, so this describes it by falling through rather than by transcription.
+#:
+#: It describes **this repository's** implementation, which deliberately keeps
+#: PyTorch's per-class defaults rather than adopting the explicit
+#: ``normal_(0, 0.02)`` of the upstream educational reference. Saying otherwise
+#: would misdescribe every measurement taken on this family.
+DEFAULT_INITIALIZATION_NOTE = (
+    "alpha multiplies every audited zero-centred random tensor. There is no "
+    "single architecture-wide sigma_w: the token embedding uses PyTorch's "
+    "nn.Embedding default normal_(0,1) and every linear uses "
+    "kaiming_uniform_(a=sqrt(5)) with a fan-in dependent scale, so alpha is the "
+    "analogue of a sigma_w intervention rather than a rescaling of one value. "
+    "These are PyTorch's per-class defaults, deliberately retained rather than "
+    "the explicit normal_(0, 0.02) of the upstream reference. The architecture "
+    "contains no bias parameters at all. RMSNorm gains are initialized to one "
+    "and are not scaled. The token embedding and the output head are untied."
+)
+
+
+def initialization_note(model: nn.Module) -> str:
+    """Return the initialization provenance that applies to ``model``.
+
+    A model class may declare a class attribute ``INITIALIZATION_NOTE`` to
+    override :data:`DEFAULT_INITIALIZATION_NOTE`, in the same way it may declare
+    its own deterministic-parameter suffixes.
+
+    This is the **single** source of the prose. Both the report returned by
+    :func:`scale_initialization` and the experiment's persisted metadata read it
+    from here, so the two cannot describe the same run differently -- which they
+    previously could, because each carried its own hand-written copy.
+
+    Initialization is part of what a cross-architecture comparison varies, so an
+    inherited note is not a cosmetic defect: a GPT record claiming
+    kaiming-uniform linears and "no bias parameters at all" would misdescribe
+    the very treatment under study.
+
+    Raises:
+        TypeError: If a declaration is not a non-empty string. Failing loudly
+            beats persisting a misleading or empty provenance string into a
+            record that outlives the run.
+    """
+
+    declared = getattr(model, "INITIALIZATION_NOTE", None)
+    if declared is None:
+        return DEFAULT_INITIALIZATION_NOTE
+
+    if not isinstance(declared, str):
+        raise TypeError(
+            f"INITIALIZATION_NOTE must be a string; got {type(declared).__name__}."
+        )
+    if not declared.strip():
+        raise TypeError("INITIALIZATION_NOTE must not be empty or whitespace.")
+    return declared
 
 
 def deterministic_parameter_suffixes(model: nn.Module) -> tuple[str, ...]:
@@ -261,13 +321,7 @@ def scale_initialization(model: nn.Module, alpha: float) -> dict[str, Any]:
                 if name in set(scaled)
             )
         ),
-        "note": (
-            "alpha multiplies every audited zero-centred random tensor. There is "
-            "no single architecture-wide sigma_w: the embedding is normal_(0,1) "
-            "and every linear is kaiming_uniform_(a=sqrt(5)) with a fan-in "
-            "dependent scale, so alpha is the analogue of a sigma_w intervention "
-            "rather than a rescaling of one value."
-        ),
+        "note": initialization_note(model),
     }
 
 

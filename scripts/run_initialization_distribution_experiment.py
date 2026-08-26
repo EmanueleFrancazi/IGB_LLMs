@@ -94,7 +94,12 @@ from llm_behavior_lab.models.initialization_scale import (  # noqa: E402
     initialization_scale_report,
     scale_initialization,
 )
-from llm_behavior_lab.utils import get_device, load_yaml_config, seed_everything  # noqa: E402
+from llm_behavior_lab.utils import (  # noqa: E402
+    describe_device,
+    get_device,
+    load_yaml_config,
+    seed_everything,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1016,18 +1021,25 @@ def main() -> None:
             "alpha": protocol["initialization_scale"],
             "variance_factor": protocol["initialization_scale"] ** 2,
             "is_no_op": protocol["initialization_scale"] == 1.0,
-            "has_single_sigma_w": False,
-            "note": (
-                "alpha is a global multiplier on every audited zero-centred random "
-                "weight. The architecture has no single sigma_w: the embedding is "
-                "normal_(0,1) and every linear is kaiming_uniform_(a=sqrt(5)) with a "
-                "fan-in dependent scale. Deterministic RMSNorm gains are not scaled, "
-                "and the architecture contains no bias parameters at all."
-            ),
+            # Both of these are resolved from the model that was actually built
+            # rather than written out here. The note and scale_applied["note"]
+            # used to be two separate hand-written descriptions of one fact, both
+            # of them LLaMA-specific; a GPT run would have inherited claims about
+            # kaiming-uniform linears and an architecture with no biases, neither
+            # of which is true of it. has_single_sigma_w was a hard-coded literal
+            # beside a report that computes the same thing: identical today for
+            # both families, but free to drift apart the moment one is not.
+            "has_single_sigma_w": scale_report["has_single_sigma_w"],
+            "note": scale_applied["note"],
             "applied": scale_applied,
             "parameter_groups": scale_report,
         },
         "device": str(device),
+        # Additive. str(device) alone cannot say which physical GPU ran this when
+        # a campaign is split across two: "cuda" under CUDA_VISIBLE_DEVICES=0 and
+        # under =1 record the same string, and two identical cards report the
+        # same name.
+        "device_provenance": describe_device(device),
         "model_name": model_config["model"]["name"],
         "model_parameter_count": parameter_count,
         "model_vocab_size": model_vocab_size,
