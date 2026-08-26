@@ -22,14 +22,46 @@ they are reported per row. Process RSS cannot: ``ru_maxrss`` is a high-water mar
 for the whole process, so it is reported once, at the end, for the run as a
 whole. Reporting it per row would produce a monotone column that looks like
 per-size growth and is not.
+
+Sketch memory, and why ``M`` is the axis that matters
+-----------------------------------------------------
+
+The CountSketch is off by default here, which keeps every historical invocation
+of this script comparable. Enabling it with ``--gradient-sketch`` is what makes
+the memory columns describe the configuration a campaign actually runs, because
+the map tables are **device resident**:
+
+.. code-block:: text
+
+    per map, per parameter:  int64 bucket (8 B) + float64 sign (8 B) = 16 B
+    device map memory     =  M * 16 * P bytes        <- scales with M, not K
+
+``K`` changes the *width of the sketch output* and therefore the host-side
+``[N_T, D, K]`` array and the analysis width; it does not change the map tables,
+which have one entry per parameter regardless of how many buckets those entries
+point into. So doubling ``K`` costs host storage, while adding a map replica
+costs device memory.
+
+Only ``M = 1`` can be benchmarked. The production estimator builds a single map
+-- :func:`~llm_behavior_lab.evaluation.position_gradients.compute_position_gradient_norms`
+takes ``sketch_dimension`` and ``sketch_seed`` and has no replica count -- so a
+larger ``M`` is projected, not measured:
+
+.. code-block:: text
+
+    projected_M_peak  ~=  measured_M1_peak + (M - 1) * 16 * P bytes
+
+plus whatever replica-dependent transient the implementation turns out to add.
+That projection is a first-order estimate anchored on a real measurement; the
+fully analytical figure remains a cross-check, not a substitute for it.
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import resource
 import sys
-import time
 from pathlib import Path
 
 import torch
@@ -52,6 +84,7 @@ from llm_behavior_lab.evaluation.init_distribution import (  # noqa: E402
     build_evaluation_positions,
 )
 from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    DEFAULT_SKETCH_DIMENSION,
     GRADIENT_TEMPERATURES,
     compute_position_gradient_norms,
 )
@@ -61,6 +94,16 @@ from llm_behavior_lab.utils import get_device, load_yaml_config, seed_everything
 #: The position count the extrapolation is quoted for: the standing protocol of
 #: 512 windows x 64 tokens.
 FULL_EXPERIMENT_POSITIONS = 32768
+
+#: The production sketch seed, read from the production signature rather than
+#: copied, so the benchmark cannot drift from the estimator it is timing.
+DEFAULT_SKETCH_SEED = inspect.signature(
+    compute_position_gradient_norms
+).parameters["sketch_seed"].default
+
+#: Device-resident bytes per parameter per map: one int64 bucket and one float64
+#: sign, built by ``production_sketch_tables`` and moved to the model's device.
+SKETCH_MAP_BYTES_PER_PARAMETER = 16
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,8 +174,189 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Analysis split. Defaults to the experiment protocol.",
     )
+    sketch = parser.add_argument_group("count sketch")
+    sketch.add_argument(
+        "--gradient-sketch",
+        action="store_true",
+        help=(
+            "Also project every gradient through the production count sketch, as "
+            "a scientific run does. Off by default, which keeps historical "
+            "invocations of this benchmark comparable -- but the map tables are "
+            "device resident, so the memory columns only describe a campaign "
+            "configuration when this is on."
+        ),
+    )
+    sketch.add_argument(
+        "--sketch-dimension",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "Sketch width. Resolved like the runner does it: this flag, then the "
+            "experiment config's gradient_analysis.sketch_dimension, then the "
+            f"production default ({DEFAULT_SKETCH_DIMENSION})."
+        ),
+    )
+    sketch.add_argument(
+        "--sketch-maps",
+        type=int,
+        default=1,
+        metavar="M",
+        help=(
+            "Independent map replicas. Only 1 can be measured: the production "
+            "estimator builds a single map. Larger M is projected, not timed."
+        ),
+    )
+    sketch.add_argument(
+        "--sketch-seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed for the production map construction. Benchmark-only; the "
+            "runner has no such option and always uses the production default "
+            f"({DEFAULT_SKETCH_SEED}). Timing does not depend on it."
+        ),
+    )
+    parser.add_argument(
+        "--allow-narrow-vocabulary",
+        action="store_true",
+        help=(
+            "Permit a tokenizer narrower than the model's output head. Refused "
+            "by default: logits are truncated to the tokenizer vocabulary before "
+            "the loss, so the output-layer gradient -- the dominant cost -- is "
+            "measured over a fraction of the head and the result is not a "
+            "production cost estimate. Required by the legacy tiny-character "
+            "pairing, which must acknowledge what it is measuring."
+        ),
+    )
     add_dataset_arguments(parser)
     return parser.parse_args()
+
+
+def _resolve_sketch(args: argparse.Namespace, experiment_config: dict) -> dict:
+    """Resolve the sketch configuration, in the runner's own precedence order.
+
+    The runner reads ``gradient_analysis.sketch`` and
+    ``gradient_analysis.sketch_dimension`` from the experiment config and lets
+    the command line override the width, so the same vocabulary is used here
+    rather than a second one invented for the benchmark:
+
+    .. code-block:: text
+
+        enabled : --gradient-sketch  OR  gradient_analysis.sketch
+        K       : --sketch-dimension  >  gradient_analysis.sketch_dimension  >  default
+        seed    : --sketch-seed       >  production default
+        M       : --sketch-maps, and it must be 1
+
+    Raises:
+        ValueError: If ``M != 1``, or if ``K`` is not positive. ``M > 1`` is a
+            selected but unimplemented design; the benchmark refuses to pretend
+            it measured one rather than silently timing a single map under a
+            label that says four.
+    """
+
+    gradients = experiment_config.get("gradient_analysis", {}) or {}
+
+    enabled = bool(args.gradient_sketch) or bool(gradients.get("sketch", False))
+    # ``is None``, not ``or``: an explicit ``--sketch-dimension 0`` is a mistake
+    # worth reporting, and ``or`` would silently replace it with the default.
+    dimension = int(
+        args.sketch_dimension
+        if args.sketch_dimension is not None
+        else gradients.get("sketch_dimension", DEFAULT_SKETCH_DIMENSION)
+    )
+    seed = int(args.sketch_seed if args.sketch_seed is not None else DEFAULT_SKETCH_SEED)
+    maps = int(args.sketch_maps)
+
+    if dimension < 1:
+        raise ValueError(f"--sketch-dimension must be positive; got {dimension}.")
+    if maps != 1:
+        raise ValueError(
+            f"--sketch-maps must be 1; got {maps}. The production estimator "
+            "constructs a single count sketch -- compute_position_gradient_norms "
+            "takes sketch_dimension and sketch_seed and has no replica count -- "
+            "so M > 1 cannot be timed without first implementing it, which this "
+            "benchmark deliberately does not do. Project it instead: each "
+            f"replica adds {SKETCH_MAP_BYTES_PER_PARAMETER} bytes per parameter "
+            "of device-resident map tables on top of the measured M = 1 peak."
+        )
+
+    return {"enabled": enabled, "dimension": dimension, "maps": maps, "seed": seed}
+
+
+def _check_vocabulary_match(
+    tokenizer, model_params: dict, *, allow_narrow: bool = False
+) -> str | None:
+    """Refuse any vocabulary pairing whose timing would not be a cost estimate.
+
+    Two of the three conditions are the experiment runner's own, stated as
+    properties of the tokenizer rather than of any model family: a vocabulary
+    wider than the model's output is impossible, and a *pretrained* vocabulary
+    must match the model exactly.
+
+    The third is stricter than the runner, deliberately. The runner allows a
+    corpus-derived vocabulary to be **narrower** than the model -- its size
+    depends on the text -- and for a scientific run that is a legitimate
+    configuration. For a timing run it is a trap: logits are truncated to the
+    tokenizer's vocabulary before the loss is taken, so a 32000-row output head
+    measured through a ~150-symbol character vocabulary backpropagates into
+    about half a percent of the head. A benchmark result is used as a production
+    cost estimate, so a warning is not enough; narrowing is refused unless the
+    caller says ``allow_narrow``, and even then the header states plainly that
+    the number is not representative of the full output head.
+
+    Args:
+        tokenizer: The built tokenizer.
+        model_params: The model config's ``params`` mapping.
+        allow_narrow: Permit a narrower corpus-derived vocabulary, from
+            ``--allow-narrow-vocabulary``. The legacy tiny-character pairing
+            needs it, which is the point: it has to be asked for.
+
+    Returns:
+        A warning to print in the header when narrowing was permitted, or
+        ``None`` when the vocabularies match exactly.
+
+    Raises:
+        ValueError: On either runner condition, or on narrowing without
+            ``allow_narrow``.
+    """
+
+    model_vocab_size = int(model_params["vocab_size"])
+    description = tokenizer.describe()
+
+    if tokenizer.vocab_size > model_vocab_size:
+        raise ValueError(
+            f"Tokenizer vocab size {tokenizer.vocab_size} exceeds model vocab size "
+            f"{model_vocab_size}. Increase model.params.vocab_size."
+        )
+    if description.get("type") == "pretrained" and tokenizer.vocab_size != model_vocab_size:
+        raise ValueError(
+            f"Tokenizer {description.get('identifier')!r} has vocabulary "
+            f"{tokenizer.vocab_size} but the model config declares "
+            f"{model_vocab_size}. A pretrained tokenizer requires an exact match."
+        )
+
+    if tokenizer.vocab_size == model_vocab_size:
+        return None
+
+    share = tokenizer.vocab_size / model_vocab_size
+    if not allow_narrow:
+        raise ValueError(
+            f"The tokenizer supplies {tokenizer.vocab_size:,} of the model's "
+            f"{model_vocab_size:,} output rows ({share:.1%}). Logits are truncated "
+            "to the tokenizer vocabulary before the loss, so the output-layer "
+            "gradient -- the dominant cost -- would be measured over a fraction "
+            "of the head and the result would not be a production cost estimate. "
+            "Pair the model with a tokenizer of matching size, or pass "
+            "--allow-narrow-vocabulary to measure the reduced output head "
+            "deliberately."
+        )
+    return (
+        f"WARNING: --allow-narrow-vocabulary is in effect. The tokenizer supplies "
+        f"{tokenizer.vocab_size:,} of the model's {model_vocab_size:,} output rows "
+        f"({share:.1%}). This timing is NOT representative of the full output "
+        "head and must not be used as a production cost estimate."
+    )
 
 
 def _cuda_peaks(device: torch.device) -> tuple[float, float] | None:
@@ -205,6 +429,13 @@ def main() -> None:
         device=device,
     )
 
+    sketch = _resolve_sketch(args, experiment_config)
+    vocabulary_warning = _check_vocabulary_match(
+        tokenizer,
+        model_config["model"]["params"],
+        allow_narrow=args.allow_narrow_vocabulary,
+    )
+
     seed_everything(model_seed)
     model = build_model_from_config(model_config).to(device)
     parameter_count = model.count_parameters()
@@ -226,6 +457,28 @@ def main() -> None:
         "One backward pass per position PER TEMPERATURE, from a single retained "
         "forward graph per window."
     )
+    if sketch["enabled"]:
+        map_bytes = SKETCH_MAP_BYTES_PER_PARAMETER * parameter_count
+        print(
+            f"Count sketch: ON  K = {sketch['dimension']}, M = {sketch['maps']}, "
+            f"seed {sketch['seed']}"
+        )
+        print(
+            f"  device map tables: {sketch['maps']} x 16 B x {parameter_count:,} "
+            f"parameters = {map_bytes / (1024 ** 2):,.1f} MiB, included in the "
+            "CUDA columns below"
+        )
+    else:
+        print(
+            "Count sketch: OFF (default). The device-resident map tables are not "
+            "allocated and the projection is not timed, so the CUDA columns "
+            "below UNDERSTATE a campaign configuration by about "
+            f"{SKETCH_MAP_BYTES_PER_PARAMETER * parameter_count / (1024 ** 2):,.1f}"
+            " MiB. Pass --gradient-sketch to measure it."
+        )
+    if vocabulary_warning is not None:
+        print()
+        print(vocabulary_warning)
     print()
 
     header = (
@@ -248,9 +501,28 @@ def main() -> None:
             eligible_token_ids=tokenizer.eligible_token_ids,
             num_windows=count,
             temperatures=temperatures,
+            gradient_sketch=sketch["enabled"],
+            sketch_dimension=sketch["dimension"],
+            sketch_seed=sketch["seed"],
         )
         if device.type == "cuda":
             torch.cuda.synchronize(device)
+        if sketch["enabled"]:
+            # Asserted rather than assumed: the map tables are built inside this
+            # call, so a wrong shape here would mean the peaks above described
+            # something other than the requested configuration.
+            expected = (len(temperatures), result.num_positions, sketch["dimension"])
+            if tuple(result.temperature_gradient_sketches.shape) != expected:
+                raise RuntimeError(
+                    "Sketch shape "
+                    f"{tuple(result.temperature_gradient_sketches.shape)} does not "
+                    f"match the requested {expected}."
+                )
+            if len(result.sketch_tensor_sizes) != num_parameter_tensors:
+                raise RuntimeError(
+                    f"The sketch covered {len(result.sketch_tensor_sizes)} tensors "
+                    f"but the model has {num_parameter_tensors}."
+                )
         rate = result.num_positions / max(result.seconds, 1e-9)
         measurements.append((count, result.num_positions, result.seconds, rate))
 

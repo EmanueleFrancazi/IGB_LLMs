@@ -255,9 +255,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sketch-dimension",
         type=int,
-        default=DEFAULT_SKETCH_DIMENSION,
+        # None, not the width itself: the resolution below distinguishes "not
+        # asked for" from "asked for explicitly", which a default of 512 cannot.
+        default=None,
         metavar="K",
-        help="Width of that sketch.",
+        help=(
+            "Width of that sketch. Omitted, the experiment config's "
+            "gradient_analysis.sketch_dimension applies, then the default "
+            f"({DEFAULT_SKETCH_DIMENSION})."
+        ),
     )
     parser.add_argument(
         "--gradient-temperatures",
@@ -363,6 +369,38 @@ def _describe_tokenizer_line(description: dict[str, Any]) -> str:
     return f"{rendered}, vocab size {vocab}"
 
 
+def _resolve_sketch_dimension(
+    args: argparse.Namespace, gradients: dict[str, Any]
+) -> int:
+    """Resolve the sketch width: command line, then config, then the default.
+
+    ``None``-based, not truthiness-based. The previous ``or`` chain had two
+    defects at once. An explicit ``--sketch-dimension 0`` is falsy, so it fell
+    through and silently became 512 instead of being refused -- a run would then
+    have recorded a width nobody asked for. And because the flag's own default
+    used to be 512 rather than ``None``, the left operand was *always* truthy,
+    which made ``gradient_analysis.sketch_dimension`` dead configuration that
+    could never take effect. Neither is reachable now.
+
+    Raises:
+        ValueError: If the resolved width is not positive. A sketch of zero or
+            negative buckets is not a narrower measurement, it is not a
+            measurement.
+    """
+
+    requested = getattr(args, "sketch_dimension", None)
+    dimension = int(
+        requested
+        if requested is not None
+        else gradients.get("sketch_dimension", DEFAULT_SKETCH_DIMENSION)
+    )
+    if dimension < 1:
+        raise ValueError(
+            f"sketch_dimension must be a positive number of buckets; got {dimension}."
+        )
+    return dimension
+
+
 def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     """Merge the experiment config with command-line overrides."""
 
@@ -430,10 +468,7 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             bool(gradients.get("sketch", False))
             or bool(getattr(args, "gradient_sketch", False))
         ),
-        "sketch_dimension": int(
-            getattr(args, "sketch_dimension", None)
-            or gradients.get("sketch_dimension", DEFAULT_SKETCH_DIMENSION)
-        ),
+        "sketch_dimension": _resolve_sketch_dimension(args, gradients),
         "gradient_vector_split": (
             bool(gradients.get("vector_split", False))
             or bool(getattr(args, "gradient_vector_split", False))

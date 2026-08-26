@@ -731,3 +731,89 @@ def test_historical_gradient_and_sweep_resolution_are_unchanged() -> None:
     assert enabled["temperature_sweep_enabled"] is True
     assert enabled["sweep_temperatures"] == (0.3, 0.6)
     assert enabled["initialization_scale"] == 1.0
+
+
+# -- sketch-width resolution -------------------------------------------------
+#
+# The estimator's width reaches a record's metadata and its persisted sketch
+# shape, so an omitted, mistyped or ignored value is a scientific problem rather
+# than a usability one.
+
+
+def test_an_omitted_sketch_width_falls_back_to_the_default() -> None:
+    """The parser's default and the resolver's fallback must agree."""
+
+    import sys
+
+    module = _load_runner()
+    argv = sys.argv
+    try:
+        sys.argv = ["run_initialization_distribution_experiment.py"]
+        parsed = module.parse_args()
+    finally:
+        sys.argv = argv
+
+    # The flag itself no longer carries the width; the resolver supplies it.
+    assert parsed.sketch_dimension is None
+    assert module._resolve_protocol({}, parsed)["sketch_dimension"] == (
+        module.DEFAULT_SKETCH_DIMENSION
+    )
+
+
+def test_an_explicit_sketch_width_wins_over_the_config() -> None:
+    module = _load_runner()
+    config = {"gradient_analysis": {"sketch_dimension": 128}}
+
+    resolved = module._resolve_protocol(
+        config, _historical_args(sketch_dimension=64)
+    )["sketch_dimension"]
+
+    assert resolved == 64
+
+
+def test_the_config_supplies_the_width_when_the_flag_is_omitted() -> None:
+    """Previously unreachable: the flag's default used to shadow the config.
+
+    With ``default=DEFAULT_SKETCH_DIMENSION`` the left operand of the old ``or``
+    chain was always truthy, so ``gradient_analysis.sketch_dimension`` could
+    never take effect. It is real configuration now.
+    """
+
+    module = _load_runner()
+    config = {"gradient_analysis": {"sketch_dimension": 128}}
+
+    resolved = module._resolve_protocol(
+        config, _historical_args(sketch_dimension=None)
+    )["sketch_dimension"]
+
+    assert resolved == 128
+
+
+def test_a_zero_sketch_width_is_refused_rather_than_silently_replaced() -> None:
+    """Zero is falsy, so the old ``or`` chain turned it into 512.
+
+    A run would then have recorded a width nobody asked for, and the persisted
+    sketch would have had a shape the command line did not describe.
+    """
+
+    module = _load_runner()
+
+    with pytest.raises(ValueError, match="positive number of buckets"):
+        module._resolve_protocol({}, _historical_args(sketch_dimension=0))
+
+
+def test_a_negative_sketch_width_is_refused() -> None:
+    module = _load_runner()
+
+    with pytest.raises(ValueError, match="positive number of buckets"):
+        module._resolve_protocol({}, _historical_args(sketch_dimension=-8))
+
+
+def test_existing_valid_configurations_resolve_unchanged() -> None:
+    """No tracked config sets a width, so every one of them still means 512."""
+
+    module = _load_runner()
+
+    for config in ({}, {"gradient_analysis": {}}, {"gradient_analysis": {"sketch": True}}):
+        resolved = module._resolve_protocol(config, _historical_args())
+        assert resolved["sketch_dimension"] == module.DEFAULT_SKETCH_DIMENSION
