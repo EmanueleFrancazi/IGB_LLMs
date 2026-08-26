@@ -1,0 +1,117 @@
+# GPT-2 / nanoGPT architectural arm, adapted to the shared protocol vocabulary.
+#
+# WHAT THIS ARM IS
+#
+# A GPT-2 decoder at the nanoGPT 124M shape -- 12 layers, width 768, 12 heads,
+# learned positional capacity 1024, biases enabled, dropout 0 -- carrying the
+# project's shared 32,000-token vocabulary instead of GPT-2's own.
+#
+# It is the cross-architecture partner of configs/model/llama_12x768.yaml. The
+# two are matched on depth, width, vocabulary, corpus, tokenizer, evaluation
+# positions and protocol, and they differ on an ARCHITECTURAL BUNDLE:
+#
+#     LLaMA arm                       this arm
+#     ---------                       --------
+#     RMSNorm, gain only              LayerNorm, gain and bias
+#     rotary positions, no parameters learned absolute positions (wpe)
+#     SwiGLU feed-forward, 2048 wide  GELU feed-forward, 3072 wide
+#     no biases anywhere              biases on every Linear and LayerNorm
+#     untied embedding and head       tied embedding and head
+#     PyTorch default initialization  explicit N(0, 0.02), scaled c_proj
+#
+# Because those move together, a difference measured between the two arms
+# localizes to the bundle. It does NOT isolate any single architectural
+# component, and no claim of that kind should be made from this pair.
+#
+# This arm is also NOT identical to upstream GPT-2: the vocabulary differs, and
+# the model is randomly initialized rather than trained. It reproduces GPT-2's
+# architecture and initialization scheme, not GPT-2 itself.
+#
+# DELIBERATE PROTOCOL ADAPTATION
+#
+# vocab_size is 32000, not GPT-2's 50257. Holding the tokenizer fixed across
+# arms is what makes the cross-architecture comparison interpretable: the
+# eligible predictive support, the corpus reference distribution and the
+# evaluation positions must be the same token universe in every arm. 32000
+# matches the mistralai/Mistral-7B-v0.1 tokenizer, and the experiment script
+# refuses to run when the loaded tokenizer disagrees with this value. No padding
+# to a multiple of 64 is applied; 32000 already is one.
+#
+# POSITIONAL CAPACITY
+#
+# max_seq_len: 1024 preserves GPT-2's learned positional parameterization. In
+# this family the positional table is a PARAMETER table, not a buffer, so
+# cropping it to the campaign window would change the model rather than merely
+# its limits.
+#
+# Campaign windows remain 64 tokens (positions.block_size in the experiment
+# config). Consequently rows 64-1023 of wpe receive exactly zero gradient at
+# every position and every loss temperature under this protocol. They
+# nonetheless remain part of the model, the exact full-parameter gradient norm,
+# the parameter count, and the CountSketch domain -- 737,280 of its entries.
+# That is a stated property of the arm, not an oversight, and any parameter-count
+# comparison against the LLaMA arm should mention it.
+#
+# TYING
+#
+# The token embedding and the output head share one Parameter, as GPT-2 and
+# nanoGPT do. This is retained as a genuine architecture-family property, not
+# normalized away. Two consequences travel with it: the parameter budget is
+# about 21% below the LLaMA arm's, which is a documented consequence of the
+# treatment rather than a confound to correct; and the embedding and the head
+# are one tensor, so they cannot later be separated by ordinary parameter
+# grouping in a block-wise gradient decomposition.
+#
+# The weights remain randomly initialized. No pretrained model is ever loaded;
+# the tokenizer is the only pretrained component in the experiment.
+#
+# PARAMETER BUDGET
+#
+#   wte  32000 x 768                             = 24,576,000
+#   wpe   1024 x 768                             =    786,432
+#   per block  ln_1 gain + bias                  =      1,536
+#              c_attn   768 x 2304 + 2304        =  1,771,776
+#              attn.c_proj 768 x 768 + 768       =    590,592
+#              ln_2 gain + bias                  =      1,536
+#              c_fc     768 x 3072 + 3072        =  2,362,368
+#              mlp.c_proj 3072 x 768 + 768       =  2,360,064
+#                                                   ---------
+#                                                   7,087,872  x 12 = 85,054,464
+#   ln_f gain + bias                             =      1,536
+#   lm_head                                        tied -> 0
+#                                                   -----------
+#   TOTAL unique trainable                         110,418,432
+#
+#   parameter tensors, duplicates removed        = 148
+#   tied vocabulary share  24,576,000 / 110,418,432 = 22.26%
+#
+# state_dict() carries 149 keys rather than 148: PyTorch serializes a tied
+# tensor under both names. That is standard behaviour for tied weights and is
+# what upstream GPT-2 checkpoints look like. named_parameters() de-duplicates,
+# so the gradient norm, the CountSketch tensor ordering and the
+# initialization-scale audit each see the shared tensor exactly once.
+#
+# Field names are the project-facing ones. The nanoGPT spellings are n_embd
+# (dim), n_layer (n_layers), n_head (n_heads) and block_size (max_seq_len); see
+# src/llm_behavior_lab/models/gpt/config.py.
+
+model:
+  name: gpt2
+  params:
+    vocab_size: 32000
+    dim: 768
+    n_layers: 12
+    n_heads: 12
+    max_seq_len: 1024
+    # GPT-2 carries biases on every Linear and on both LayerNorms. Kept, because
+    # the presence of biases is one of the architectural differences this arm
+    # exists to carry.
+    bias: true
+    # No dropout: the measurement is taken at initialization with the model in
+    # eval mode, and a non-zero rate would add a second stochastic stream to an
+    # experiment whose whole design is one controlled source of randomness.
+    dropout: 0.0
+
+runtime:
+  seed: 1234
+  device: auto

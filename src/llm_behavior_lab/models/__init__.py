@@ -2,7 +2,8 @@
 
 from llm_behavior_lab.models.base import BaseLanguageModel, ModelOutput
 
-# Importing the llama package registers the LLaMA-style builders.
+# Importing a family package registers its builders.
+from llm_behavior_lab.models.gpt import GPTConfig, GPTForCausalLM  # noqa: F401
 from llm_behavior_lab.models.llama import LlamaConfig, LlamaForCausalLM  # noqa: F401
 from llm_behavior_lab.models.initialization_scale import (
     DETERMINISTIC_PARAMETER_SUFFIXES,
@@ -22,6 +23,8 @@ __all__ = [
     "DETERMINISTIC_PARAMETER_SUFFIXES",
     "BaseLanguageModel",
     "ModelOutput",
+    "GPTConfig",
+    "GPTForCausalLM",
     "LlamaConfig",
     "LlamaForCausalLM",
     "build_model",
