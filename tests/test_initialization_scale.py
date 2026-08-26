@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch import nn
 
 from llm_behavior_lab.models.initialization_scale import (
     DETERMINISTIC_PARAMETER_SUFFIXES,
     classify_parameters,
+    deterministic_parameter_suffixes,
     initialization_scale_report,
     scale_initialization,
 )
@@ -192,6 +194,237 @@ def test_a_non_positive_scale_is_rejected() -> None:
     for alpha in (0.0, -1.0):
         with pytest.raises(ValueError, match="alpha must be positive"):
             scale_initialization(_model(), alpha)
+
+
+# -- per-family deterministic sets -------------------------------------------
+#
+# A second architecture family names its deterministic tensors differently and
+# has more of them: LayerNorm carries a bias as well as a gain, and its linear
+# biases are initialized to zero rather than drawn. Scaling a LayerNorm gain is
+# a different intervention from scaling a random draw -- it changes the
+# normalization -- so the set has to follow the family.
+#
+# The stand-in below is a classification fixture, not a model: it has no
+# forward. It exists so this stage can be reviewed without the GPT family.
+
+
+class _DeclaringFamily(nn.Module):
+    """A GPT-2-shaped parameter layout that declares its own deterministic set.
+
+    Named to match the upstream layout the future family will use, because the
+    declaration is a set of *name suffixes* and a test on exact top-level names
+    would not exercise that. ``c_proj.bias`` deliberately occurs twice, under
+    ``attn`` and under ``mlp``, so one suffix has to cover both.
+    """
+
+    DETERMINISTIC_PARAMETER_SUFFIXES = (
+        "ln_1.weight",
+        "ln_1.bias",
+        "ln_f.weight",
+        "ln_f.bias",
+        "c_attn.bias",
+        "c_proj.bias",
+        "c_fc.bias",
+    )
+
+    def __init__(self, dim: int = 8, vocab_size: int = 16) -> None:
+        super().__init__()
+        self.wte = nn.Embedding(vocab_size, dim)
+        self.wpe = nn.Embedding(4, dim)
+        self.ln_1 = nn.LayerNorm(dim)
+        self.attn = nn.ModuleDict(
+            {"c_attn": nn.Linear(dim, 3 * dim), "c_proj": nn.Linear(dim, dim)}
+        )
+        self.mlp = nn.ModuleDict(
+            {"c_fc": nn.Linear(dim, 4 * dim), "c_proj": nn.Linear(4 * dim, dim)}
+        )
+        self.ln_f = nn.LayerNorm(dim)
+        self.lm_head = nn.Linear(dim, vocab_size, bias=False)
+        # Tied, as GPT-2 is. One storage, reachable under two names.
+        self.wte.weight = self.lm_head.weight
+        for module in self.modules():
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+
+def _declaring_family(seed: int = SEED) -> _DeclaringFamily:
+    seed_everything(seed)
+    return _DeclaringFamily()
+
+
+def test_the_llama_family_resolves_to_the_module_default() -> None:
+    """LLaMA declares nothing, so it runs the historical code path unchanged.
+
+    Identity, not equality: falling through to the module constant is what makes
+    the existing behaviour identical by construction rather than by transcribing
+    the same three suffixes into a second place where they could drift.
+    """
+
+    assert deterministic_parameter_suffixes(_model()) is DETERMINISTIC_PARAMETER_SUFFIXES
+
+
+def test_llama_classification_is_unchanged_in_content_and_order() -> None:
+    """Regression: the same names, the same values, the same insertion order."""
+
+    model = _model()
+    expected = {
+        name: not any(
+            name.endswith(suffix) for suffix in DETERMINISTIC_PARAMETER_SUFFIXES
+        )
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    classified = classify_parameters(model)
+
+    assert classified == expected
+    assert list(classified) == list(expected)
+    assert sum(classified.values()) == sum(expected.values())
+
+
+def test_llama_scale_report_lists_are_unchanged() -> None:
+    """The serialized audit keeps its content and its ordering."""
+
+    model = _model()
+    applied = scale_initialization(model, 0.5)
+    names = [
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
+
+    assert applied["scaled_parameters"] == [
+        name
+        for name in names
+        if not any(name.endswith(suffix) for suffix in DETERMINISTIC_PARAMETER_SUFFIXES)
+    ]
+    assert applied["unscaled_parameters"] == [
+        name
+        for name in names
+        if any(name.endswith(suffix) for suffix in DETERMINISTIC_PARAMETER_SUFFIXES)
+    ]
+    assert applied["is_no_op"] is False
+    assert applied["num_scaled_tensors"] == len(applied["scaled_parameters"])
+
+
+def test_a_declaring_family_excludes_its_norms_and_zeroed_biases() -> None:
+    """Every LayerNorm gain and bias, and every zero-initialized linear bias."""
+
+    model = _declaring_family()
+    classified = classify_parameters(model)
+    unscaled = sorted(name for name, scaled in classified.items() if not scaled)
+
+    assert unscaled == [
+        "attn.c_attn.bias",
+        "attn.c_proj.bias",
+        "ln_1.bias",
+        "ln_1.weight",
+        "ln_f.bias",
+        "ln_f.weight",
+        "mlp.c_fc.bias",
+        "mlp.c_proj.bias",
+    ]
+    # The stochastic tensors, including the tied vocabulary matrix, still scale.
+    assert classified["wte.weight"] is True
+    assert classified["wpe.weight"] is True
+    assert classified["attn.c_attn.weight"] is True
+    assert classified["mlp.c_proj.weight"] is True
+
+
+def test_a_declaring_family_leaves_its_deterministic_tensors_untouched() -> None:
+    """The declaration has to survive the intervention, not just the audit."""
+
+    model = _declaring_family()
+    before = _snapshot(model)
+
+    scale_initialization(model, 0.5)
+
+    after = dict(model.named_parameters())
+    for name in ("ln_1.weight", "ln_1.bias", "ln_f.weight", "ln_f.bias"):
+        assert torch.equal(after[name], before[name]), name
+    for name in ("attn.c_attn.bias", "attn.c_proj.bias", "mlp.c_fc.bias", "mlp.c_proj.bias"):
+        assert torch.equal(after[name], before[name]), name
+    assert torch.equal(after["wpe.weight"], before["wpe.weight"] * 0.5)
+
+
+def test_a_declaring_family_scales_a_tied_tensor_exactly_once() -> None:
+    """One storage under two names must not pick up alpha squared."""
+
+    model = _declaring_family()
+    assert model.wte.weight.data_ptr() == model.lm_head.weight.data_ptr()
+    baseline = model.wte.weight.detach().clone()
+
+    applied = scale_initialization(model, 0.5)
+
+    assert torch.equal(model.wte.weight, baseline * 0.5)
+    assert model.lm_head.weight.data_ptr() == model.wte.weight.data_ptr()
+    # named_parameters() de-duplicates, so the storage is audited under one name.
+    assert applied["scaled_parameters"].count("wte.weight") == 1
+    assert "lm_head.weight" not in applied["scaled_parameters"]
+
+
+def test_alpha_one_is_a_literal_no_op_for_a_declaring_family() -> None:
+    model = _declaring_family()
+    before = _snapshot(model)
+
+    applied = scale_initialization(model, 1.0)
+
+    assert applied["is_no_op"] is True
+    for name, tensor in model.named_parameters():
+        assert torch.equal(tensor, before[name]), name
+
+
+def test_classification_never_reads_tensor_values() -> None:
+    """Intent, not realization.
+
+    A stochastic tensor that happens to hold all ones is still stochastic, and a
+    deterministic gain overwritten with a random draw is still deterministic.
+    Deciding from the values would make the audit seed-dependent and would
+    misreport a draw that landed near a constant.
+    """
+
+    model = _declaring_family()
+    with torch.no_grad():
+        model.mlp.c_fc.weight.fill_(1.0)
+        model.ln_1.weight.normal_()
+
+    classified = classify_parameters(model)
+
+    assert classified["mlp.c_fc.weight"] is True
+    assert classified["ln_1.weight"] is False
+
+
+def test_an_undeclared_module_falls_back_to_the_default() -> None:
+    """The declaration is opt-in; anything else keeps the historical set."""
+
+    plain = nn.Linear(4, 4)
+
+    assert deterministic_parameter_suffixes(plain) is DETERMINISTIC_PARAMETER_SUFFIXES
+
+
+def test_an_explicitly_empty_declaration_is_honoured() -> None:
+    """Declaring nothing and declaring 'nothing is deterministic' differ."""
+
+    model = _declaring_family()
+    model.DETERMINISTIC_PARAMETER_SUFFIXES = ()
+
+    assert deterministic_parameter_suffixes(model) == ()
+    assert all(classify_parameters(model).values())
+
+
+def test_a_bare_string_declaration_is_rejected() -> None:
+    """The dangerous shape: iterating it would match single characters."""
+
+    model = _declaring_family()
+    model.DETERMINISTIC_PARAMETER_SUFFIXES = "ln_f.weight"
+
+    with pytest.raises(TypeError, match="not a single string"):
+        classify_parameters(model)
+
+
+def test_a_declaration_of_non_strings_is_rejected() -> None:
+    model = _declaring_family()
+    model.DETERMINISTIC_PARAMETER_SUFFIXES = ("ln_f.weight", "")
+
+    with pytest.raises(TypeError, match="non-empty string"):
+        classify_parameters(model)
 
 
 # -- reporting ---------------------------------------------------------------
