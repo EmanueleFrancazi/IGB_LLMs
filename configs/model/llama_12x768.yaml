@@ -1,0 +1,97 @@
+# LLaMA-family model at 12 layers x 768 width, sized for the Mistral vocabulary.
+#
+# WHAT THIS ARM IS, AND WHAT IT IS NOT
+#
+# This is a LLaMA-family DEPTH/SCALE EXTENSION of configs/model/tiny_llama_32k.yaml.
+# It is NOT a depth control. Relative to that baseline it changes seven fields at
+# once -- n_layers 2 -> 12, dim 128 -> 768, n_heads 4 -> 12, n_kv_heads 2 -> 12
+# (grouped-query attention becomes standard multi-head attention), head dimension
+# 32 -> 64, feed-forward hidden width 384 -> 2048, and multiple_of 64 -> 256.
+#
+# A difference measured between this arm and the 2-layer baseline therefore CANNOT
+# be attributed to depth alone. Isolating depth would require a configuration that
+# holds every other field of tiny_llama_32k.yaml fixed and varies only n_layers;
+# no such configuration exists in this repository.
+#
+# What the arm does buy: the vocabulary-sized matrices fall from 95.4% of the
+# parameter budget to 36.65%, which is the precondition for later asking whether
+# token-conditioned gradient structure lives in the output block or in the
+# transformer stack. This shape is also shared with the GPT-2 arm, so that
+# comparison holds depth, width, vocabulary and protocol approximately fixed
+# while changing architecture family.
+#
+# REFERENCE CONFIGURATION
+#
+# Shape follows the released `stories110M` model of karpathy/llama2.c: dim 768,
+# n_layers 12, n_heads 12, n_kv_heads 12, vocab_size 32000 (Llama-2 SentencePiece),
+# multiple_of 256, norm_eps 1e-5, rope_theta 10000. The feed-forward width is not
+# stated separately in the reference; it is derived by the same rule this
+# repository already implements -- 4*768 = 3072, int(2*3072/3) = 2048, rounded up
+# to a multiple of 256 = 2048 -- so no code change is needed to reproduce it.
+#
+# DELIBERATE DEVIATIONS FROM THE REFERENCE
+#
+# 1. Untied. llama2.c ties tok_embeddings.weight to output.weight. LlamaConfig has
+#    no tying option and every existing measurement in this project is untied, so
+#    untying preserves the family convention. Consequence: the two vocabulary
+#    matrices are counted separately below.
+# 2. PyTorch-default initialization, not the reference's explicit normal_(0, 0.02)
+#    with 0.02/sqrt(2*n_layers) on residual projections. This keeps the global
+#    initialization-scale multiplier alpha meaning the same thing on every
+#    LLaMA-family arm, which the reference init would change.
+# 3. max_seq_len 64, the established evaluation-window length, not the reference's
+#    1024. RoPE has no positional parameters, so this alters no parameter and no
+#    rotary frequency at positions 0-63. It does size the non-persistent KV-cache
+#    buffers, which are allocated even though the experiment runs use_cache=false:
+#    37.7 MB here against 604 MB at 1024, for capacity the protocol never uses.
+# 4. The reference was trained on TinyStories, a synthetic corpus. The architecture
+#    is a plain Llama-2 shape; the training baseline is weaker than TinyLlama's.
+#
+# The weights remain randomly initialized. No pretrained model is ever loaded; the
+# tokenizer is the only pretrained component in the experiment.
+#
+# 32000 matches the mistralai/Mistral-7B-v0.1 tokenizer. Validate the match at
+# runtime rather than trusting this comment: the experiment script compares the
+# loaded tokenizer against this value and refuses to run when they disagree.
+#
+# PARAMETER BUDGET
+#
+#   per block   attention 4 x (768 x 768)        =  2,359,296
+#               feed-forward 3 x (768 x 2048)    =  4,718,592
+#               two RMSNorm gains                =      1,536
+#                                                   ---------
+#                                                   7,079,424   x 12 = 84,953,088
+#   tok_embeddings 32000 x 768                   = 24,576,000
+#   output (untied) 768 x 32000                  = 24,576,000
+#   final norm                                   =        768
+#                                                   -----------
+#   TOTAL                                          134,105,856   over 111 tensors
+#
+#   vocabulary share  49,152,000 / 134,105,856   = 36.65%
+#   (baseline tiny_llama_32k, for comparison)    = 95.41%
+#
+# The registered name stays `llama`, the existing family builder. Size comes from
+# this file, not from the name, which is the convention tiny_llama.yaml and
+# tiny_llama_32k.yaml already follow.
+
+model:
+  name: llama
+  params:
+    vocab_size: 32000
+    dim: 768
+    n_layers: 12
+    # n_kv_heads equal to n_heads is standard multi-head attention. Stated
+    # explicitly rather than left null so the absence of grouped-query attention
+    # is visible in the file that records what was run.
+    n_heads: 12
+    n_kv_heads: 12
+    multiple_of: 256
+    ffn_dim_multiplier: null
+    norm_eps: 1.0e-5
+    max_batch_size: 8
+    max_seq_len: 64
+    rope_theta: 10000.0
+
+runtime:
+  seed: 1234
+  device: auto
