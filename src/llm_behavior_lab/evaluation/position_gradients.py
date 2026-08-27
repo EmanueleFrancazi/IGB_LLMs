@@ -286,6 +286,70 @@ def production_sketch_tables(
     return tables
 
 
+#: Stride between the base seeds of consecutive production CountSketch maps.
+#:
+#: Large and coprime to the per-tensor stride ``1000003`` inside
+#: :func:`production_sketch_tables`. Two ``(map, tensor)`` pairs collide only when
+#: ``1_000_000_007 * (m1 - m2) == 1000003 * (i2 - i1)``; both strides are prime and
+#: distinct, so that forces ``1000003`` to divide ``m1 - m2`` **and** ``1_000_000_007``
+#: to divide ``i2 - i1``. The smallest non-trivial solution is therefore a
+#: 1,000,003-map gap alongside a 1,000,000,007-tensor gap.
+#:
+#: That is a bound on the realistic envelope, **not** a proof that no collision
+#: exists for arbitrarily large indices. Campaigns run a handful of maps over
+#: hundreds of tensors, and the schedule is collision-free throughout the tested
+#: range -- asserted executably over 8 maps x 2,000 tensors in
+#: ``tests/test_countsketch_replicas.py``. Two maps sharing a tensor seed would
+#: share that tensor's buckets and signs, which would make them correlated exactly
+#: where the replica design assumes independence.
+_SKETCH_MAP_SEED_STRIDE = 1_000_000_007
+
+#: Bounds ``torch.Generator.manual_seed`` accepts. Measured, not assumed: outside
+#: this range it raises ``ValueError: Overflow when unpacking long long``. The
+#: derived per-tensor seeds are checked against it so a large ``base_seed`` fails
+#: with an explanation instead of overflowing into an unrelated stream.
+_MIN_GENERATOR_SEED = -(2**63)
+_MAX_GENERATOR_SEED = 2**64 - 1
+
+
+def _production_sketch_map_seed(base_seed: int, map_index: int) -> int:
+    """Base seed of production map ``map_index``.
+
+    ``map_seed(base, m) = base + 1_000_000_007 * m``, so **map 0 is exactly the
+    supplied base seed**. That is the whole compatibility story: at ``m = 0`` the
+    per-tensor seeds reduce to the historical ``base + 1000003 * i``, the draw
+    order is untouched, and the map is bit-identical to every map this project has
+    ever produced.
+
+    Private on purpose. The device representation and the replica seed schedule
+    are implementation choices, not contracts, and neither belongs in ``__all__``.
+
+    Args:
+        base_seed: The production seed the run was configured with.
+        map_index: Zero-based replica index.
+
+    Returns:
+        The base seed for that map's per-tensor generators.
+
+    Raises:
+        ValueError: If ``map_index`` is negative, or the derived seed falls
+            outside the range ``torch.Generator`` accepts.
+    """
+
+    if int(map_index) < 0:
+        raise ValueError(f"map_index must be non-negative; got {map_index}.")
+    seed = int(base_seed) + _SKETCH_MAP_SEED_STRIDE * int(map_index)
+    if not _MIN_GENERATOR_SEED <= seed <= _MAX_GENERATOR_SEED:
+        raise ValueError(
+            f"Map {map_index} derives seed {seed} from base seed {base_seed}, "
+            f"which is outside the range torch.Generator accepts "
+            f"[{_MIN_GENERATOR_SEED}, {_MAX_GENERATOR_SEED}]. Choose a base seed "
+            "that leaves room for every replica rather than letting the "
+            "derivation overflow into an unrelated stream."
+        )
+    return seed
+
+
 def production_sketch_map(
     tensor_sizes: Sequence[int], dimension: int, seed: int
 ) -> tuple[Any, Any]:
@@ -331,6 +395,20 @@ class _GradientSketcher:
     experiment produce bitwise the same projection. It draws from its own
     generator and never from the global RNG, so enabling the sketch cannot shift
     any sampling stream in the experiment around it.
+
+    ``map_count`` holds several **independent** maps at once. One map gives an
+    unbiased estimate with no handle on its own error; several give a spread to
+    read that error off. They are seeded by
+    :func:`_production_sketch_map_seed`, and map 0 is exactly the historical map,
+    so adding replicas cannot move the established observable. Every map projects
+    the same gradient tuple in :meth:`project_maps` -- no gradient is recomputed
+    and nothing here ever calls ``autograd``.
+
+    These are **production** replicas. They are not the offline alternate-map
+    bank in :mod:`llm_behavior_lab.analysis.countsketch_fidelity`, which
+    re-projects retained exact gradients to ask how much a reported error would
+    move under a different draw. The two answer different questions and must not
+    be conflated.
     """
 
     def __init__(
@@ -339,22 +417,48 @@ class _GradientSketcher:
         *,
         dimension: int = DEFAULT_SKETCH_DIMENSION,
         seed: int = 20240917,
+        map_count: int = 1,
     ) -> None:
         if dimension < 1:
             raise ValueError(f"sketch dimension must be positive; got {dimension}.")
+        try:
+            count = int(map_count)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"map_count must be an integer of at least one; got {map_count!r}."
+            ) from None
+        if isinstance(map_count, bool) or count != map_count or count < 1:
+            raise ValueError(
+                f"map_count must be an integer of at least one; got {map_count!r}."
+            )
         # Materialized before anything consumes it. The annotation says
         # Sequence, but a caller handing over a generator would otherwise have it
-        # exhausted by tensor_sizes below and leave both table lists EMPTY --
+        # exhausted by tensor_sizes below and leave every table list EMPTY --
         # silently, because zip over an empty list simply yields nothing and
         # project() would then return an all-zero sketch with no error at all.
         parameters = tuple(parameters)
         self.dimension = int(dimension)
+        #: The **base** seed, unchanged in meaning: it is map 0's seed.
         self.seed = int(seed)
+        self.map_count = count
         self.tensor_sizes = [int(parameter.numel()) for parameter in parameters]
-        tables = production_sketch_tables(
-            self.tensor_sizes, self.dimension, self.seed
+        self._map_seeds = tuple(
+            _production_sketch_map_seed(self.seed, index) for index in range(count)
         )
-        # Compact on the device, historical on the host. The tables above are
+        # The map seeds are in range; the per-tensor seeds derived from them must
+        # be too, and they run 1000003 higher per tensor. Checked once here, where
+        # the tensor count is known, rather than discovered as an overflow deep
+        # inside the last map's construction.
+        if self.tensor_sizes:
+            furthest = self._map_seeds[-1] + 1000003 * (len(self.tensor_sizes) - 1)
+            if not _MIN_GENERATOR_SEED <= furthest <= _MAX_GENERATOR_SEED:
+                raise ValueError(
+                    f"The per-tensor seed for the last tensor of map {count - 1} "
+                    f"would be {furthest}, outside the range torch.Generator "
+                    f"accepts [{_MIN_GENERATOR_SEED}, {_MAX_GENERATOR_SEED}]."
+                )
+
+        # Compact on the device, historical on the host. Each map's tables are
         # drawn exactly as they always were -- int64 buckets, float64 signs, one
         # generator per tensor, buckets before signs -- and only then narrowed,
         # so the RNG stream and every drawn value are untouched.
@@ -365,14 +469,39 @@ class _GradientSketcher:
         # avoid. Buckets are int32 because `index_add_` requires int32 or int64
         # and K never approaches 2^31; signs are int8 because they are +/-1 and
         # promote to float64 exactly at the multiply in `project`.
-        self.buckets = [
-            buckets.to(device=parameter.device, dtype=_SKETCH_BUCKET_DEVICE_DTYPE)
-            for (buckets, _), parameter in zip(tables, parameters)
-        ]
-        self.signs = [
-            signs.to(device=parameter.device, dtype=_SKETCH_SIGN_DEVICE_DTYPE)
-            for (_, signs), parameter in zip(tables, parameters)
-        ]
+        #
+        # One map at a time, and the wide host tables are dropped before the next
+        # map is drawn. Building all M first would hold M wide maps in host
+        # memory at once -- 16 bytes per parameter each, so 8.6 GiB at M = 4 over
+        # 134M parameters -- for no reason, since each is consumed immediately.
+        self._map_buckets: list[list[torch.Tensor]] = []
+        self._map_signs: list[list[torch.Tensor]] = []
+        for map_seed in self._map_seeds:
+            tables = production_sketch_tables(
+                self.tensor_sizes, self.dimension, map_seed
+            )
+            self._map_buckets.append(
+                [
+                    buckets.to(
+                        device=parameter.device, dtype=_SKETCH_BUCKET_DEVICE_DTYPE
+                    )
+                    for (buckets, _), parameter in zip(tables, parameters)
+                ]
+            )
+            self._map_signs.append(
+                [
+                    signs.to(device=parameter.device, dtype=_SKETCH_SIGN_DEVICE_DTYPE)
+                    for (_, signs), parameter in zip(tables, parameters)
+                ]
+            )
+            del tables
+
+        # Map 0's tables *are* the historical attributes -- the same list objects,
+        # not copies. Every existing caller and test reads `buckets` and `signs`
+        # as flat per-tensor lists, and they still are; the replica bank is the
+        # private structure beside them.
+        self.buckets = self._map_buckets[0]
+        self.signs = self._map_signs[0]
 
     def numpy_map(self) -> tuple["Any", "Any"]:
         """Export this exact map as flat NumPy bucket and sign vectors.
@@ -402,15 +531,63 @@ class _GradientSketcher:
             np.concatenate([sign.cpu().to(torch.float64).numpy() for sign in self.signs]),
         )
 
-    def project(self, grads: Sequence[torch.Tensor]) -> torch.Tensor:
-        """Sketch one gradient set into a ``[dimension]`` float64 vector."""
+    def _project_tables(
+        self,
+        grads: Sequence[torch.Tensor],
+        buckets: Sequence[torch.Tensor],
+        signs: Sequence[torch.Tensor],
+    ) -> torch.Tensor:
+        """Sketch one gradient set through one map into ``[dimension]`` float64.
+
+        The historical projection body, unchanged, with the map it reads made an
+        argument. Extracting it is what lets ``project`` stay exactly the map-0
+        path while ``project_maps`` reuses the same arithmetic per map rather
+        than reimplementing it.
+        """
 
         sketch = torch.zeros(
-            self.dimension, dtype=torch.float64, device=self.signs[0].device
+            self.dimension, dtype=torch.float64, device=signs[0].device
         )
-        for gradient, bucket, sign in zip(grads, self.buckets, self.signs):
+        for gradient, bucket, sign in zip(grads, buckets, signs):
             sketch.index_add_(0, bucket, gradient.detach().double().reshape(-1) * sign)
         return sketch
+
+    def project(self, grads: Sequence[torch.Tensor]) -> torch.Tensor:
+        """Sketch one gradient set into a ``[dimension]`` float64 vector.
+
+        Map 0 only, and unchanged: same shape, same dtype, same device, same
+        values as before replicas existed. It is the historical observable, and
+        the frozen fixture checks it, so it deliberately does **not** acquire a
+        map axis or any stack/squeeze behaviour.
+        """
+
+        return self._project_tables(grads, self.buckets, self.signs)
+
+    def project_maps(self, grads: Sequence[torch.Tensor]) -> torch.Tensor:
+        """Sketch one gradient set through every map into ``[M, dimension]``.
+
+        The replica estimator's whole premise is that the maps are independent
+        projections of **one** gradient, so every row here comes from the same
+        materialized ``grads`` -- no recomputation, no second backward pass, and
+        no ``autograd`` call anywhere in this class. ``grads`` is materialized
+        once because a caller may hand over a one-shot iterable, which the first
+        map would otherwise consume, leaving every later map projecting nothing.
+
+        Row 0 is bitwise ``project(grads)``: same map, same helper, same order.
+
+        Returns:
+            ``[M, dimension]`` float64 on the parameter device. At ``M = 1`` that
+            is ``[1, dimension]`` -- a map axis of length one, never a squeezed
+            vector, so the shape says how many maps there were.
+        """
+
+        materialized = tuple(grads)
+        return torch.stack(
+            [
+                self._project_tables(materialized, buckets, signs)
+                for buckets, signs in zip(self._map_buckets, self._map_signs)
+            ]
+        )
 
 
 class _VectorSplitAccumulator:
