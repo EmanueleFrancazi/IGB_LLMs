@@ -45,9 +45,88 @@ __all__ = [
     "histogram_gate",
     "select_recorded_histograms",
     "nucleus_clustering",
+    "nucleus_clustering_per_map",
     "resolve_forward_batch_size",
     "support_diagnostics",
 ]
+
+
+def nucleus_clustering_per_map(
+    record: Any,
+    labels_by_temperature: np.ndarray,
+    sampling_temperatures: Sequence[float],
+    *,
+    loss_temperatures: Sequence[float] | None = None,
+    min_support: int = 2,
+    permutations: int = DEFAULT_PERMUTATIONS,
+    permutation_seed: int = 20240918,
+) -> dict[str, Any]:
+    """Per-map ``delta`` for every sampling temperature in the sweep.
+
+    The point estimates stay with :func:`nucleus_clustering`, which reads the
+    ensemble embedding; this is the spread beside them. Every map at a given
+    temperature sees the same nucleus labels, the same usable mask and the same
+    permutation draws, so the across-map variation isolates projection
+    randomness rather than resampling noise.
+
+    ``T_s`` and ``T_g`` stay paired exactly as :func:`nucleus_clustering` pairs
+    them: the sampling temperature chooses the grouping labels, the loss
+    temperature chooses which measured gradient field is read, and the two are
+    never conflated.
+
+    Returns:
+        ``delta_per_map`` shaped ``[temperatures, maps]``, the paired temperature
+        arrays, and one
+        :func:`~llm_behavior_lab.analysis.sketch_estimator.ensemble_summary`
+        block per temperature.
+    """
+
+    from llm_behavior_lab.analysis.gradient_clustering import (
+        gradient_clustering_per_map,
+    )
+    from llm_behavior_lab.analysis.sketch_estimator import ensemble_summary
+
+    labels_by_temperature = np.asarray(labels_by_temperature, dtype=np.int64)
+    pairs = temperature_pairs(sampling_temperatures, loss_temperatures)
+    sampling = pairs["sampling_temperatures"]
+    loss = pairs["loss_temperatures"]
+    if labels_by_temperature.shape[0] != len(sampling):
+        raise ValueError(
+            f"labels_by_temperature covers {labels_by_temperature.shape[0]} "
+            f"temperatures but {len(sampling)} were requested."
+        )
+
+    per_temperature = []
+    rows = []
+    for index in range(len(sampling)):
+        result = gradient_clustering_per_map(
+            record,
+            labels=labels_by_temperature[index],
+            loss_temperature=float(loss[index]),
+            min_support=min_support,
+            permutations=permutations,
+            permutation_seed=permutation_seed,
+        )
+        rows.append(result["delta_per_map"])
+        per_temperature.append(
+            {
+                "sampling_temperature": float(sampling[index]),
+                "loss_temperature": float(loss[index]),
+                "delta_per_map": result["delta_per_map"],
+                "delta": result["delta"],
+            }
+        )
+
+    delta_per_map = np.asarray(rows, dtype=np.float64)
+    return {
+        "map_count": int(delta_per_map.shape[1]) if delta_per_map.size else 0,
+        "sampling_temperatures": sampling,
+        "loss_temperatures": loss,
+        "delta_per_map": delta_per_map,
+        "by_temperature": per_temperature,
+        # Summarized along the map axis, keeping one entry per temperature.
+        "delta": ensemble_summary(delta_per_map, axis=-1),
+    }
 
 
 def resolve_forward_batch_size(

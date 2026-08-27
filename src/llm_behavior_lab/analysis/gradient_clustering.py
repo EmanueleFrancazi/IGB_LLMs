@@ -58,8 +58,11 @@ __all__ = [
     "class_similarity_matrix",
     "DEFAULT_PERMUTATIONS",
     "clustering_summary",
+    "clustering_summary_per_map",
     "gradient_clustering",
+    "gradient_clustering_per_map",
     "unit_sketches",
+    "unit_sketches_per_map",
 ]
 
 #: The two subgroup definitions, in the order reports present them.
@@ -85,6 +88,39 @@ def unit_sketches(
     never measured raises rather than falling back; see
     :mod:`llm_behavior_lab.analysis.directional_fields`.
     """
+
+    if _map_count(record) > 1:
+        # Multi-map: the ensemble embedding, whose Gram products equal the mean
+        # of the per-map Gram products -- so every bilinear consumer below
+        # produces the ensemble estimate without changing its own formula.
+        #
+        # Built directly from the record's float32 storage, **not** by
+        # normalizing into a [D, M, K] float64 array and flattening it. That
+        # route allocates a full second copy and doubles the peak; folding the
+        # 1/||g_d|| scale into the single fill pass does not.
+        from llm_behavior_lab.analysis.directional_fields import (
+            directional_field_per_map,
+        )
+        from llm_behavior_lab.analysis.records import CANONICAL_TEMPERATURE
+        from llm_behavior_lab.analysis.sketch_estimator import ensemble_embedding
+
+        field = directional_field_per_map(
+            record,
+            CANONICAL_TEMPERATURE if loss_temperature is None else loss_temperature,
+        )
+        exact = np.asarray(field["norms"], dtype=np.float64)
+        sketches = field["sketches"]
+        if exact.shape[0] != sketches.shape[0]:
+            raise ValueError(
+                "The sketch and the gradient-norm arrays describe different "
+                "positions."
+            )
+        usable = exact > 0.0
+        # A zero norm has no direction; scaling by zero keeps the row at the
+        # origin rather than fabricating one, matching the single-map branch.
+        scale = np.zeros_like(exact)
+        scale[usable] = 1.0 / exact[usable]
+        return ensemble_embedding(sketches, position_scale=scale), usable
 
     if loss_temperature is not None:
         from llm_behavior_lab.analysis.directional_fields import directional_field
@@ -124,10 +160,63 @@ def unit_sketches(
     return scaled, usable
 
 
+def _map_count(record: Any) -> int:
+    """The record's production map count, or 1 for anything without one."""
+
+    try:
+        return int(record.sketch_map_count)
+    except (AttributeError, ValueError):
+        return 1
+
+
+def unit_sketches_per_map(
+    record: Any, *, loss_temperature: float | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """``[D, M, K]`` normalized sketches, and the same usable mask.
+
+    As :func:`unit_sketches`, with the map axis kept instead of folded into the
+    ensemble embedding. Each ``u_m(d) = S_m(g_d) / ||g_d||`` uses the **exact**
+    per-position gradient norm -- the same divisor for every map, because there
+    is one gradient and the maps differ only in how it is projected.
+
+    This is the surface uncertainty is measured from. Running a statistic once
+    per map and taking the spread needs the maps kept apart; the ensemble
+    embedding has already summed over them by construction.
+
+    A position whose exact gradient norm is zero has no direction and is
+    excluded rather than scaled into a fabricated one, exactly as before.
+    """
+
+    from llm_behavior_lab.analysis.directional_fields import (
+        directional_field_per_map,
+    )
+    from llm_behavior_lab.analysis.records import CANONICAL_TEMPERATURE
+
+    temperature = (
+        CANONICAL_TEMPERATURE if loss_temperature is None else loss_temperature
+    )
+    field = directional_field_per_map(record, temperature)
+    sketches = np.asarray(field["sketches"], dtype=np.float64)
+    exact = np.asarray(field["norms"], dtype=np.float64)
+    if exact.shape[0] != sketches.shape[0]:
+        raise ValueError(
+            "The sketch and the gradient-norm arrays describe different positions."
+        )
+    usable = exact > 0.0
+    scaled = np.zeros_like(sketches)
+    # [D, 1, 1]: one exact norm per position, broadcast across maps and buckets.
+    scaled[usable] = sketches[usable] / exact[usable, None, None]
+    return scaled, usable
+
+
 def has_gradient_sketches(record: Any) -> bool:
     """Whether the record carries per-position gradient sketches."""
 
-    return getattr(record, "gradient_position_sketches", None) is not None
+    if getattr(record, "gradient_position_sketches", None) is not None:
+        return True
+    # A multi-map record stores no canonical array; the record's own predicate
+    # knows the canonical field is derivable from the temperature array.
+    return bool(getattr(record, "has_gradient_position_sketches", False))
 
 
 def _labels(record: Any, grouping: str) -> np.ndarray:
@@ -293,12 +382,33 @@ def _pooled_from_blocks(
     return within, between
 
 
+def permutation_orders(
+    counts: np.ndarray, *, permutations: int, seed: int
+) -> list[np.ndarray]:
+    """The permutation index draws for a null, generated once.
+
+    Extracted so a multi-map null can hand **the same draws** to every map. The
+    across-map spread is supposed to isolate projection randomness; if each map
+    drew its own permutations, that spread would also contain permutation noise
+    and would overstate the projection error.
+
+    The sequence is exactly the one the single-map path produced when it drew
+    inline -- same generator, same seed, same order of calls -- so existing
+    numbers do not move.
+    """
+
+    generator = np.random.default_rng(seed)
+    total = int(np.sum(counts))
+    return [generator.permutation(total) for _ in range(permutations)]
+
+
 def _permutation_null(
     unit: np.ndarray,
     counts: np.ndarray,
     *,
     permutations: int,
     seed: int,
+    orders: list[np.ndarray] | None = None,
 ) -> dict[str, Any]:
     """Null distribution of ``delta`` under label permutation.
 
@@ -315,15 +425,19 @@ def _permutation_null(
     read as far stronger evidence than the design supports.
     """
 
-    generator = np.random.default_rng(seed)
-    row_squared = np.einsum("ij,ij->i", unit, unit)
     edges = np.concatenate([[0], np.cumsum(counts)])
+    orders = (
+        permutation_orders(counts, permutations=permutations, seed=seed)
+        if orders is None
+        else orders
+    )
+    row_squared = np.einsum("ij,ij->i", unit, unit)
     deltas = np.empty(permutations, dtype=np.float64)
     withins = np.empty(permutations, dtype=np.float64)
     betweens = np.empty(permutations, dtype=np.float64)
 
     for draw in range(permutations):
-        order = generator.permutation(edges[-1])
+        order = orders[draw]
         shuffled = unit[order]
         sums = np.add.reduceat(shuffled, edges[:-1], axis=0)
         self_squared = np.add.reduceat(row_squared[order], edges[:-1])
@@ -342,6 +456,114 @@ def _permutation_null(
         "delta_std": float(deltas.std(ddof=1)) if permutations > 1 else float("nan"),
         "delta_low": float(low),
         "delta_high": float(high),
+    }
+
+
+def gradient_clustering_per_map(
+    record: Any,
+    *,
+    grouping: str = "target",
+    labels: np.ndarray | None = None,
+    loss_temperature: float | None = None,
+    min_support: int = 2,
+    permutations: int = DEFAULT_PERMUTATIONS,
+    permutation_seed: int = 20240918,
+) -> dict[str, Any]:
+    """``within``, ``between`` and ``delta`` measured once per map.
+
+    The point estimate stays with :func:`gradient_clustering`, which reads the
+    ensemble embedding; this is the spread beside it. Each map's statistic is
+    computed with the **same** usable mask, the same class assignment, the same
+    support filtering and the same permutation draws, so the variation across
+    maps is projection randomness and nothing else.
+
+    Never forms a dense position-by-position matrix: each map goes through the
+    same class-sum reduction the single-map path uses, which is linear in the
+    position count.
+
+    Returns:
+        The per-map vectors, plus :func:`~llm_behavior_lab.analysis.
+        sketch_estimator.ensemble_summary` blocks for each statistic.
+    """
+
+    from llm_behavior_lab.analysis.sketch_estimator import ensemble_summary
+
+    unit_per_map, usable = unit_sketches_per_map(
+        record, loss_temperature=loss_temperature
+    )
+    labels = _labels(record, grouping) if labels is None else np.asarray(
+        labels, dtype=np.int64
+    )
+    if labels.shape[0] != unit_per_map.shape[0]:
+        raise ValueError(
+            "The sketch and the label arrays describe different position counts."
+        )
+    labels = labels[usable]
+    unit_per_map = unit_per_map[usable]
+
+    represented, represented_counts = np.unique(labels, return_counts=True)
+    keep = represented_counts >= int(min_support)
+    if represented.size < 2:
+        raise ValueError(
+            f"Only {represented.size} represented class(es); a between-class "
+            "comparison needs at least two."
+        )
+    if represented[keep].size < 1:
+        raise ValueError(
+            f"No class reaches min_support={min_support}, so there is no "
+            "within-class pair to compare against."
+        )
+
+    maps = int(unit_per_map.shape[1])
+    # One draw sequence, reused by every map. Drawing inside the loop would put
+    # permutation noise into the across-map spread, which is meant to isolate
+    # projection noise.
+    orders = permutation_orders(
+        represented_counts, permutations=permutations, seed=permutation_seed
+    )
+
+    withins = np.empty(maps, dtype=np.float64)
+    betweens = np.empty(maps, dtype=np.float64)
+    null_deltas = np.empty(maps, dtype=np.float64)
+    for index in range(maps):
+        unit = unit_per_map[:, index, :]
+        sums, counts, self_squared = _class_sums(unit, labels, represented)
+        within, between = _pooled_from_blocks(sums, counts, self_squared)
+        withins[index] = within
+        betweens[index] = between
+        null_deltas[index] = _permutation_null(
+            unit,
+            counts,
+            permutations=permutations,
+            seed=permutation_seed,
+            orders=orders,
+        )["delta_mean"]
+    deltas = withins - betweens
+
+    return {
+        "grouping": grouping,
+        "map_count": maps,
+        "within_per_map": withins,
+        "between_per_map": betweens,
+        "delta_per_map": deltas,
+        "null_delta_mean_per_map": null_deltas,
+        "within": ensemble_summary(withins),
+        "between": ensemble_summary(betweens),
+        "delta": ensemble_summary(deltas),
+        "null_delta_mean": ensemble_summary(null_deltas),
+        "permutations": int(permutations),
+        "permutation_seed": int(permutation_seed),
+    }
+
+
+def clustering_summary_per_map(
+    record: Any, **kwargs: Any
+) -> dict[str, dict[str, Any]]:
+    """Both groupings' per-map spreads, keyed as :func:`clustering_summary` is."""
+
+    return {
+        grouping: gradient_clustering_per_map(record, grouping=grouping, **kwargs)
+        for grouping in GROUPINGS
     }
 
 

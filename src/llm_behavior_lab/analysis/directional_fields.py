@@ -25,11 +25,13 @@ from llm_behavior_lab.analysis.records import (
     CANONICAL_TEMPERATURE,
     TEMPERATURE_MATCH_TOLERANCE,
 )
+from llm_behavior_lab.analysis.sketch_estimator import ensemble_embedding
 
 __all__ = [
     "TEMPERATURE_MATCH_TOLERANCE",
     "available_loss_temperatures",
     "directional_field",
+    "directional_field_per_map",
     "loss_temperature_index",
 ]
 
@@ -104,18 +106,77 @@ def directional_field(record: Any, loss_temperature: float) -> dict[str, Any]:
     """
 
     index = loss_temperature_index(record, loss_temperature)
+    if _map_count(record) == 1:
+        # The historical implementation, verbatim. A single-map record reads
+        # exactly the array it always read, so every value this returns is
+        # bitwise what it was before replicas existed.
+        if getattr(record, "has_temperature_gradient_sketches", False):
+            return {
+                "sketches": np.asarray(
+                    record.gradient_temperature_position_sketches[index]
+                ),
+                "norms": np.asarray(record.gradient_temperature_position_norms[index]),
+                "loss_temperature": float(record.gradient_temperatures[index]),
+                "index": index,
+                "source": "temperature_resolved",
+            }
+        # Canonical-only record: the index resolved above can only be the
+        # canonical entry, since that is the single temperature such a record
+        # reports.
+        return {
+            "sketches": np.asarray(record.gradient_position_sketches),
+            "norms": np.asarray(record.gradient_position_norms),
+            "loss_temperature": float(CANONICAL_TEMPERATURE),
+            "index": 0,
+            "source": "canonical",
+        }
+
+    # Multi-map: the ensemble embedding, whose inner products *are* the
+    # ensemble estimate. Not an average of the map vectors -- that would shrink
+    # the signal each independent projection carries.
+    #
+    # `field["sketches"]` is a view of the record's float32 storage, and
+    # `ensemble_embedding` fills one float64 buffer from it map by map, so the
+    # peak here is the returned array plus one [D, K] slice rather than twice
+    # the result.
+    field = directional_field_per_map(record, loss_temperature)
+    return {
+        **field,
+        "sketches": ensemble_embedding(field["sketches"]),
+    }
+
+
+def _map_count(record: Any) -> int:
+    """The record's production map count, or 1 for anything without one."""
+
+    try:
+        return int(record.sketch_map_count)
+    except (AttributeError, ValueError):
+        return 1
+
+
+def directional_field_per_map(record: Any, loss_temperature: float) -> dict[str, Any]:
+    """As :func:`directional_field`, but keeping the map axis.
+
+    Returns the same keys, with ``sketches`` shaped ``[D, M, K]`` -- ``[D, 1, K]``
+    on a single-map record, so a caller written against this never branches on
+    storage. This is the surface uncertainty is read from: running a statistic
+    once per map and summarizing the spread needs the maps kept apart, which the
+    ensemble embedding has by then already summed over.
+    """
+
+    index = loss_temperature_index(record, loss_temperature)
+    sketches = record.per_map_sketches(loss_temperature)
     if getattr(record, "has_temperature_gradient_sketches", False):
         return {
-            "sketches": np.asarray(record.gradient_temperature_position_sketches[index]),
+            "sketches": sketches,
             "norms": np.asarray(record.gradient_temperature_position_norms[index]),
             "loss_temperature": float(record.gradient_temperatures[index]),
             "index": index,
             "source": "temperature_resolved",
         }
-    # Canonical-only record: the index resolved above can only be the canonical
-    # entry, since that is the single temperature such a record reports.
     return {
-        "sketches": np.asarray(record.gradient_position_sketches),
+        "sketches": sketches,
         "norms": np.asarray(record.gradient_position_norms),
         "loss_temperature": float(CANONICAL_TEMPERATURE),
         "index": 0,

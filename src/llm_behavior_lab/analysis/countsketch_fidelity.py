@@ -36,6 +36,11 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from llm_behavior_lab.analysis.sketch_estimator import (  # noqa: F401
+    cosine_from_gram,
+    cosines_from_sketches,
+)
+
 __all__ = [
     "ALTERNATE_SKETCH_SEEDS",
     "SENSITIVITY_DIMENSIONS",
@@ -200,16 +205,14 @@ def _project(gradients: np.ndarray, buckets: np.ndarray, signs: np.ndarray, dime
     return out
 
 
-def cosine_from_gram(gradients: np.ndarray, norms: np.ndarray) -> np.ndarray:
-    """Full-gradient cosine matrix, accumulated in float64.
-
-    "Exact" here means unprojected, not infinitely precise: the stored vectors
-    are float32 and the products below are float64.
-    """
-
-    values = np.asarray(gradients, dtype=np.float64)
-    norms = np.asarray(norms, dtype=np.float64)
-    return (values @ values.T) / np.outer(norms, norms)
+# `cosine_from_gram` and `cosines_from_sketches` now live in
+# `llm_behavior_lab.analysis.sketch_estimator`, imported at the top of this
+# module and re-exported here unchanged. They moved **verbatim** -- same
+# expressions, same operation order, same float64 casts -- so every number this
+# module produces is bitwise what it was; nothing here recomputes them a
+# different way. The move exists so the production directional consumers can
+# share the estimator arithmetic without importing this module, which would
+# invert the dependency direction.
 
 
 def sketch_estimated_cosines(
@@ -708,16 +711,8 @@ def sketch_gradients(
     ])
 
 
-def cosines_from_sketches(sketches: np.ndarray, norms: np.ndarray) -> np.ndarray:
-    """The production estimator on already-projected sketches.
-
-    Exact norms in the denominator, as everywhere else, so the result estimates
-    ``cos(g_a, g_b)`` without bias and is not confined to ``[-1, 1]``.
-    """
-
-    sketches = np.asarray(sketches, dtype=np.float64)
-    norms = np.asarray(norms, dtype=np.float64)
-    return (sketches @ sketches.T) / np.outer(norms, norms)
+# `cosines_from_sketches` is imported from `sketch_estimator` (see the note
+# beside `cosine_from_gram` above) and re-exported here.
 
 
 def class_means_from_cosines(

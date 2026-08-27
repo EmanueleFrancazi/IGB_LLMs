@@ -40,9 +40,81 @@ __all__ = [
     "contingency_summary",
     "cross_partition_matrix",
     "cross_identity_null",
+    "cross_partition_per_map",
     "mixture_reconstruction",
     "pooled_cross_statistic",
 ]
+
+
+def cross_partition_per_map(
+    rows_per_map: Any,
+    targets: Any,
+    greedy: Any,
+    *,
+    min_support: int = 2,
+) -> dict[str, Any]:
+    """``c_same``, ``c_different``, ``delta_cross`` and the mixture ratio per map.
+
+    The point estimates stay with :func:`pooled_cross_statistic` and
+    :func:`mixture_reconstruction`, which read the ensemble embedding; this is
+    the spread beside them. Every map sees the same positions, the same target
+    and greedy label vectors and the same support filtering, so the variation is
+    projection randomness.
+
+    Each map goes through the same sufficient-statistic route the single-map path
+    uses -- group sums and the contingency diagonal -- so no ``O(D^2)`` matrix is
+    formed at any map count.
+
+    **On the mixture ratio.** ``mixture_median_similarity`` is a *ratio* of
+    bilinear quantities, so the plug-in value computed on the ensemble embedding
+    is **not** the mean of the per-map ratios; the square root in each norm makes
+    the two differ. Both are returned, named apart, and the plug-in value remains
+    the production point estimate -- at ``M = 1`` it coincides with the quantity
+    every existing result used. The per-map spread is a projection diagnostic for
+    the ratio, not a standard error of the plug-in value.
+
+    Args:
+        rows_per_map: ``[D, M, W]`` normalized sketches with the map axis kept.
+        targets: ``[D]`` target token IDs.
+        greedy: ``[D]`` greedy token IDs.
+        min_support: Passed through to :func:`mixture_reconstruction`.
+    """
+
+    from llm_behavior_lab.analysis.sketch_estimator import ensemble_summary
+
+    rows_per_map = np.asarray(rows_per_map, dtype=np.float64)
+    if rows_per_map.ndim != 3:
+        raise ValueError(
+            "rows_per_map must be [positions, maps, buckets]; got "
+            f"{rows_per_map.ndim} dimensions."
+        )
+    maps = int(rows_per_map.shape[1])
+
+    same = np.empty(maps, dtype=np.float64)
+    different = np.empty(maps, dtype=np.float64)
+    mixture = np.empty(maps, dtype=np.float64)
+    for index in range(maps):
+        rows = rows_per_map[:, index, :]
+        pooled = pooled_cross_statistic(rows, targets, greedy)
+        same[index] = pooled["c_same"]
+        different[index] = pooled["c_different"]
+        mixture[index] = mixture_reconstruction(
+            rows, targets, greedy, min_support=min_support
+        )["median_similarity"]
+    delta = same - different
+
+    return {
+        "map_count": maps,
+        "c_same_per_map": same,
+        "c_different_per_map": different,
+        "delta_cross_per_map": delta,
+        "mixture_median_similarity_per_map": mixture,
+        "c_same": ensemble_summary(same),
+        "c_different": ensemble_summary(different),
+        "delta_cross": ensemble_summary(delta),
+        # Named to keep it distinct from the plug-in production estimate.
+        "mixture_median_similarity_map_summary": ensemble_summary(mixture),
+    }
 
 
 def _group_sums(
