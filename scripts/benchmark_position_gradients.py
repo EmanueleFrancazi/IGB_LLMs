@@ -33,8 +33,8 @@ the map tables are **device resident**:
 
 .. code-block:: text
 
-    per map, per parameter:  int64 bucket (8 B) + float64 sign (8 B) = 16 B
-    device map memory     =  M * 16 * P bytes        <- scales with M, not K
+    per map, per parameter:  int32 bucket (4 B) + int8 sign (1 B) = 5 B
+    device map memory     =  M * 5 * P bytes         <- scales with M, not K
 
 ``K`` changes the *width of the sketch output* and therefore the host-side
 ``[N_T, D, K]`` array and the analysis width; it does not change the map tables,
@@ -49,7 +49,7 @@ larger ``M`` is projected, not measured:
 
 .. code-block:: text
 
-    projected_M_peak  ~=  measured_M1_peak + (M - 1) * 16 * P bytes
+    projected_M_peak  ~=  measured_M1_peak + (M - 1) * 5 * P bytes
 
 plus whatever replica-dependent transient the implementation turns out to add.
 That projection is a first-order estimate anchored on a real measurement; the
@@ -88,6 +88,15 @@ from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
     GRADIENT_TEMPERATURES,
     compute_position_gradient_norms,
 )
+
+# Deliberately reaching for a private constant. This benchmark lives in the
+# same repository as the estimator and exists to report what that estimator
+# actually costs, so it tracks the production device representation rather
+# than restating it -- a hard-coded copy here went stale once already. The
+# device dtypes stay private because they are an implementation choice.
+from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    _SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER,
+)
 from llm_behavior_lab.models import build_model_from_config  # noqa: E402
 from llm_behavior_lab.utils import get_device, load_yaml_config, seed_everything  # noqa: E402
 
@@ -100,10 +109,6 @@ FULL_EXPERIMENT_POSITIONS = 32768
 DEFAULT_SKETCH_SEED = inspect.signature(
     compute_position_gradient_norms
 ).parameters["sketch_seed"].default
-
-#: Device-resident bytes per parameter per map: one int64 bucket and one float64
-#: sign, built by ``production_sketch_tables`` and moved to the model's device.
-SKETCH_MAP_BYTES_PER_PARAMETER = 16
 
 
 def parse_args() -> argparse.Namespace:
@@ -277,7 +282,7 @@ def _resolve_sketch(args: argparse.Namespace, experiment_config: dict) -> dict:
             "takes sketch_dimension and sketch_seed and has no replica count -- "
             "so M > 1 cannot be timed without first implementing it, which this "
             "benchmark deliberately does not do. Project it instead: each "
-            f"replica adds {SKETCH_MAP_BYTES_PER_PARAMETER} bytes per parameter "
+            f"replica adds {_SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER} bytes per parameter "
             "of device-resident map tables on top of the measured M = 1 peak."
         )
 
@@ -458,13 +463,14 @@ def main() -> None:
         "forward graph per window."
     )
     if sketch["enabled"]:
-        map_bytes = SKETCH_MAP_BYTES_PER_PARAMETER * parameter_count
+        map_bytes = _SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER * parameter_count
         print(
             f"Count sketch: ON  K = {sketch['dimension']}, M = {sketch['maps']}, "
             f"seed {sketch['seed']}"
         )
         print(
-            f"  device map tables: {sketch['maps']} x 16 B x {parameter_count:,} "
+            f"  device map tables: {sketch['maps']} x {_SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER} B "
+            f"x {parameter_count:,} "
             f"parameters = {map_bytes / (1024 ** 2):,.1f} MiB, included in the "
             "CUDA columns below"
         )
@@ -473,7 +479,7 @@ def main() -> None:
             "Count sketch: OFF (default). The device-resident map tables are not "
             "allocated and the projection is not timed, so the CUDA columns "
             "below UNDERSTATE a campaign configuration by about "
-            f"{SKETCH_MAP_BYTES_PER_PARAMETER * parameter_count / (1024 ** 2):,.1f}"
+            f"{_SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER * parameter_count / (1024 ** 2):,.1f}"
             " MiB. Pass --gradient-sketch to measure it."
         )
     if vocabulary_warning is not None:

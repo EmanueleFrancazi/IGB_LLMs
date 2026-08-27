@@ -109,6 +109,27 @@ CANONICAL_GRADIENT_TEMPERATURE = 1.00
 #: baseline and sketch smokes are timed on the cluster.
 DEFAULT_SKETCH_DIMENSION = 512
 
+#: Device-resident representation of one CountSketch map. The map is *drawn* as
+#: int64 buckets and float64 signs -- that is its public form, and narrowing the
+#: draw would move the RNG stream -- and narrowed only on the way to the device,
+#: where one map costs 16 bytes per parameter otherwise. At 134M parameters that
+#: is 2 GiB of a single card per map.
+#:
+#: ``int32`` because ``index_add_`` accepts int32 or int64 and never int16, and
+#: ``K`` does not approach 2^31. ``int8`` because signs are +/-1 and promote to
+#: exactly +/-1.0 at the multiply.
+_SKETCH_BUCKET_DEVICE_DTYPE = torch.int32
+_SKETCH_SIGN_DEVICE_DTYPE = torch.int8
+
+#: Device bytes per parameter per map, computed from the dtypes above rather than
+#: written down. A previous hard-coded copy of this number in the benchmark went
+#: stale the moment the dtypes changed; deriving it means it cannot. Private:
+#: the device representation is an implementation choice, not a contract.
+_SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER = (
+    torch.empty(0, dtype=_SKETCH_BUCKET_DEVICE_DTYPE).element_size()
+    + torch.empty(0, dtype=_SKETCH_SIGN_DEVICE_DTYPE).element_size()
+)
+
 #: Positions whose complete gradient is retained for the fidelity sanity check.
 #: Twelve gives 66 unique pairs against eight's 28, which is a far more
 #: informative fidelity comparison, at about 394 MiB of temporary CPU float32 --
@@ -321,18 +342,35 @@ class _GradientSketcher:
     ) -> None:
         if dimension < 1:
             raise ValueError(f"sketch dimension must be positive; got {dimension}.")
+        # Materialized before anything consumes it. The annotation says
+        # Sequence, but a caller handing over a generator would otherwise have it
+        # exhausted by tensor_sizes below and leave both table lists EMPTY --
+        # silently, because zip over an empty list simply yields nothing and
+        # project() would then return an all-zero sketch with no error at all.
+        parameters = tuple(parameters)
         self.dimension = int(dimension)
         self.seed = int(seed)
         self.tensor_sizes = [int(parameter.numel()) for parameter in parameters]
         tables = production_sketch_tables(
             self.tensor_sizes, self.dimension, self.seed
         )
+        # Compact on the device, historical on the host. The tables above are
+        # drawn exactly as they always were -- int64 buckets, float64 signs, one
+        # generator per tensor, buckets before signs -- and only then narrowed,
+        # so the RNG stream and every drawn value are untouched.
+        #
+        # A single fused transfer-and-cast, deliberately: `.to(device).to(dtype)`
+        # would allocate the wide table on the device first and leave its block
+        # in the caching allocator, which is exactly the memory this exists to
+        # avoid. Buckets are int32 because `index_add_` requires int32 or int64
+        # and K never approaches 2^31; signs are int8 because they are +/-1 and
+        # promote to float64 exactly at the multiply in `project`.
         self.buckets = [
-            buckets.to(parameter.device)
+            buckets.to(device=parameter.device, dtype=_SKETCH_BUCKET_DEVICE_DTYPE)
             for (buckets, _), parameter in zip(tables, parameters)
         ]
         self.signs = [
-            signs.to(parameter.device)
+            signs.to(device=parameter.device, dtype=_SKETCH_SIGN_DEVICE_DTYPE)
             for (_, signs), parameter in zip(tables, parameters)
         ]
 
@@ -348,13 +386,20 @@ class _GradientSketcher:
 
         Concatenated in parameter order, which is the order a captured gradient
         is flattened in, so the two line up entry for entry.
+
+        Widened back to the historical ``int64`` / ``float64`` on the way out.
+        The device tables are stored compactly, but this is the map's public
+        form: the fidelity analysis and every persisted ``sketch_map`` expect
+        those dtypes. Both widenings are exact -- int32 indices and +/-1 signs
+        lose nothing -- so the exported map is identical to what a wide-table
+        sketcher would have produced.
         """
 
         import numpy as np
 
         return (
-            np.concatenate([bucket.cpu().numpy() for bucket in self.buckets]),
-            np.concatenate([sign.cpu().numpy() for sign in self.signs]),
+            np.concatenate([bucket.cpu().to(torch.int64).numpy() for bucket in self.buckets]),
+            np.concatenate([sign.cpu().to(torch.float64).numpy() for sign in self.signs]),
         )
 
     def project(self, grads: Sequence[torch.Tensor]) -> torch.Tensor:
