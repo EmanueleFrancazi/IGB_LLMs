@@ -29,7 +29,63 @@ __all__ = [
     "ARTIFACT_NAME",
     "MATCHED_ARTIFACT_NAME",
     "load_nucleus_clustering_artifact",
+    "summary_arrays",
+    "uncertainty_arrays",
+    "uncertainty_defaults",
 ]
+
+#: The three discriminator names every derived artifact carries, so a reader
+#: never has to infer availability from a value.
+UNCERTAINTY_KEYS = ("map_count", "degrees_of_freedom", "uncertainty_available")
+
+
+def uncertainty_defaults() -> dict[str, Any]:
+    """What a historical artifact -- one written before replicas -- means.
+
+    Every such artifact came from a single map, so its point estimates are
+    complete and its uncertainty is *unavailable* rather than zero.
+    """
+
+    return {"map_count": 1, "degrees_of_freedom": 0, "uncertainty_available": False}
+
+
+def uncertainty_arrays(map_count: int) -> dict[str, np.ndarray]:
+    """The discriminator arrays a writer stores, for a given map count.
+
+    Stored as arrays because the archives are NPZ. ``uncertainty_available`` is
+    a ``bool_`` array rather than a Python ``bool`` so it survives the round trip
+    with a numeric dtype -- an object array would fail to load at all under
+    ``allow_pickle=False``.
+    """
+
+    count = int(map_count)
+    return {
+        "map_count": np.asarray(count, dtype=np.int64),
+        "degrees_of_freedom": np.asarray(max(count - 1, 0), dtype=np.int64),
+        "uncertainty_available": np.asarray(count > 1, dtype=np.bool_),
+    }
+
+
+def summary_arrays(prefix: str, summary: dict[str, Any]) -> dict[str, np.ndarray]:
+    """``<prefix>_sd`` and ``<prefix>_se`` from an ``ensemble_summary`` block.
+
+    ``None`` -- what the summary reports at ``M = 1``, where spread is
+    unavailable -- becomes float64 **NaN**, never an object array. A ``None``
+    inside an NPZ makes the whole entry object-dtype, and the loader here calls
+    ``np.load`` with NumPy's default ``allow_pickle=False``, so such an archive
+    would not load at all.
+    """
+
+    def numeric(value: Any) -> np.ndarray:
+        if value is None:
+            return np.asarray(np.nan, dtype=np.float64)
+        return np.asarray(value, dtype=np.float64)
+
+    return {
+        f"{prefix}_sd": numeric(summary["sample_sd"]),
+        f"{prefix}_se": numeric(summary["standard_error"]),
+    }
+
 
 #: Where the writer leaves the control design, relative to the record
 #: directory. Figure 22 reads this name, and it means what it has always
@@ -168,6 +224,29 @@ def load_nucleus_clustering_artifact(
         permutations = int(data["permutations"])
         permutation_seed = int(data["permutation_seed"])
 
+        # Additive uncertainty, absent from every artifact written before
+        # replicas existed. Missing means single-map, so the point estimates
+        # above are complete and the spread is *unavailable* rather than zero.
+        uncertainty = uncertainty_defaults()
+        if "map_count" in data.files:
+            uncertainty = {
+                "map_count": int(data["map_count"]),
+                "degrees_of_freedom": int(data["degrees_of_freedom"]),
+                "uncertainty_available": bool(data["uncertainty_available"]),
+            }
+        spread = {}
+        for name in (
+            "delta_per_map", "within_per_map", "between_per_map",
+            "null_delta_per_map_mean",
+            "delta_sd", "delta_se", "within_sd", "within_se",
+            "between_sd", "between_se",
+        ):
+            spread[name] = np.asarray(data[name]) if name in data.files else None
+        for grouping in ("target", "greedy"):
+            for suffix in ("delta_per_map", "delta_sd", "delta_se"):
+                key = f"reference_{grouping}_{suffix}"
+                spread[key] = np.asarray(data[key]) if key in data.files else None
+
     return {
         "sampling_temperatures": sampling,
         "loss_temperatures": loss,
@@ -182,4 +261,6 @@ def load_nucleus_clustering_artifact(
         "min_support": min_support,
         "permutations": permutations,
         "permutation_seed": permutation_seed,
+        **uncertainty,
+        "uncertainty": spread,
     }

@@ -34,8 +34,19 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from llm_behavior_lab.analysis import load_record  # noqa: E402
-from llm_behavior_lab.analysis.gradient_clustering import unit_sketches  # noqa: E402
+from llm_behavior_lab.analysis.gradient_clustering import (  # noqa: E402
+    unit_sketches,
+    unit_sketches_per_map,
+)
+from llm_behavior_lab.analysis.nucleus_clustering_artifact import (  # noqa: E402
+    summary_arrays,
+    uncertainty_arrays,
+)
+from llm_behavior_lab.analysis.sketch_estimator import (  # noqa: E402
+    ensemble_summary,
+)
 from llm_behavior_lab.analysis.gradient_cross_partition import (  # noqa: E402
+    cross_partition_per_map,
     contingency_summary,
     cross_identity_null,
     cross_partition_matrix,
@@ -75,6 +86,111 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _cross_partition_arrays(
+    record, pooled, null, contingency, mixture, drawn,
+    shown, shown_target_counts, shown_greedy_counts, targets, greedy,
+    num_excluded: int, min_support: int,
+) -> dict:
+    """Map completed analysis results onto the artifact's stored fields.
+
+    Extracted from ``main`` for the same reason as the nucleus seam: the mapping
+    is where a field can be wired to the wrong statistic, and it must be testable
+    without a tokenizer or a model. ``main`` calls this and nothing else builds
+    the payload.
+    """
+
+    # -- additive uncertainty ------------------------------------------------
+    #
+    # Point estimates above are untouched: `pooled` and `mixture` read the
+    # ensemble embedding and remain the production values. What follows is the
+    # per-map spread behind them, so map uncertainty is not discarded here --
+    # this is the boundary where the scientific output is written.
+    #
+    # At M = 1 the per-map value *is* the point estimate, so it is reshaped
+    # rather than recomputed.
+    map_count = int(record.sketch_map_count)
+    if map_count == 1:
+        spread = {
+            "c_same_per_map": np.asarray([pooled["c_same"]], dtype=float),
+            "c_different_per_map": np.asarray([pooled["c_different"]], dtype=float),
+            "delta_cross_per_map": np.asarray([pooled["delta_cross"]], dtype=float),
+            "mixture_median_similarity_per_map": np.asarray(
+                [mixture["median_similarity"]], dtype=float
+            ),
+        }
+    else:
+        per_map_rows, per_map_usable = unit_sketches_per_map(record)
+        spread_result = cross_partition_per_map(
+            per_map_rows[per_map_usable], targets, greedy,
+            min_support=min_support,
+        )
+        spread = {
+            key: np.asarray(spread_result[key], dtype=float)
+            for key in (
+                "c_same_per_map",
+                "c_different_per_map",
+                "delta_cross_per_map",
+                "mixture_median_similarity_per_map",
+            )
+        }
+
+    uncertainty: dict = dict(spread)
+    for name in ("c_same", "c_different", "delta_cross"):
+        uncertainty.update(
+            summary_arrays(name, ensemble_summary(spread[f"{name}_per_map"]))
+        )
+    mixture_summary = ensemble_summary(spread["mixture_median_similarity_per_map"])
+    uncertainty.update(summary_arrays("mixture_median_similarity", mixture_summary))
+    # The arithmetic mean of the per-map *ratios*, kept apart from the plug-in
+    # `mixture_median_similarity` above. A ratio of averages is not the average
+    # of ratios, and the plug-in value stays the production point estimate.
+    # The plug-in scalar itself, stored so the per-map fields beside it are
+    # interpretable from the archive alone. It was previously only printed in
+    # the run summary, never persisted.
+    uncertainty["mixture_median_similarity"] = np.asarray(
+        mixture["median_similarity"], dtype=float
+    )
+    uncertainty["mixture_median_similarity_map_mean"] = np.asarray(
+        mixture_summary["map_mean"], dtype=float
+    )
+    uncertainty.update(uncertainty_arrays(map_count))
+
+    arrays = dict(
+        displayed_classes=shown,
+        displayed_matrix=drawn["matrix"],
+        displayed_contingency=drawn["contingency"],
+        displayed_target_counts=shown_target_counts,
+        displayed_greedy_counts=shown_greedy_counts,
+        c_same=pooled["c_same"],
+        c_different=pooled["c_different"],
+        delta_cross=pooled["delta_cross"],
+        **uncertainty,
+        num_same_pairs=pooled["num_same_pairs"],
+        num_different_pairs=pooled["num_different_pairs"],
+        null_delta_mean=null["delta_mean"],
+        null_delta_std=null["delta_std"],
+        null_delta_low=null["delta_low"],
+        null_delta_high=null["delta_high"],
+        null_permutations=null["permutations"],
+        null_seed=null["seed"],
+        mixture_tokens=mixture["tokens"],
+        mixture_support=mixture["support"],
+        mixture_similarity=mixture["similarity"],
+        contingency_counts=contingency["counts"],
+        contingency_targets=contingency["target_ids"],
+        contingency_greedy=contingency["greedy_ids"],
+
+    )
+    return arrays
+
+
+def _write_cross_partition_artifact(path, arrays: dict):
+    """Write the payload as a compressed NPZ. The only place that serializes it."""
+
+    np.savez_compressed(path, **arrays)
+    return path
+
+
 def main() -> None:
     args = parse_args()
     record = load_record(args.record_dir, name=args.name)
@@ -111,32 +227,13 @@ def main() -> None:
     shown_greedy_counts = np.bincount(greedy, minlength=ceiling)[shown]
     drawn = cross_partition_matrix(rows, targets, greedy, shown, shown)
 
-    destination = args.record_dir / ARTIFACT_NAME
-    np.savez_compressed(
-        destination,
-        displayed_classes=shown,
-        displayed_matrix=drawn["matrix"],
-        displayed_contingency=drawn["contingency"],
-        displayed_target_counts=shown_target_counts,
-        displayed_greedy_counts=shown_greedy_counts,
-        c_same=pooled["c_same"],
-        c_different=pooled["c_different"],
-        delta_cross=pooled["delta_cross"],
-        num_same_pairs=pooled["num_same_pairs"],
-        num_different_pairs=pooled["num_different_pairs"],
-        null_delta_mean=null["delta_mean"],
-        null_delta_std=null["delta_std"],
-        null_delta_low=null["delta_low"],
-        null_delta_high=null["delta_high"],
-        null_permutations=null["permutations"],
-        null_seed=null["seed"],
-        mixture_tokens=mixture["tokens"],
-        mixture_support=mixture["support"],
-        mixture_similarity=mixture["similarity"],
-        contingency_counts=contingency["counts"],
-        contingency_targets=contingency["target_ids"],
-        contingency_greedy=contingency["greedy_ids"],
+    arrays = _cross_partition_arrays(
+        record, pooled, null, contingency, mixture, drawn,
+        shown, shown_target_counts, shown_greedy_counts, targets, greedy,
+        num_excluded, args.min_support,
     )
+    destination = args.record_dir / ARTIFACT_NAME
+    _write_cross_partition_artifact(destination, arrays)
 
     summary = {
         "num_positions": int(rows.shape[0]),

@@ -2965,7 +2965,9 @@ def _clustering_heatmap(
     return image
 
 
-def _population_annotation(result: dict[str, Any]) -> str:
+def _population_annotation(
+    result: dict[str, Any], spread: dict[str, Any] | None = None
+) -> str:
     """The population statistic, stated as covering every qualifying class.
 
     Spelled out because this number is deliberately **not** the average of the
@@ -2976,12 +2978,32 @@ def _population_annotation(result: dict[str, Any]) -> str:
 
     population = result["population"]
     null = result["null"]
+    if spread is None:
+        # The historical annotation, byte for byte. A single-map record has no
+        # spread to report, and printing "unavailable" or a zero would both say
+        # more than one projection can support.
+        return (
+            f"All positions (D = {population['num_positions']:,})\n"
+            f"delta = {population['delta']:+.5f}\n"
+            f"within {population['within']:+.5f} | between {population['between']:+.5f}\n"
+            f"Permutation null 95%: [{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
+            f"  (M = {null['permutations']})"
+        )
+
+    # Multi-map: the same centres, each followed by the standard error of the
+    # ensemble mean across maps. Same precision as the centres, so a spread
+    # small enough to vanish at this precision is visibly small rather than
+    # silently dropped.
+    maps = spread["delta"]["map_count"]
     return (
         f"All positions (D = {population['num_positions']:,})\n"
-        f"delta = {population['delta']:+.5f}\n"
-        f"within {population['within']:+.5f} | between {population['between']:+.5f}\n"
+        f"delta = {population['delta']:+.5f} +/- {spread['delta']['standard_error']:.5f}\n"
+        f"within {population['within']:+.5f} +/- {spread['within']['standard_error']:.5f}"
+        f" | between {population['between']:+.5f}"
+        f" +/- {spread['between']['standard_error']:.5f}\n"
         f"Permutation null 95%: [{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
-        f"  (M = {null['permutations']})"
+        f"  (M = {null['permutations']})\n"
+        f"maps M={maps}, df={maps - 1}; +/- is the standard error across maps"
     )
 
 
@@ -3082,11 +3104,31 @@ def plot_gradient_directional_clustering(
     # Anchored in figure coordinates from each panel's own box, so the statistic
     # sits directly beneath its heatmap rather than at a fixed axes offset that
     # leaves a gap once the rotated tick labels are laid out.
-    for axes, result in zip(panels, (target, greedy)):
+    # Spread only when there is more than one map to spread across. At M = 1
+    # `spreads` stays None-valued and the annotation is the historical one.
+    spreads: dict[str, Any] = {"target": None, "greedy": None}
+    if int(getattr(record, "sketch_map_count", 1)) > 1:
+        from llm_behavior_lab.analysis.gradient_clustering import (
+            gradient_clustering_per_map,
+        )
+
+        for grouping in ("target", "greedy"):
+            per_map = gradient_clustering_per_map(
+                record, grouping=grouping, min_support=min_support
+            )
+            spreads[grouping] = {
+                name: {
+                    **per_map[name],
+                    "map_count": per_map["map_count"],
+                }
+                for name in ("within", "between", "delta")
+            }
+
+    for axes, result, grouping in zip(panels, (target, greedy), ("target", "greedy")):
         box = axes.get_position()
         figure.text(
             box.x0 + box.width / 2.0, box.y0 - 0.145,
-            _population_annotation(result),
+            _population_annotation(result, spreads[grouping]),
             fontsize=6.5, ha="center", va="top", family="monospace",
             bbox=_ANNOTATION_BOX,
         )
@@ -3354,6 +3396,28 @@ def plot_cross_partition_geometry(
     contingency = contingency_summary(targets, greedy)
     mixture = mixture_reconstruction(rows, targets, greedy, min_support=min_support)
 
+    # Per-map spread, only when there is more than one map.
+    spread = None
+    if int(getattr(record, "sketch_map_count", 1)) > 1:
+        from llm_behavior_lab.analysis.gradient_clustering import (
+            unit_sketches_per_map,
+        )
+        from llm_behavior_lab.analysis.gradient_cross_partition import (
+            cross_partition_per_map,
+        )
+
+        per_map_rows, per_map_usable = unit_sketches_per_map(record)
+        per_map = cross_partition_per_map(
+            per_map_rows[per_map_usable], targets, greedy, min_support=min_support
+        )
+        spread = {
+            "map_count": per_map["map_count"],
+            "c_same": per_map["c_same"],
+            "c_different": per_map["c_different"],
+            "delta_cross": per_map["delta_cross"],
+            "mixture": per_map["mixture_median_similarity_map_summary"],
+        }
+
     # Support only, in both roles: a token needs enough gradients wanting it and
     # enough predicting it before its diagonal cell means anything. Never ranked
     # by similarity, which would select the answer.
@@ -3409,6 +3473,19 @@ def plot_cross_partition_geometry(
     pooled_axes.bar(
         range(3), values, color=["#1f77b4", "#aec7e8", "#2ca02c"], width=0.6
     )
+    if spread is not None:
+        # Ensemble centres, standard error across maps. Drawn before the null
+        # marker so the null stays legible on top of them.
+        pooled_axes.errorbar(
+            range(3), values,
+            yerr=[
+                spread["c_same"]["standard_error"],
+                spread["c_different"]["standard_error"],
+                spread["delta_cross"]["standard_error"],
+            ],
+            fmt="none", ecolor="#333333", elinewidth=1.1, capsize=4, zorder=3,
+            label=f"+/- SE across {spread['map_count']} maps",
+        )
     pooled_axes.errorbar(
         2, null["delta_mean"],
         yerr=[[null["delta_mean"] - null["delta_low"]],
@@ -3430,6 +3507,19 @@ def plot_cross_partition_geometry(
             mixture["support"], mixture["similarity"],
             s=8, alpha=0.45, color="#1f77b4", edgecolors="none", rasterized=True,
         )
+        if spread is not None:
+            # **SD, not SE.** The centre is the plug-in ratio computed from
+            # ensemble-averaged components; the band is how far the per-map
+            # ratios scatter around each other. It is a projection diagnostic
+            # for a ratio, not a formal uncertainty interval for the plug-in
+            # value -- those are different quantities, and a ratio of averages
+            # is not the average of ratios.
+            mixture_axes.axhspan(
+                mixture["median_similarity"] - spread["mixture"]["sample_sd"],
+                mixture["median_similarity"] + spread["mixture"]["sample_sd"],
+                color="#d62728", alpha=0.12, zorder=0,
+                label="per-map ratio spread (diagnostic, SD)",
+            )
         mixture_axes.axhline(
             mixture["median_similarity"], color="#d62728", linewidth=1.0,
             linestyle="--", label=f"median {mixture['median_similarity']:.2f}",
@@ -3610,6 +3700,17 @@ def plot_nucleus_temperature_clustering(
         temperatures, null_mean, color="#666666", linewidth=0.9, linestyle=":",
         zorder=2, label="null mean",
     )
+    # Standard error across maps, present only on a multi-map artifact. Absent
+    # fields mean a single-map or historical artifact, where spread is
+    # unavailable rather than zero -- so no bars are drawn at all rather than
+    # bars of width nothing.
+    delta_se = result.get("uncertainty", {}).get("delta_se")
+    if result.get("uncertainty_available") and delta_se is not None:
+        trajectory.errorbar(
+            temperatures, delta, yerr=np.asarray(delta_se, dtype=float),
+            fmt="none", ecolor="#1f77b4", elinewidth=1.0, capsize=3, zorder=3,
+            label=f"+/- SE across {int(result['map_count'])} maps",
+        )
     trajectory.plot(
         temperatures, delta, color="#1f77b4", linewidth=1.6, zorder=4,
         label="nucleus grouping",

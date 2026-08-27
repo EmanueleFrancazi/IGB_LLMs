@@ -59,6 +59,16 @@ from llm_behavior_lab.analysis.nucleus_clustering import (  # noqa: E402
     resolve_forward_batch_size,
     select_recorded_histograms,
 )
+from llm_behavior_lab.analysis.gradient_clustering import (  # noqa: E402
+    gradient_clustering_per_map,
+)
+from llm_behavior_lab.analysis.nucleus_clustering_artifact import (  # noqa: E402
+    summary_arrays,
+    uncertainty_arrays,
+)
+from llm_behavior_lab.analysis.sketch_estimator import (  # noqa: E402
+    ensemble_summary,
+)
 from llm_behavior_lab.analysis.temperature_pairs import (  # noqa: E402
     temperature_pairs,
 )
@@ -179,6 +189,174 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--allow-download", action="store_true")
     return parser.parse_args()
+
+
+def _nucleus_artifact_arrays(
+    result: dict, record, labels_by_request: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Map completed analysis results onto the artifact's stored fields.
+
+    Extracted from ``main`` so the mapping -- the part where a field can be
+    silently wired to the wrong statistic -- is reachable by a test without
+    reconstructing a tokenizer, a model and the whole nucleus-label recovery.
+    ``main`` calls this and nothing else builds the payload, so there is no
+    second copy to drift.
+    """
+
+    arrays: dict[str, np.ndarray] = {
+        # Both halves of every pair, so a reader never has to infer one of them.
+        "sampling_temperatures": np.asarray(
+            result["sampling_temperatures"], dtype=float
+        ),
+        "loss_temperatures": np.asarray(result["loss_temperatures"], dtype=float),
+        # Historical key, retained so a reader written before the pair split
+        # still finds the sampling temperatures where it expects them.
+        "temperatures": np.asarray(result["temperatures"], dtype=float),
+        # Stored rather than re-inferred when read back: the displayed matrix is
+        # a class-by-class block, so nothing about the sketch width or the
+        # position count can be recovered from its shape.
+        "num_positions": np.array(result["by_temperature"][0]["num_positions"]),
+        "num_positions_excluded": np.array(
+            result["by_temperature"][0]["num_positions_excluded"]
+        ),
+        "sketch_dimension": np.array(
+            result["by_temperature"][0]["sketch_dimension"]
+        ),
+        "min_support": np.array(result["min_support"]),
+        "permutations": np.array(result["permutations"]),
+        "permutation_seed": np.array(result["permutation_seed"]),
+        "nucleus_labels": labels_by_request,
+        "delta": np.array([e["population"]["delta"] for e in result["by_temperature"]]),
+        "within": np.array([e["population"]["within"] for e in result["by_temperature"]]),
+        "between": np.array(
+            [e["population"]["between"] for e in result["by_temperature"]]
+        ),
+        "null_delta_mean": np.array(
+            [e["null"]["delta_mean"] for e in result["by_temperature"]]
+        ),
+        "null_delta_low": np.array(
+            [e["null"]["delta_low"] for e in result["by_temperature"]]
+        ),
+        "null_delta_high": np.array(
+            [e["null"]["delta_high"] for e in result["by_temperature"]]
+        ),
+    }
+    for field in (
+        "num_represented", "num_qualifying", "num_singletons", "singleton_fraction",
+        "positions_in_qualifying", "fraction_positions_in_qualifying",
+        "largest_class", "median_class", "num_within_pairs", "num_between_pairs",
+    ):
+        arrays[f"support_{field}"] = np.array(
+            [entry["support"][field] for entry in result["by_temperature"]]
+        )
+    for index, entry in enumerate(result["by_temperature"]):
+        arrays[f"display_classes_{index}"] = entry["display"]["classes"]
+        arrays[f"display_matrix_{index}"] = entry["display"]["matrix"]
+        arrays[f"display_counts_{index}"] = entry["display"]["counts"]
+    for grouping in ("target", "greedy"):
+        reference = result["references"][grouping]
+        arrays[f"reference_{grouping}_delta"] = np.array(
+            reference["population"]["delta"]
+        )
+        arrays[f"reference_{grouping}_null_low"] = np.array(
+            reference["null"]["delta_low"]
+        )
+        arrays[f"reference_{grouping}_null_high"] = np.array(
+            reference["null"]["delta_high"]
+        )
+    # References belong to a gradient field, so they are stored along the unique
+    # loss-temperature axis as well. With T_g pinned this is one entry and the
+    # scalars above are the same numbers; once T_g varies the scalars alone
+    # would be ambiguous.
+    reference_losses = sorted(result["references_by_loss_temperature"])
+    arrays["reference_loss_temperatures"] = np.asarray(reference_losses, dtype=float)
+    for grouping in ("target", "greedy"):
+        for field, path in (
+            ("delta", ("population", "delta")),
+            ("null_low", ("null", "delta_low")),
+            ("null_high", ("null", "delta_high")),
+        ):
+            arrays[f"reference_by_loss_{grouping}_{field}"] = np.asarray(
+                [
+                    result["references_by_loss_temperature"][value][grouping][path[0]][path[1]]
+                    for value in reference_losses
+                ],
+                dtype=float,
+            )
+
+    # -- additive uncertainty ------------------------------------------------
+    #
+    # Point estimates above are untouched. What follows is the per-map spread
+    # behind them, so map uncertainty is not discarded at the boundary where the
+    # scientific output is actually written.
+    #
+    # At M = 1 the per-map values *are* the point estimates -- one map's
+    # statistic is the ensemble statistic -- so they are reshaped rather than
+    # recomputed. Calling the per-map path there would redo every permutation
+    # null for numbers already in hand.
+    map_count = int(record.sketch_map_count)
+    if map_count == 1:
+        delta_per_map = arrays["delta"][:, None]
+        within_per_map = arrays["within"][:, None]
+        between_per_map = arrays["between"][:, None]
+        null_per_map = arrays["null_delta_mean"][:, None]
+        reference_per_map = {
+            grouping: np.asarray([arrays[f"reference_{grouping}_delta"]], dtype=float)
+            for grouping in ("target", "greedy")
+        }
+    else:
+        # One pass over the sweep, reusing the same shared permutation orders
+        # `gradient_clustering_per_map` draws once per call.
+        rows = [
+            gradient_clustering_per_map(
+                record,
+                labels=labels_by_request[index],
+                loss_temperature=float(result["loss_temperatures"][index]),
+                min_support=result["min_support"],
+                permutations=result["permutations"],
+                permutation_seed=result["permutation_seed"],
+            )
+            for index in range(len(result["sampling_temperatures"]))
+        ]
+        delta_per_map = np.asarray([row["delta_per_map"] for row in rows])
+        within_per_map = np.asarray([row["within_per_map"] for row in rows])
+        between_per_map = np.asarray([row["between_per_map"] for row in rows])
+        null_per_map = np.asarray([row["null_delta_mean_per_map"] for row in rows])
+        reference_per_map = {
+            grouping: gradient_clustering_per_map(
+                record,
+                grouping=grouping,
+                min_support=result["min_support"],
+                permutations=result["permutations"],
+                permutation_seed=result["permutation_seed"],
+            )["delta_per_map"]
+            for grouping in ("target", "greedy")
+        }
+
+    for name, values in (
+        ("delta", delta_per_map),
+        ("within", within_per_map),
+        ("between", between_per_map),
+    ):
+        arrays[f"{name}_per_map"] = np.asarray(values, dtype=float)
+        arrays.update(summary_arrays(name, ensemble_summary(values, axis=-1)))
+    arrays["null_delta_per_map_mean"] = np.asarray(null_per_map, dtype=float)
+    for grouping in ("target", "greedy"):
+        values = np.asarray(reference_per_map[grouping], dtype=float)
+        arrays[f"reference_{grouping}_delta_per_map"] = values
+        arrays.update(
+            summary_arrays(f"reference_{grouping}_delta", ensemble_summary(values))
+        )
+    arrays.update(uncertainty_arrays(map_count))
+
+    return arrays
+
+
+def _write_nucleus_artifact(path, arrays: dict[str, np.ndarray]):
+    """Write the payload as a compressed NPZ. The only place that serializes it."""
+
+    np.savez_compressed(path, **arrays)
+    return path
 
 
 def main() -> None:
@@ -382,91 +560,12 @@ def main() -> None:
         permutations=args.permutations,
     )
 
-    arrays: dict[str, np.ndarray] = {
-        # Both halves of every pair, so a reader never has to infer one of them.
-        "sampling_temperatures": np.asarray(
-            result["sampling_temperatures"], dtype=float
-        ),
-        "loss_temperatures": np.asarray(result["loss_temperatures"], dtype=float),
-        # Historical key, retained so a reader written before the pair split
-        # still finds the sampling temperatures where it expects them.
-        "temperatures": np.asarray(result["temperatures"], dtype=float),
-        # Stored rather than re-inferred when read back: the displayed matrix is
-        # a class-by-class block, so nothing about the sketch width or the
-        # position count can be recovered from its shape.
-        "num_positions": np.array(result["by_temperature"][0]["num_positions"]),
-        "num_positions_excluded": np.array(
-            result["by_temperature"][0]["num_positions_excluded"]
-        ),
-        "sketch_dimension": np.array(
-            result["by_temperature"][0]["sketch_dimension"]
-        ),
-        "min_support": np.array(result["min_support"]),
-        "permutations": np.array(result["permutations"]),
-        "permutation_seed": np.array(result["permutation_seed"]),
-        "nucleus_labels": labels_by_request,
-        "delta": np.array([e["population"]["delta"] for e in result["by_temperature"]]),
-        "within": np.array([e["population"]["within"] for e in result["by_temperature"]]),
-        "between": np.array(
-            [e["population"]["between"] for e in result["by_temperature"]]
-        ),
-        "null_delta_mean": np.array(
-            [e["null"]["delta_mean"] for e in result["by_temperature"]]
-        ),
-        "null_delta_low": np.array(
-            [e["null"]["delta_low"] for e in result["by_temperature"]]
-        ),
-        "null_delta_high": np.array(
-            [e["null"]["delta_high"] for e in result["by_temperature"]]
-        ),
-    }
-    for field in (
-        "num_represented", "num_qualifying", "num_singletons", "singleton_fraction",
-        "positions_in_qualifying", "fraction_positions_in_qualifying",
-        "largest_class", "median_class", "num_within_pairs", "num_between_pairs",
-    ):
-        arrays[f"support_{field}"] = np.array(
-            [entry["support"][field] for entry in result["by_temperature"]]
-        )
-    for index, entry in enumerate(result["by_temperature"]):
-        arrays[f"display_classes_{index}"] = entry["display"]["classes"]
-        arrays[f"display_matrix_{index}"] = entry["display"]["matrix"]
-        arrays[f"display_counts_{index}"] = entry["display"]["counts"]
-    for grouping in ("target", "greedy"):
-        reference = result["references"][grouping]
-        arrays[f"reference_{grouping}_delta"] = np.array(
-            reference["population"]["delta"]
-        )
-        arrays[f"reference_{grouping}_null_low"] = np.array(
-            reference["null"]["delta_low"]
-        )
-        arrays[f"reference_{grouping}_null_high"] = np.array(
-            reference["null"]["delta_high"]
-        )
-    # References belong to a gradient field, so they are stored along the unique
-    # loss-temperature axis as well. With T_g pinned this is one entry and the
-    # scalars above are the same numbers; once T_g varies the scalars alone
-    # would be ambiguous.
-    reference_losses = sorted(result["references_by_loss_temperature"])
-    arrays["reference_loss_temperatures"] = np.asarray(reference_losses, dtype=float)
-    for grouping in ("target", "greedy"):
-        for field, path in (
-            ("delta", ("population", "delta")),
-            ("null_low", ("null", "delta_low")),
-            ("null_high", ("null", "delta_high")),
-        ):
-            arrays[f"reference_by_loss_{grouping}_{field}"] = np.asarray(
-                [
-                    result["references_by_loss_temperature"][value][grouping][path[0]][path[1]]
-                    for value in reference_losses
-                ],
-                dtype=float,
-            )
+    arrays = _nucleus_artifact_arrays(result, record, labels_by_request)
 
     destination = args.record_dir / artifact_name_for(
         result["sampling_temperatures"], result["loss_temperatures"]
     )
-    np.savez_compressed(destination, **arrays)
+    _write_nucleus_artifact(destination, arrays)
 
     summary = {
         "initialization_index": initialization_index,
