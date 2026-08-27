@@ -41,6 +41,7 @@ raises.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
@@ -763,6 +764,105 @@ def _trainable_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
     return parameters
 
 
+#: Version tag of the parameter-layout serialization, and the first line of every
+#: payload. Bump it only if the encoding below changes; the digest is meaningless
+#: without knowing which encoding produced it.
+_PARAMETER_LAYOUT_SCHEMA = "parameter_layout/v1"
+
+#: How the layout was enumerated, recorded so a reader need not infer it.
+_PARAMETER_ORDERING = (
+    "trainable model.named_parameters(), duplicate parameters removed, "
+    "module registration order"
+)
+
+
+def _parameter_layout_payload(
+    model: torch.nn.Module, parameters: Sequence[torch.Tensor]
+) -> str:
+    """Serialize the exact ordered parameter domain the sketch is defined over.
+
+    A CountSketch map is a function of the *layout* -- how many scalars there
+    are, in which order -- and of nothing else. Two runs whose parameter tuples
+    agree here can be compared; two that do not are projecting different domains,
+    and a stored map from one is meaningless against the other. The digest of
+    this payload is what lets that be checked rather than assumed.
+
+    The encoding, fixed by :data:`_PARAMETER_LAYOUT_SCHEMA`::
+
+        parameter_layout/v1\\n
+        {index}\\t{name}\\t{tuple(shape)}\\t{numel}\\n
+        ...
+
+    UTF-8, zero-based decimal index, tab-separated, Python integer-tuple shape,
+    newline after every entry.
+
+    Deliberately excluded: parameter **values**, the initialization seed, the
+    device and the dtype. None of them changes which scalars the sketch runs
+    over, so including them would make the digest differ between runs that are in
+    fact directly comparable -- exactly the question it exists to answer.
+
+    Args:
+        model: The model whose named parameters supply the canonical names.
+        parameters: The tuple actually handed to the sketcher.
+
+    Returns:
+        The payload string.
+
+    Raises:
+        ValueError: If the named enumeration is not the same objects in the same
+            order as ``parameters``, or a name contains a tab or newline.
+    """
+
+    named = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    # The names and the sketched tuple are obtained from two different calls, so
+    # their agreement is asserted rather than assumed. If they ever diverge --
+    # a filtering change on one side, a custom named_parameters override --
+    # the digest would silently describe a domain the sketch never used, which
+    # is worse than having no digest at all.
+    if len(named) != len(parameters):
+        raise ValueError(
+            f"The named trainable parameters ({len(named)}) do not match the "
+            f"sketched parameter tuple ({len(parameters)}); the layout digest "
+            "would describe a domain the sketch never projected."
+        )
+    for index, ((name, named_parameter), sketched) in enumerate(
+        zip(named, parameters)
+    ):
+        if named_parameter is not sketched:
+            raise ValueError(
+                f"Parameter {index} ({name!r}) from named_parameters() is not the "
+                "same object as the one at that position in the sketched tuple, "
+                "so the two enumerations disagree on order or identity."
+            )
+
+    lines = [f"{_PARAMETER_LAYOUT_SCHEMA}\n"]
+    for index, (name, parameter) in enumerate(named):
+        if "\t" in name or "\n" in name:
+            raise ValueError(
+                f"Parameter name {name!r} contains a tab or newline, which are "
+                "the field and record separators of "
+                f"{_PARAMETER_LAYOUT_SCHEMA}. The encoding would be ambiguous "
+                "and two different layouts could hash alike."
+            )
+        lines.append(
+            f"{index}\t{name}\t{tuple(parameter.shape)}\t{parameter.numel()}\n"
+        )
+    return "".join(lines)
+
+
+def _parameter_layout_sha256(
+    model: torch.nn.Module, parameters: Sequence[torch.Tensor]
+) -> str:
+    """Lowercase SHA-256 hex digest of :func:`_parameter_layout_payload`."""
+
+    payload = _parameter_layout_payload(model, parameters)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _require_every_parameter_reached(
     grads: Sequence[torch.Tensor | None],
     parameters: Sequence[torch.nn.Parameter],
@@ -1218,6 +1318,19 @@ def compute_position_gradient_norms(
                 "map_seeds": [int(value) for value in sketcher._map_seeds],
                 "seed_derivation": _SKETCH_SEED_DERIVATION,
                 "seed_derivation_version": _SKETCH_SEED_DERIVATION_VERSION,
+                # Identifies the scalar domain the map was drawn for. A stored
+                # map is only meaningful against the layout it was built over,
+                # and `parameter_count` alone cannot distinguish two models that
+                # happen to have the same total while ordering or naming their
+                # tensors differently.
+                "parameter_layout_sha256": _parameter_layout_sha256(
+                    model, parameters
+                ),
+                "parameter_layout_schema": _PARAMETER_LAYOUT_SCHEMA,
+                "parameter_ordering": _PARAMETER_ORDERING,
+                # Tensors, not scalars: `parameter_count` above stays the total
+                # element count and is not redefined.
+                "parameter_tensor_count": len(parameters),
             }
         ),
         parameter_count=sum(parameter.numel() for parameter in parameters),

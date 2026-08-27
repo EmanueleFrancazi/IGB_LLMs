@@ -556,6 +556,33 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
     from llm_behavior_lab.analysis.countsketch_fidelity import fidelity_report
     from llm_behavior_lab.evaluation.position_gradients import production_sketch_map
 
+    # Map-count gate, first: before any reconstruction and before the artifact
+    # directory is touched, so a refusal cannot leave a half-written fidelity
+    # result behind.
+    #
+    # The reconstruction below is map-0 and strictly two-dimensional -- it takes
+    # one (buckets, signs) pair and a [positions, K] block. At M > 1 the sketch
+    # rows are [positions, M, K] and every line of it would be wrong, so this
+    # refuses rather than producing a number that looks plausible.
+    #
+    # A missing key means an older in-memory result from before the map count was
+    # recorded; those were single-map by construction, so they are read as M = 1.
+    sketch_protocol = getattr(gradient_result, "sketch_protocol", None) or {}
+    fidelity_map_count = int(sketch_protocol.get("map_count", 1))
+    if fidelity_map_count != 1:
+        raise ValueError(
+            f"The CountSketch fidelity sanity check cannot run at "
+            f"map_count={fidelity_map_count}. Its reconstruction is map-0 only "
+            "and assumes two-dimensional [positions, K] sketches, which is not "
+            "what a multi-map measurement produces.\n"
+            "This is not the offline alternate-map methodology: that one "
+            "re-projects retained exact gradients through independent maps to "
+            "estimate how far a reported error would move, and it remains valid "
+            "and unaffected. What is refused here is reconstructing *production* "
+            "replicas, which needs a map-aware reconstruction that does not exist "
+            "yet. Re-run the fidelity sanity check with a single production map."
+        )
+
     gradients = gradient_result.exact_gradients.numpy()
     indices = gradient_result.exact_positions.numpy()
     lookup = {int(value): row for row, value in enumerate(
