@@ -332,6 +332,14 @@ _MAX_GENERATOR_SEED = 2**64 - 1
 _SKETCH_SEED_DERIVATION = "base_seed + 1000000007 * map_index"
 _SKETCH_SEED_DERIVATION_VERSION = 1
 
+#: Schema version of the emitted ``sketch_protocol``. Deliberately independent of
+#: the record schema: the two move for different reasons. Kept as a literal here
+#: rather than imported from :mod:`llm_behavior_lab.analysis.records`, because
+#: that module is NumPy-only by design and this one is the torch side of the
+#: boundary; the record layer validates the value it finds. A test asserts the
+#: two constants agree.
+_SKETCH_PROTOCOL_SCHEMA_VERSION = 2
+
 
 def _validated_map_count(map_count: Any, *, name: str) -> int:
     """Return ``map_count`` as a positive ``int``, or explain why it is not.
@@ -1331,6 +1339,28 @@ def compute_position_gradient_norms(
                 # Tensors, not scalars: `parameter_count` above stays the total
                 # element count and is not redefined.
                 "parameter_tensor_count": len(parameters),
+                # -- protocol schema v2 -------------------------------------
+                # How the arrays beside this protocol must be *read*. Exact
+                # values rather than free text: a reader finding something
+                # unexpected is looking at a layout it does not understand and
+                # must say so rather than guess.
+                "schema_version": _SKETCH_PROTOCOL_SCHEMA_VERSION,
+                "canonical_storage": "stored" if map_count == 1 else "derived",
+                "canonical_relationship": "slice_of_temperature_array",
+                "temperature_sketch_axes": (
+                    ["temperature", "position", "bucket"]
+                    if map_count == 1
+                    else ["temperature", "position", "map", "bucket"]
+                ),
+                "estimator": "mean_of_per_map_inner_products_over_exact_norms",
+                "accumulation_dtype": "float64",
+                "storage_dtype": "float32",
+                # Every map projects the same gradient from one backward pass.
+                # Recorded because it is the governing claim of the replica
+                # design: a record saying otherwise describes a different
+                # measurement, in which projection and recomputation variance
+                # are confounded.
+                "recomputed_per_map": False,
             }
         ),
         parameter_count=sum(parameter.numel() for parameter in parameters),

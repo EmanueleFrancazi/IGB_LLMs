@@ -43,7 +43,7 @@ __all__ = [
 #: exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 11
+RECORD_VERSION = 12
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -124,6 +124,317 @@ _TEMPERATURE_ARRAY_NAMES = (
 
 #: The unscaled reference inside that grid.
 CANONICAL_TEMPERATURE = 1.0
+
+#: Tolerance for matching a requested loss temperature against a measured one.
+#:
+#: Owned here, in the layer with no intra-package imports, because the record
+#: accessor needs it and :mod:`llm_behavior_lab.analysis.directional_fields`
+#: already imports :data:`CANONICAL_TEMPERATURE` from this module -- resolving it
+#: the other way round would be a cycle. ``directional_fields`` re-exports this
+#: name, so its existing importers are unaffected.
+#:
+#: Temperatures originate as module constants or as CLI-parsed floats of the same
+#: literals, so exact equality usually holds; the tolerance covers a value that
+#: has passed through float32 somewhere, which moves 0.12 by about 1.5e-9. The
+#: grid steps by 0.12, five orders of magnitude above this, so no two
+#: temperatures anyone would request can alias onto each other.
+TEMPERATURE_MATCH_TOLERANCE = 1e-6
+
+#: Sketch-protocol schema this record layer understands.
+#:
+#: Deliberately separate from :data:`RECORD_VERSION`. The record schema and the
+#: sketch protocol can move independently, and conflating them would force a
+#: record-version bump for a protocol-only change or hide a protocol change
+#: behind an unrelated one. A *missing* schema version means the legacy protocol
+#: written before replicas existed, which is v1 by definition and can only ever
+#: describe a single map.
+SKETCH_PROTOCOL_SCHEMA_VERSION = 2
+
+#: Required keys and their exact permitted values under schema v2. Exact values,
+#: not free text: these describe how the arrays beside them must be *read*, so a
+#: reader that finds an unexpected value is looking at something it does not
+#: know how to interpret and must say so rather than guess.
+_SKETCH_PROTOCOL_V2_EXACT = {
+    "canonical_relationship": "slice_of_temperature_array",
+    "estimator": "mean_of_per_map_inner_products_over_exact_norms",
+    "accumulation_dtype": "float64",
+    "storage_dtype": "float32",
+}
+
+#: Axis names of ``gradient_temperature_position_sketches`` at each map count.
+_SKETCH_AXES_SINGLE_MAP = ["temperature", "position", "bucket"]
+_SKETCH_AXES_MULTI_MAP = ["temperature", "position", "map", "bucket"]
+
+
+def _integral_map_count(value: Any, *, where: str) -> int:
+    """Return ``value`` as a positive ``int`` map count, or explain why not.
+
+    ``bool`` is refused explicitly: ``True == 1`` in Python, so it would
+    otherwise pass as a single map and read as though somebody had asked a
+    yes/no question and been handed a count.
+
+    This deliberately restates the rule that
+    ``evaluation.position_gradients._validated_map_count`` applies at
+    measurement time rather than importing it. The analysis layer is
+    **NumPy-only** by design -- a finished experiment must be re-readable
+    without PyTorch installed -- and importing the evaluation module here would
+    pull torch into every record load. The duplication is three lines across a
+    deliberate architectural boundary; the tests assert both accept and reject
+    the same values.
+    """
+
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{where} must be an integer of at least one; got {value!r}."
+        ) from None
+    if isinstance(value, bool) or count != value or count < 1:
+        raise ValueError(
+            f"{where} must be an integer of at least one; got {value!r}."
+        )
+    return count
+
+
+def _require_supported_record_version(version: Any) -> None:
+    """Refuse a record written by a newer version of this project.
+
+    ``record_version`` has been written since version 2 and, until now, never
+    read -- so a forward-incompatible archive would previously have loaded with
+    its unknown arrays quietly discarded. A missing value stays supported: it
+    means a record from before the field existed.
+
+    Raises:
+        ValueError: If the version is malformed, or newer than this reader.
+    """
+
+    if version is None:
+        return
+    # An integral type, not merely something that survives int(). A float, even
+    # an integral one, means the metadata was built by something that did not
+    # treat this as a version number, and `bool` is Integral in Python -- True
+    # would otherwise read as version 1.
+    if isinstance(version, bool) or not isinstance(version, (int, np.integer)):
+        raise ValueError(
+            f"record_version must be an integer; got {version!r}."
+        )
+    value = int(version)
+    if value < 1:
+        # Version 1 is the oldest this format ever had -- it predates
+        # `eligible_token_ids`. There is no version 0, so a non-positive value
+        # is malformed metadata rather than an ancient record.
+        raise ValueError(
+            f"record_version must be positive; got {value}. Version 1 is the "
+            "oldest this format has ever used, so there is no record this could "
+            "legitimately describe."
+        )
+    if value > RECORD_VERSION:
+        raise ValueError(
+            f"This record declares record_version {value}, but this version of "
+            f"the project reads up to {RECORD_VERSION}. It was written by a "
+            "newer writer whose arrays may be laid out differently, so it "
+            "cannot be read here. Upgrade rather than loading it partially."
+        )
+
+
+def _resolve_sketch_map_count(
+    *,
+    protocol: Mapping[str, Any],
+    record_version: Any,
+    has_canonical_array: bool,
+    temperature_rank: int | None,
+) -> int | None:
+    """The number of production CountSketch maps this record's sketches carry.
+
+    **The single implementation of the map-count rules.** Both
+    :meth:`InitializationExperimentRecord.validate` and
+    :attr:`InitializationExperimentRecord.sketch_map_count` route through it, so
+    the two cannot drift into disagreeing about which records are legal.
+
+    Metadata is authoritative throughout. The array rank is *validated against*
+    the declared count and never used to discover it: a rank is evidence about
+    storage, not a statement about what was measured, and a record that has to be
+    guessed at is a record that can be guessed wrong.
+
+    Args:
+        protocol: The ``gradient_sketch`` protocol block; empty when absent.
+        record_version: ``record_version`` from the metadata, or ``None``.
+        has_canonical_array: Whether ``gradient_position_sketches`` is present.
+        temperature_rank: ``ndim`` of ``gradient_temperature_position_sketches``,
+            or ``None`` when that array is absent.
+
+    Returns:
+        The map count, or ``None`` when the record carries no sketch surface at
+        all -- which is a legitimate record, not an error.
+
+    Raises:
+        ValueError: For any combination the truth table refuses.
+    """
+
+    schema = protocol.get("schema_version")
+    declared = protocol.get("map_count")
+    has_sketches = has_canonical_array or temperature_rank is not None
+
+    if schema is not None:
+        try:
+            schema_value = int(schema)
+            unsupported = isinstance(schema, bool) or schema_value != schema
+        except (TypeError, ValueError):
+            schema_value, unsupported = None, True
+        if unsupported or schema_value != SKETCH_PROTOCOL_SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported sketch-protocol schema_version {schema!r}. This "
+                f"reader understands version {SKETCH_PROTOCOL_SCHEMA_VERSION}; a "
+                "higher one was written by a newer version of this project and "
+                "may lay its arrays out differently, so it cannot be read here."
+            )
+
+    if not has_sketches:
+        # A record may legitimately carry no sketches at all -- gradient analysis
+        # off, or norms without direction. That is not an error; it simply has no
+        # map surface, and `sketch_map_count` raises when asked.
+        return None
+
+    if temperature_rank == 4:
+        # The multi-map layout. All three conditions, together: the rank alone
+        # must never be enough to establish it.
+        if record_version != RECORD_VERSION:
+            raise ValueError(
+                "A four-dimensional gradient_temperature_position_sketches array "
+                f"requires record_version {RECORD_VERSION}; got "
+                f"{record_version!r}."
+            )
+        if schema != SKETCH_PROTOCOL_SCHEMA_VERSION:
+            raise ValueError(
+                "A four-dimensional gradient_temperature_position_sketches array "
+                f"requires sketch-protocol schema_version "
+                f"{SKETCH_PROTOCOL_SCHEMA_VERSION}; got {schema!r}."
+            )
+        if declared is None:
+            raise ValueError(
+                "A multi-map sketch record must declare map_count explicitly; the "
+                "array's map axis is validated against it, never used to infer it."
+            )
+        count = _integral_map_count(declared, where="sketch_protocol.map_count")
+        if count == 1:
+            raise ValueError(
+                "map_count is 1 but the temperature sketch array is "
+                "four-dimensional. A single-map record stores "
+                "[temperatures, positions, K]."
+            )
+    elif schema == SKETCH_PROTOCOL_SCHEMA_VERSION:
+        if record_version != RECORD_VERSION:
+            raise ValueError(
+                f"A schema-v{SKETCH_PROTOCOL_SCHEMA_VERSION} sketch protocol "
+                f"requires record_version {RECORD_VERSION}; got {record_version!r}."
+            )
+        if declared is None:
+            raise ValueError(
+                f"A schema-v{SKETCH_PROTOCOL_SCHEMA_VERSION} sketch protocol with "
+                "sketch arrays must declare map_count explicitly. Defaulting is "
+                "reserved for genuinely legacy protocols, so a current record "
+                "cannot masquerade as one."
+            )
+        count = _integral_map_count(declared, where="sketch_protocol.map_count")
+        if count != 1:
+            raise ValueError(
+                f"map_count is {count} but the stored sketches are not in the "
+                "multi-map layout; a record above one map stores a "
+                "four-dimensional temperature array."
+            )
+    else:
+        # Legacy protocol: no schema version. It predates replicas and can only
+        # ever describe a single map.
+        #
+        # **The legacy-wrapper rule**, and it is deliberate.
+        #
+        # This does *not* additionally require record_version < 12, and must not.
+        # `save()` stamps the current RECORD_VERSION onto whatever it writes, so
+        # loading an old record and re-saving it -- an ordinary thing to do --
+        # produces a **v12 container around a schema-version-absent legacy
+        # protocol**. Requiring schema v2 of every v12 record would make that
+        # archive unloadable, which is a backward-compatibility break, not a
+        # safety property. An earlier draft did exactly that and broke
+        # `test_a_record_carrying_sketches_round_trips`.
+        #
+        # What is still guaranteed, and where:
+        #   * a *newly measured* v12 record always emits schema 2, because the
+        #     measurement writes it unconditionally;
+        #   * a schema-absent protocol is confined to the historical 2-D/3-D
+        #     M = 1 layouts, which cannot express more than one map at all;
+        #   * every 4-D layout demands record 12 *and* schema 2 *and* an explicit
+        #     map_count > 1, checked above;
+        #   * schema v2 itself never defaults the count.
+        # So the masquerade this used to guard against -- a current writer
+        # quietly omitting the count -- is prevented where it actually bites.
+        if declared is None:
+            count = 1
+        else:
+            count = _integral_map_count(declared, where="sketch_protocol.map_count")
+            if count != 1:
+                raise ValueError(
+                    f"map_count is {count} without a sketch-protocol "
+                    "schema_version. A legacy protocol predates replicas and "
+                    "cannot describe more than one map."
+                )
+
+    if count > 1 and has_canonical_array:
+        raise ValueError(
+            "gradient_position_sketches must be absent when map_count is above "
+            "one. The canonical field is derived from the canonical row of the "
+            "temperature array so there is exactly one canonical representation; "
+            "storing a second one re-admits the possibility that they disagree."
+        )
+    return count
+
+
+def _validate_sketch_protocol_v2(protocol: Mapping[str, Any], map_count: int) -> None:
+    """Check the schema-v2 required key set, types and exact values."""
+
+    for key, expected in _SKETCH_PROTOCOL_V2_EXACT.items():
+        if key not in protocol:
+            raise ValueError(f"sketch_protocol.{key} is required under schema v2.")
+        if protocol[key] != expected:
+            raise ValueError(
+                f"sketch_protocol.{key} must be {expected!r} under schema v2; got "
+                f"{protocol[key]!r}."
+            )
+
+    storage = protocol.get("canonical_storage")
+    expected_storage = "stored" if map_count == 1 else "derived"
+    if storage != expected_storage:
+        raise ValueError(
+            f"sketch_protocol.canonical_storage must be {expected_storage!r} at "
+            f"map_count {map_count}; got {storage!r}."
+        )
+
+    axes = protocol.get("temperature_sketch_axes")
+    expected_axes = (
+        _SKETCH_AXES_SINGLE_MAP if map_count == 1 else _SKETCH_AXES_MULTI_MAP
+    )
+    # Type first: `list(...)` on an int raises TypeError, and a schema violation
+    # should surface as the ValueError every other check here raises.
+    if not isinstance(axes, (list, tuple)):
+        raise ValueError(
+            "sketch_protocol.temperature_sketch_axes must be a list of axis "
+            f"names; got {axes!r}."
+        )
+    if list(axes) != expected_axes:
+        raise ValueError(
+            "sketch_protocol.temperature_sketch_axes must be "
+            f"{expected_axes} at map_count {map_count}; got {axes!r}."
+        )
+
+    if "recomputed_per_map" not in protocol:
+        raise ValueError(
+            "sketch_protocol.recomputed_per_map is required under schema v2."
+        )
+    if protocol["recomputed_per_map"] is not False:
+        raise ValueError(
+            "sketch_protocol.recomputed_per_map must be False: every map projects "
+            "the same gradient from one backward pass, and a record claiming "
+            "otherwise describes a different measurement."
+        )
 
 #: Version 8 additions. ``[N_T]`` temperatures and ``[N_T, D_g]`` exact gradient
 #: norms, where temperature enters the **loss** rather than rescaling a result:
@@ -568,16 +879,126 @@ class InitializationExperimentRecord:
 
     @property
     def has_gradient_position_sketches(self) -> bool:
-        """Whether per-position gradient sketches were recorded.
+        """Whether a canonical per-position gradient sketch is **available**.
 
         Directional analysis needs both the sketches and the exact norms that
         scale them, so both are required here rather than the array alone.
+
+        Availability, not physical presence. A multi-map record deliberately
+        stores no canonical array -- the canonical field is the canonical row of
+        the temperature array -- and reporting ``False`` for one would silently
+        switch off figures 20 and 24 and both artifact writers on exactly the
+        records the replica work exists to produce.
         """
 
-        return (
-            self.gradient_position_sketches is not None
-            and self.gradient_position_norms is not None
+        if self.gradient_position_norms is None:
+            return False
+        if self.gradient_position_sketches is not None:
+            return True
+        # Derivable: multi-map storage with the canonical temperature measured.
+        temperature = self.gradient_temperature_position_sketches
+        if temperature is None or temperature.ndim != 4:
+            return False
+        if self.gradient_temperatures is None:
+            return False
+        try:
+            self._canonical_sketch_temperature_index()
+        except ValueError:
+            return False
+        return True
+
+    def _canonical_sketch_temperature_index(self) -> int:
+        """Row of the temperature axis holding the canonical ``T = 1``."""
+
+        return self._sketch_temperature_index(None)
+
+    def _sketch_temperature_index(self, loss_temperature: float | None) -> int:
+        """Resolve a loss temperature to a row of the temperature sketch axis.
+
+        Owned here rather than delegated to
+        :mod:`llm_behavior_lab.analysis.directional_fields`, which imports from
+        this module: the reverse direction would be a cycle. The matching rule
+        and its error behaviour are the established ones -- absolute tolerance
+        :data:`TEMPERATURE_MATCH_TOLERANCE`, no interpolation, no fallback to the
+        canonical field, and an ambiguous match refused rather than resolved.
+        """
+
+        requested = (
+            float(CANONICAL_TEMPERATURE)
+            if loss_temperature is None
+            else float(loss_temperature)
         )
+        if self.gradient_temperatures is None:
+            # Canonical-only record: the canonical field is all there is.
+            if abs(requested - CANONICAL_TEMPERATURE) <= TEMPERATURE_MATCH_TOLERANCE:
+                return 0
+            raise ValueError(
+                f"No measured gradient-direction field exists for loss "
+                f"temperature T_g = {requested:g}. This record measured the "
+                f"canonical T = {CANONICAL_TEMPERATURE:g} only. Directions at one "
+                "temperature say nothing about another, so this cannot fall back "
+                "or interpolate."
+            )
+        measured = np.asarray(self.gradient_temperatures, dtype=np.float64)
+        close = np.flatnonzero(
+            np.abs(measured - requested) <= TEMPERATURE_MATCH_TOLERANCE
+        )
+        if close.size == 0:
+            listed = ", ".join(f"{value:g}" for value in measured)
+            raise ValueError(
+                f"No measured gradient-direction field exists for loss "
+                f"temperature T_g = {requested:g}. Measured: {listed}."
+            )
+        if close.size > 1:
+            raise ValueError(
+                f"Loss temperature T_g = {requested:g} matches {close.size} "
+                "measured temperatures, which cannot be resolved unambiguously."
+            )
+        return int(close[0])
+
+    def per_map_sketches(self, loss_temperature: float | None = None) -> np.ndarray:
+        """``[D, M, K]`` gradient sketches at one loss temperature.
+
+        One shape at every map count, so a consumer never branches on storage.
+        ``M = 1`` records -- legacy and current alike -- present their historical
+        two-dimensional array as ``[D, 1, K]``; multi-map records return the
+        chosen temperature row directly.
+
+        Every return is a **view**: a length-one map axis is added by reshaping,
+        never by copying, so asking for the uniform shape costs nothing. The
+        arrays are large enough at campaign scale that a defensive copy here
+        would be a real cost paid on every call.
+
+        Args:
+            loss_temperature: Which measured loss temperature to read. ``None``
+                means the canonical ``T = 1``.
+
+        Returns:
+            ``[D, M, K]``.
+
+        Raises:
+            ValueError: If the record carries no sketches, or never measured a
+                direction at this temperature.
+        """
+
+        count = self._resolved_map_count()
+        if count is None or self.gradient_position_norms is None:
+            raise ValueError(
+                "This record carries no per-position gradient sketches, so no "
+                "directional field can be read from it."
+            )
+        index = self._sketch_temperature_index(loss_temperature)
+
+        if count > 1:
+            return np.asarray(self.gradient_temperature_position_sketches)[index]
+
+        canonical_index = self._canonical_sketch_temperature_index()
+        if index == canonical_index and self.gradient_position_sketches is not None:
+            # The historical canonical array, reshaped rather than copied.
+            sketches = np.asarray(self.gradient_position_sketches)
+        else:
+            sketches = np.asarray(self.gradient_temperature_position_sketches)[index]
+        return sketches.reshape(sketches.shape[0], 1, sketches.shape[1])
 
     @property
     def gradient_analysis(self) -> dict[str, Any]:
@@ -829,11 +1250,67 @@ class InitializationExperimentRecord:
                 f"{num_inits} recorded initializations."
             )
 
+    @property
+    def _sketch_protocol(self) -> dict[str, Any]:
+        """The ``gradient_sketch`` protocol block, empty when absent."""
+
+        return dict(self.gradient_analysis.get("gradient_sketch", {}) or {})
+
+    def _resolved_map_count(self) -> int | None:
+        """This record's map count via the shared resolver, or ``None``."""
+
+        temperature = self.gradient_temperature_position_sketches
+        return _resolve_sketch_map_count(
+            protocol=self._sketch_protocol,
+            record_version=self.metadata.get("record_version"),
+            has_canonical_array=self.gradient_position_sketches is not None,
+            temperature_rank=None if temperature is None else int(temperature.ndim),
+        )
+
+    @property
+    def sketch_map_count(self) -> int:
+        """Number of independent production CountSketch maps, ``M``.
+
+        Read from metadata through the shared resolver -- never inferred from an
+        array's rank or width.
+
+        Raises:
+            ValueError: If this record carries no sketch surface. Returning 1
+                would let a sketch-free record answer a question about maps it
+                never had.
+        """
+
+        count = self._resolved_map_count()
+        if count is None:
+            raise ValueError(
+                "This record carries no gradient sketches, so it has no map "
+                "count. Check has_gradient_position_sketches first."
+            )
+        return count
+
     def _validate_gradient_sketches(self) -> None:
         """The sketch must describe exactly the gradient-evaluated positions."""
 
+        # Resolving here validates the whole metadata/array combination once,
+        # for every record, whether or not any sketch array is present.
+        map_count = self._resolved_map_count()
+        protocol = self._sketch_protocol
+        if (
+            map_count is not None
+            and protocol.get("schema_version") == SKETCH_PROTOCOL_SCHEMA_VERSION
+        ):
+            _validate_sketch_protocol_v2(protocol, map_count)
+
         if self.gradient_position_sketches is None:
             return
+        if map_count is not None and map_count > 1:
+            # Unreachable through the resolver, which already refuses this
+            # combination; kept as a local invariant so the canonical-storage
+            # rule is stated where the canonical array is validated.
+            raise ValueError(
+                "gradient_position_sketches must be absent when map_count is "
+                "above one."
+            )
         if self.gradient_position_norms is None:
             raise ValueError(
                 "gradient_position_sketches was given without the per-position "
@@ -1120,13 +1597,48 @@ class InitializationExperimentRecord:
         sketches = self.gradient_temperature_position_sketches
         if sketches is None:
             return
+        map_count = self._resolved_map_count() or 1
+        temperatures = self.gradient_temperatures
+
+        if map_count > 1:
+            # Multi-map: temperature array only, and the canonical field is the
+            # canonical row of it rather than a second stored copy. There is no
+            # slice-equality check because there is nothing to compare against --
+            # which is the point: one representation cannot disagree with itself.
+            if sketches.ndim != 4:
+                raise ValueError(
+                    "gradient_temperature_position_sketches must be "
+                    "[temperatures, positions, maps, K] when map_count is above "
+                    f"one; got {sketches.ndim} dimensions."
+                )
+            expected_head = (
+                temperatures.shape[0],
+                int(self.gradient_position_norms.shape[0]),
+            )
+            if sketches.shape[:2] != expected_head:
+                raise ValueError(
+                    "gradient_temperature_position_sketches must have shape "
+                    f"[temperatures, positions, maps, K] with leading "
+                    f"{expected_head}; got {sketches.shape}."
+                )
+            if int(sketches.shape[2]) != map_count:
+                raise ValueError(
+                    f"The map axis has length {int(sketches.shape[2])} but "
+                    f"sketch_protocol.map_count declares {map_count}. The count "
+                    "is authoritative and the axis is checked against it."
+                )
+            if not np.all(np.isfinite(sketches)):
+                raise ValueError(
+                    "gradient_temperature_position_sketches must be finite."
+                )
+            return
+
         if self.gradient_position_sketches is None:
             raise ValueError(
                 "gradient_temperature_position_sketches was given without "
                 "gradient_position_sketches, so its canonical slice has nothing "
                 "to be checked against."
             )
-        temperatures = self.gradient_temperatures
         expected = (
             temperatures.shape[0],
             int(self.gradient_position_norms.shape[0]),
@@ -1260,6 +1772,16 @@ class InitializationExperimentRecord:
         metadata: Mapping[str, Any],
     ) -> "InitializationExperimentRecord":
         """Rebuild a record from a loaded array mapping and metadata."""
+
+        # Forward-version guard, first: **before** the optional-array whitelist
+        # below silently drops every name this reader does not know. A newer
+        # writer's record may carry arrays that change how the ones we do
+        # recognize must be read, so loading it partially would be worse than
+        # refusing it -- the result would look complete and be wrong. Placed in
+        # `from_parts` rather than `load_record` because this is the single
+        # funnel: archive loads and direct in-memory construction both arrive
+        # here.
+        _require_supported_record_version(metadata.get("record_version"))
 
         missing = sorted(set(_ARRAY_NAMES) - set(arrays))
         if missing:

@@ -21,22 +21,23 @@ from typing import Any
 
 import numpy as np
 
-from llm_behavior_lab.analysis.records import CANONICAL_TEMPERATURE
+from llm_behavior_lab.analysis.records import (
+    CANONICAL_TEMPERATURE,
+    TEMPERATURE_MATCH_TOLERANCE,
+)
 
 __all__ = [
+    "TEMPERATURE_MATCH_TOLERANCE",
     "available_loss_temperatures",
     "directional_field",
     "loss_temperature_index",
 ]
 
-#: Tolerance for matching a requested temperature against a measured one.
-#:
-#: Temperatures originate as module constants or as CLI-parsed floats of the
-#: same literals, so exact equality usually holds; the tolerance covers a value
-#: that has passed through float32 somewhere, which moves 0.12 by about 1.5e-9.
-#: The grid steps by 0.12, five orders of magnitude above this, so no two
-#: temperatures anyone would request can alias onto each other.
-TEMPERATURE_MATCH_TOLERANCE = 1e-6
+# TEMPERATURE_MATCH_TOLERANCE is re-exported, not defined here. The record layer
+# owns it now, because `records.per_map_sketches` resolves temperatures too and
+# this module already imports from `records` -- owning it here and importing it
+# there would be a cycle. The value and behaviour are unchanged, and the two
+# existing importers (`nucleus_clustering`, `figures`) keep working untouched.
 
 
 def available_loss_temperatures(record: Any) -> tuple[float, ...]:
