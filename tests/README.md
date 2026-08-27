@@ -7,7 +7,7 @@ The tests protect the incremental development process. Each project phase adds a
 At the current stage, the test suite covers:
 
 - package imports
-- LLaMA-style model construction and output shapes
+- LLaMA-style and GPT-2-style model construction and output shapes
 - local text tokenization and causal language-modeling batches
 - inference utilities
 - Phase 5 output-analysis utilities
@@ -49,7 +49,8 @@ When modifying source code under `src/`, add or update tests under `tests/`.
 
 ## Current test structure
 
-Current files:
+Some of the files, oldest first. This list is **not** the inventory — the suite has grown
+well beyond it, and the table below is what is kept current. `ls tests/` is the authority:
 
 ```text
 tests/
@@ -74,7 +75,12 @@ tests/
 | File | Main focus | Type | Related project area |
 |---|---|---|---|
 | `test_imports.py` | Core package imports and public exports | Import/smoke test | Package-level API |
-| `test_llama_shapes.py` | LLaMA model registry, construction, forward shapes, cache path | Unit/integration tests | `models/` |
+| `test_llama_shapes.py` | LLaMA model registry, construction, forward shapes, cache path, the 12x768 arm's parameter budget | Unit/integration tests | `models/` |
+| `test_gpt_shapes.py` | GPT-2 registry, configuration, parameter budget, weight tying, causal masking, `inputs_embeds`, initialization | Unit/integration tests | `models/gpt/` |
+| `test_model_family_compatibility.py` | The measurement pipeline is model-generic: both families through the real production helpers | Integration tests | `evaluation/`, `scripts/` |
+| `test_device_provenance.py` | CUDA/CPU device provenance, mocked; no driver required | Unit tests | `utils/device.py` |
+| `test_benchmark_position_gradients.py` | Benchmark sketch resolution, vocabulary guard, forwarded settings | Unit/integration tests | `scripts/benchmark_position_gradients.py` |
+| `test_countsketch_compact_tables.py` | Compact device tables against a frozen golden fixture; public dtype contracts | Unit tests | `evaluation/position_gradients.py` |
 | `test_data_pipeline.py` | Character tokenizer, train/validation split, causal LM batcher | Unit tests | `data/` |
 | `test_inference.py` | Prompt preparation, logits/probabilities, top-k predictions, decoding, generation | Unit/integration tests | `inference/` |
 | `test_evaluation.py` | Output statistics, empirical frequencies, probability gaps, untrained analysis | Unit tests | `evaluation/` |
@@ -487,10 +493,12 @@ A successful full run should look like:
 
 ```text
 .............................                                            [100%]
-29 passed in ...
+<N> passed in ...
 ```
 
-The exact number of dots and runtime may change as tests are added.
+The suite has grown well past a thousand tests, so the count and runtime are not pinned
+here; a specific number written down goes stale the next time a test is added. What matters
+is that the run ends in `passed` with no failures or errors.
 
 Warnings may appear depending on the local environment. For example, a CUDA initialization warning may appear on a machine with a CUDA-enabled PyTorch install but an incompatible NVIDIA driver. If all tests pass, such warnings are diagnostic environment information rather than test failures.
 
@@ -527,7 +535,7 @@ Examples:
 
 | Source area | Test file |
 |---|---|
-| `src/llm_behavior_lab/models/` | `tests/test_llama_shapes.py` |
+| `src/llm_behavior_lab/models/` | `tests/test_llama_shapes.py`, `tests/test_gpt_shapes.py`, `tests/test_initialization_scale.py` |
 | `src/llm_behavior_lab/data/` | `tests/test_data_pipeline.py` |
 | `src/llm_behavior_lab/inference/` | `tests/test_inference.py` |
 | `src/llm_behavior_lab/evaluation/` | `tests/test_evaluation.py`, `tests/test_gradient_norms.py` |

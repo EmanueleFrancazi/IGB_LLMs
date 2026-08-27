@@ -7,7 +7,7 @@ The project uses a `src/` layout: the importable package lives under `src/llm_be
 At the current project stage, the source package includes:
 
 - data utilities for text loading, tokenization, splitting, and batching
-- an explicit LLaMA-style decoder-only model implementation
+- two explicit decoder-only model implementations, LLaMA-style and GPT-2-style
 - model configuration and model registry utilities
 - inference utilities for prompt preparation, logits extraction, probability inspection, and short generation
 - evaluation utilities for untrained-model output analysis and gradient-norm diagnostics
@@ -17,7 +17,7 @@ Quick subfolder overview:
 
 | Path | Role |
 |---|---|
-| `src/llm_behavior_lab/models/` | Model interface, registry, and explicit LLaMA-style implementation. |
+| `src/llm_behavior_lab/models/` | Model interface, registry, and two explicit decoder implementations: LLaMA-style and GPT-2-style. |
 | `src/llm_behavior_lab/data/` | Text loading, tokenization, splitting, and causal LM batching utilities. |
 | `src/llm_behavior_lab/inference/` | Prompt preparation, logits extraction, probability extraction, decoding, and generation. |
 | `src/llm_behavior_lab/evaluation/` | Output-distribution, token-frequency, untrained-analysis, and gradient-norm diagnostics. |
@@ -71,7 +71,9 @@ It can be imported as:
 import llm_behavior_lab
 ```
 
-The package currently contains:
+A **selected navigation tree**, not a full inventory — `analysis/` and `evaluation/` in
+particular carry more modules than are shown here, and the per-package sections below are
+what is kept current. `ls src/llm_behavior_lab/` is the authority:
 
 ```text
 src/llm_behavior_lab/
@@ -122,7 +124,12 @@ src/llm_behavior_lab/
     __init__.py
     base.py
     registry.py
+    initialization_scale.py
     llama/
+      __init__.py
+      config.py
+      model.py
+    gpt/
       __init__.py
       config.py
       model.py
@@ -163,6 +170,7 @@ src/llm_behavior_lab/data/
   cli.py           the dataset options shared by scripts
   text_dataset.py  local text loading and train/validation splitting
   tokenizer.py     deterministic character-level tokenizer
+  pretrained_tokenizer.py  pretrained subword tokenizer; tokenizer files only
   dataloader.py    causal language-modeling batches
 ```
 
@@ -331,7 +339,7 @@ registry only if a third source shows that the branch has become the problem.
 
 ## `llm_behavior_lab.models`
 
-The `models` package contains the model interface, model registry, and explicit LLaMA-style model implementation.
+The `models` package contains the model interface, the model registry, and two explicit decoder-only model implementations: LLaMA-style and GPT-2-style.
 
 Current files:
 
@@ -340,11 +348,21 @@ src/llm_behavior_lab/models/
   __init__.py
   base.py
   registry.py
+  initialization_scale.py
   llama/
     __init__.py
     config.py
     model.py
+  gpt/
+    __init__.py
+    config.py
+    model.py
 ```
+
+Each family registers one builder; size comes from the YAML, not from the registry name.
+The GPT package exposes `tok_embeddings`, `layers`, `norm` and `output` as read-only
+properties onto its canonical nanoGPT modules, so generic measurement code needs no
+family branch.
 
 ### Main responsibilities
 
@@ -352,7 +370,7 @@ src/llm_behavior_lab/models/
 - standardize model outputs
 - register model constructors by name
 - construct models from config dictionaries
-- implement the current LLaMA-style decoder-only model explicitly
+- implement both decoder-only model families explicitly
 
 ### Important objects and functions
 
@@ -370,6 +388,8 @@ LlamaDecoderBlock
 LlamaSelfAttention
 LlamaFeedForward
 LlamaRMSNorm
+GPTConfig
+GPTForCausalLM
 ```
 
 ### Current LLaMA-style components
@@ -395,6 +415,9 @@ The current model implementation includes:
 | Add or inspect model registration | `models/registry.py` |
 | Change LLaMA model hyperparameter validation | `models/llama/config.py` |
 | Modify LLaMA architecture internals | `models/llama/model.py` |
+| Change GPT-2 model hyperparameter validation | `models/gpt/config.py` |
+| Modify GPT-2 architecture internals | `models/gpt/model.py` |
+| Change which parameters an initialization scale may touch | `models/initialization_scale.py` |
 | Register a new model family | `models/__init__.py` and/or a new subpackage |
 
 ### Scripts using this package
@@ -419,6 +442,7 @@ src/llm_behavior_lab/experiment/
   checkpoints.py
   config.py
   metrics.py
+  naming.py
   run.py
   serialization.py
 ```
@@ -588,7 +612,10 @@ src/llm_behavior_lab/evaluation/
   gradient_norms.py
   guessing.py
   init_distribution.py
+  input_conditions.py
+  nucleus_labels.py
   output_stats.py
+  position_gradients.py
   token_frequency.py
   untrained_analysis.py
 ```
@@ -685,13 +712,17 @@ save_gradient_norm_result
 The `analysis` package is the **read side** of the project: experiments write records, and
 everything here consumes them.
 
-Current files:
+The core modules; the package carries further ones for the gradient-direction analyses
+(clustering, directional fields, cross-partition, CountSketch fidelity, nucleus artifacts):
 
 ```text
 src/llm_behavior_lab/analysis/
   __init__.py
   aggregation.py
   figures.py
+  gradients.py
+  nulls.py
+  predictive.py
   records.py
 ```
 
@@ -859,8 +890,8 @@ carries linguistic structure learned from **its own** training corpus: the
 segmentation, the frequency profile of the pieces, and which strings are single
 tokens at all. The experiment therefore measures
 
-> the distributional behavior of a randomly initialized tiny LLaMA **over a
-> realistic pretrained subword vocabulary**,
+> the distributional behavior of a randomly initialized model of the configured
+> architecture **over a realistic pretrained subword vocabulary**,
 
 not a completely unlearned text-processing system. Structure visible in the
 corpus token distribution belongs to the tokenizer and the text; only the guess
@@ -1100,8 +1131,10 @@ Current local documentation includes:
 
 ```text
 data/README.md
+notebooks/README.md
 scripts/README.md
 src/README.md
+tests/README.md
 ```
 
 ---
@@ -1265,16 +1298,18 @@ The source package should follow these principles:
 
 ### Where do I change the model architecture?
 
-Use:
+Use the subpackage of the family you are changing:
 
 ```text
 src/llm_behavior_lab/models/llama/model.py
+src/llm_behavior_lab/models/gpt/model.py
 ```
 
 For config validation or hyperparameters, use:
 
 ```text
 src/llm_behavior_lab/models/llama/config.py
+src/llm_behavior_lab/models/gpt/config.py
 ```
 
 ### Where do I add a new model family?

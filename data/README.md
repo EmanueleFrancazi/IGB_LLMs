@@ -432,7 +432,7 @@ ResolvedDataset.read_text()
 CharTokenizer.from_text -> encode -> split_token_ids -> CausalLMBatcher
    |
    v
-LLaMA-style model
+the model built from the model config
 ```
 
 Identity and policy are kept apart on purpose. Identity belongs in tracked YAML

@@ -23,6 +23,17 @@ Current work is a **pre-Phase-7 research extension**: an initialization-distribu
 experiment measuring how a randomly initialized model's token guesses compare with the
 corpus token distribution. **Phase 7 (training) has not started.**
 
+Two model families are now registered: a LLaMA-style decoder (`llama`, `llama_tiny`) and a
+GPT-2-style decoder (`gpt2`). Three configurations are used as experimental arms —
+`tiny_llama_32k` (the historical baseline), `llama_12x768`, and `gpt2_12x768`. The latter two
+share depth, width and vocabulary, so comparing them varies an architectural *bundle* rather
+than any single component; `tiny_llama_32k` versus `llama_12x768` changes several fields at
+once and is **not** a depth control. No cross-architecture campaign has been run yet: the two
+new arms are validated end to end, and every scientific result so far comes from the 2-layer
+baseline. [`docs/EXPERIMENT_LOG.md`](docs/EXPERIMENT_LOG.md) defines the quantities and
+[`docs/experiment_logbook/`](docs/experiment_logbook/EXPERIMENT_LOGBOOK.md) records what
+particular runs measured.
+
 Earlier phases established the package structure, a shared model interface and registry,
 an explicit LLaMA-style decoder-only model, a character tokenizer with train/validation
 splitting and causal LM batching, inference utilities, initialization-time output and
@@ -54,6 +65,10 @@ logbook records what particular runs measured.
 
 ## Repository structure
 
+A selected tree for orientation, not a full inventory: `analysis/`, `evaluation/` and
+`tests/` carry more modules than are listed here. See [`src/README.md`](src/README.md) and
+[`tests/README.md`](tests/README.md) for the maintained per-package detail.
+
 ```text
 IGB_LLMs/
   configs/
@@ -65,6 +80,8 @@ IGB_LLMs/
     model/
       tiny_llama.yaml
       tiny_llama_32k.yaml
+      llama_12x768.yaml
+      gpt2_12x768.yaml
     experiment/
       phase6_smoke.yaml
       untrained_baseline.yaml
@@ -85,6 +102,8 @@ IGB_LLMs/
     run_initialization_scale_experiment.py
     benchmark_position_gradients.py
     render_record_figures.py
+    write_nucleus_clustering_artifact.py
+    write_cross_partition_artifact.py
 
   docs/
     EXPERIMENT_LOG.md
@@ -156,6 +175,10 @@ IGB_LLMs/
         initialization_scale.py
         registry.py
         llama/
+          __init__.py
+          config.py
+          model.py
+        gpt/
           __init__.py
           config.py
           model.py
@@ -780,7 +803,7 @@ Successful output should include:
 
 ```text
 Smoke test completed successfully.
-Available registered models: ['llama', 'llama_tiny']
+Available registered models: ['gpt2', 'llama', 'llama_tiny']
 Selected model: llama_tiny
 Device: cpu
 Parameter count: 459392 (459.39K)
@@ -1189,12 +1212,20 @@ python3 scripts/run_initialization_scale_experiment.py \
   --model-config configs/model/tiny_llama_32k.yaml --offline --gradient-analysis
 ```
 
-`alpha` multiplies every audited zero-centred random weight; the deterministic RMSNorm
-gains are left alone and the architecture has no bias parameters. All three conditions
-share one draw, so signs and directions are identical and only magnitude differs, and
-`alpha = 1` is a literal no-op. **There is no single architecture-wide `sigma_w`** — the
-embedding is `normal_(0,1)` while every linear is `kaiming_uniform_(a=sqrt(5))` with a
-fan-in dependent scale — so standard deviations are reported per parameter group.
+`alpha` multiplies every audited zero-centred random weight and leaves deterministic
+parameters alone. **Which parameters are deterministic, and how the stochastic ones were
+drawn, is declared by the model family rather than assumed.** The LLaMA arms hold their
+RMSNorm gains fixed and have no bias parameters at all; the GPT-2 arm additionally holds
+its LayerNorm gains and its zero-initialized biases fixed. All three conditions share one
+draw, so signs and directions are identical and only magnitude differs, and `alpha = 1` is
+a literal no-op.
+
+**There is no single architecture-wide `sigma_w`**, so standard deviations are reported per
+parameter group. On the LLaMA arms, which use PyTorch defaults, the embedding is
+`normal_(0,1)` while every linear is `kaiming_uniform_(a=sqrt(5))` with a fan-in dependent
+scale. The GPT-2 arm instead initializes explicitly, `N(0, 0.02)` with residual projections
+at `0.02/sqrt(2 * n_layers)`. Each run records the note describing the initialization it
+actually realized.
 
 This is not the per-layer diagnostic in `evaluation/gradient_norms.py`, which
 differentiates the *window-averaged* loss with respect to block activations. See
@@ -1276,7 +1307,8 @@ Each run holds:
 ```text
 <run>/
   analyses/   complete per-token record (.npz) + scalar summary (.json)
-  figures/    four SVGs
+  figures/    one SVG per figure the record supports, routed into
+              main/, diagnostics/ and sanity_checks/
   config/     verbatim model/data/experiment snapshots
   metrics/    JSONL scalar metrics
   metadata.json
@@ -1363,9 +1395,23 @@ Two designs follow, and they answer different questions:
   geometry is held still. This is what figure 22 shows.
 - **matched temperature**, `Δ(T_s = T, T_g = T)` — grouping and geometry move together.
 
-Throughout: `D` = analyzed positions, `M` = measured loss temperatures, `K` = sketch width,
-`within`/`between` = pooled within- and between-class directional similarity, and
-`Δ = within − between`.
+Throughout: `D` = analyzed positions, `N_T` = number of measured loss temperatures,
+`K` = sketch width, `M` = number of independent CountSketch maps, `within`/`between` =
+pooled within- and between-class directional similarity, and `Δ = within − between`.
+
+`N_T` and `M` are deliberately separate letters. A loss temperature is a **different
+gradient field**; a map is a **second projection of the same gradient**.
+
+`M` counts **production** maps. The gradient estimator, the experiment runner, the
+benchmark, and the persisted records all currently operate at `M = 1`: one map is built, so
+the map axis appears in no record shape below, and `--sketch-maps` refuses any value above
+one.
+
+The fidelity methodology is the exception, and it is not a counter-example. Figure 23
+re-projects a deterministic handful of *retained exact* gradients through several
+independent alternate maps offline, to ask how much the reported error would move under a
+different draw. That is a diagnostic over stored gradients — it neither measures nor
+persists a production `M > 1` record, and its alternate maps never enter one.
 
 ### Measuring the gradient fields
 
@@ -1395,8 +1441,8 @@ temperature. The relevant runner flags:
   which the CLI overrides;
 - an explicitly empty grid is an error, and is not treated as "omitted".
 
-Cost scales with `D × M`. Storage is dominated by the sketch field: `[M, D, K]` in float32
-is about 470 MB at `M = 7`, `D = 32768`, `K = 512`.
+Cost scales with `D × N_T`. Storage is dominated by the sketch field: `[N_T, D, K]` in
+float32 is about 470 MB at `N_T = 7`, `D = 32768`, `K = 512`.
 
 ### Example: a full gradient-direction run
 
@@ -1459,9 +1505,9 @@ With `--gradient-sketch`, a record (version 11) carries:
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `gradient_temperatures` | `(M,)` | the measured loss temperatures, in measurement order |
-| `gradient_temperature_position_norms` | `(M, D)` | exact gradient norm per temperature and position |
-| `gradient_temperature_position_sketches` | `(M, D, K)` | CountSketch of each gradient, float32 |
+| `gradient_temperatures` | `(N_T,)` | the measured loss temperatures, in measurement order |
+| `gradient_temperature_position_norms` | `(N_T, D)` | exact gradient norm per temperature and position |
+| `gradient_temperature_position_sketches` | `(N_T, D, K)` | CountSketch of each gradient, float32 |
 | `gradient_position_norms` | `(D,)` | canonical `T_g = 1` norms |
 | `gradient_position_sketches` | `(D, K)` | canonical `T_g = 1` sketches |
 
@@ -1816,6 +1862,13 @@ The gradient diagnostic is still an initialization-time check only. Phase 7 will
 
 ## Next phases
 
+**Current priority, before Phase 7.** Two architecture families are implemented — the
+LLaMA-style arms (`tiny_llama_32k`, `llama_12x768`) and the GPT-2-style arm (`gpt2_12x768`)
+— and all three pass through the measurement pipeline end to end. What remains is
+scientific, not architectural: running and validating the cross-architecture gradient
+campaign so the CountSketch directional results can be compared across families on one
+fixed protocol. No such campaign has been run yet.
+
 Planned next steps:
 
 1. **Phase 7 — Pre-training loop**
@@ -1837,7 +1890,12 @@ Planned next steps:
    - checkpoint-based evaluation
    - comparison between pre-training and fine-tuning behavior
 
-4. **Phase 10 — Model extension phase**
-   - additional architectures
-   - Gemma-oriented variants
-   - cross-model behavior comparison
+4. **Phase 10 — Further architecture expansion** *(deferred, not currently planned)*
+   - a third architecture family beyond the implemented LLaMA and GPT-2 arms
+   - cross-model behavior comparison over more than two families
+
+   Candidates were surveyed and none is currently scheduled. A family whose native
+   vocabulary differs from the pinned 32,000-token tokenizer is the awkward case: adopting
+   its vocabulary abandons the fixed-tokenizer control, while forcing it onto this one
+   discards the property that made the family interesting. Any addition also has to be
+   implemented explicitly rather than imported as a pretrained-model class.

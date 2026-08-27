@@ -51,6 +51,11 @@ scripts/
   check_experiment_tracking.py
   prepare_dataset.py
   run_initialization_distribution_experiment.py
+  run_initialization_scale_experiment.py
+  benchmark_position_gradients.py
+  render_record_figures.py
+  write_nucleus_clustering_artifact.py
+  write_cross_partition_artifact.py
 ```
 
 | Script | Type | Phase / feature | Purpose |
@@ -62,6 +67,11 @@ scripts/
 | `check_experiment_tracking.py` | Smoke test | Phase 6 persistence | Creates a run, logs metrics/arrays, saves a checkpoint, restores it, and verifies parameter equality. |
 | `prepare_dataset.py` | Utility | Dataset resolution | Stages a dataset ahead of time, or reports what is missing without obtaining it. |
 | `run_initialization_distribution_experiment.py` | Experiment | Initialization distributions | Measures greedy and nucleus token guesses across several random initializations on fixed evaluation positions, then writes a record and figures. Supports both the character tokenizer and a pretrained subword tokenizer. |
+| `run_initialization_scale_experiment.py` | Experiment | Initialization scale | Repeats the whole pipeline at three initialization scales, writing one self-contained run per scale plus a parent manifest. |
+| `benchmark_position_gradients.py` | Benchmark | Per-position gradient cost | Times the exact per-position parameter-gradient measurement at several window counts. **Performance only: writes no record and draws no figure.** See the section below. |
+| `render_record_figures.py` | Analysis | Figure rendering | Redraws figures, and prints gradient statistics, from a persisted record. Imports no PyTorch. |
+| `write_nucleus_clustering_artifact.py` | Analysis | Nucleus-grouped gradients | Recovers a run's nucleus sample labels, gated on exact histogram equality, and clusters its gradients by them. Writes an artifact beside the record; never modifies it. |
+| `write_cross_partition_artifact.py` | Analysis | Cross-partition geometry | Derives the target-versus-greedy cross-partition statistics from a record by NumPy alone, including the permutation null. Writes an artifact beside the record; never modifies it. |
 
 ---
 
@@ -726,6 +736,85 @@ The script writes a complete run under `outputs/<experiment-name>/<run-id>/`. `o
 
 ---
 
+## `benchmark_position_gradients.py`
+
+### Purpose
+
+Times the exact per-position parameter-gradient measurement — one backward pass per
+evaluation position per loss temperature — so the cost of a gradient run can be measured
+before one is committed to.
+
+**It is performance-only.** It writes no experiment record, produces no figure, and creates
+no run directory. Nothing it prints is a scientific result, and no number from it belongs in
+a findings table.
+
+### Type
+
+Benchmark. Not a sanity check and not an experiment.
+
+### What it reports
+
+- wall time per window count, so scaling can be **checked** rather than assumed from a
+  single point — pass several values to `--window-counts`;
+- measured positions/s and backwards/s;
+- on CUDA, peak **allocated** and peak **reserved** device memory per row, from
+  `torch.cuda.max_memory_allocated` and `max_memory_reserved`;
+- process peak RSS, which is a high-water mark **over the whole benchmark** and therefore
+  cannot be attributed to any single row;
+- a confirmation that the model parameters were not modified;
+- a projected full-run cost, printed under an explicit label saying it was **not** measured.
+
+### Count-sketch options
+
+The sketch is off by default, which keeps older invocations comparable. The map tables are
+device-resident, so **the memory columns only describe a campaign configuration when
+`--gradient-sketch` is on**; without it the benchmark says so rather than letting the
+columns be misread.
+
+| Option | Meaning |
+|---|---|
+| `--gradient-sketch` | Also project every gradient through the production count sketch, as a scientific run does. |
+| `--sketch-dimension K` | Sketch width. Resolved exactly as the runner resolves it: this flag, then the experiment config's `gradient_analysis.sketch_dimension`, then the production default of 512. |
+| `--sketch-maps M` | Independent map replicas. **Only `M = 1` can be measured**, because the production estimator builds a single map; a larger value is refused rather than silently timed, and stays refused until multi-map support lands in the estimator itself. |
+| `--sketch-seed` | Seed for map construction. Benchmark-only — the runner has no such option and always uses the production default. Timing does not depend on it. |
+
+Device-resident map tables cost **5 bytes per parameter per map** (an `int32` bucket and an
+`int8` sign), and the benchmark derives that figure from the implementation's own dtypes
+rather than restating it, so the two cannot drift apart.
+
+### The narrow-vocabulary guard
+
+A tokenizer narrower than the model's output head is **refused by default**. Logits are
+truncated to the tokenizer vocabulary before the loss, so the output-layer gradient — the
+dominant cost — would be measured over only a fraction of the head, and the result would not
+be a production cost estimate. `--allow-narrow-vocabulary` permits it anyway, which the
+legacy tiny-character pairing needs; passing it is an acknowledgement of what is being
+measured.
+
+### Command
+
+```bash
+python3 scripts/benchmark_position_gradients.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml --offline \
+  --window-counts 1 2 4 8
+```
+
+With the sketch enabled, which is what a campaign configuration actually costs:
+
+```bash
+python3 scripts/benchmark_position_gradients.py \
+  --data-config configs/data/wikitext2_subword.yaml \
+  --model-config configs/model/tiny_llama_32k.yaml --offline \
+  --window-counts 1 2 4 \
+  --gradient-sketch --sketch-dimension 512 --sketch-maps 1
+```
+
+Pass `--temperatures 1.0` alone to time the canonical baseline for a like-for-like
+comparison against older measurements.
+
+---
+
 ## Dataset options shared by data-consuming scripts
 
 `check_data_pipeline.py`, `run_inference.py`, `analyze_untrained_model.py`,
@@ -833,7 +922,7 @@ The reusable implementation lives in:
 
 | Package area | Role |
 |---|---|
-| `src/llm_behavior_lab/models/` | Model interface, registry, and LLaMA-style implementation. |
+| `src/llm_behavior_lab/models/` | Model interface, registry, and two explicit decoder implementations: LLaMA-style and GPT-2-style. |
 | `src/llm_behavior_lab/data/` | Local text loading, tokenization, splitting, and causal LM batching. |
 | `src/llm_behavior_lab/inference/` | Prompt preparation, logits extraction, probabilities, decoding, and generation. |
 | `src/llm_behavior_lab/evaluation/` | Output statistics, token-frequency comparison, untrained analysis, and gradient norms. |
