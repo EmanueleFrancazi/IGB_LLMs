@@ -174,14 +174,20 @@ class PositionGradientResult:
     #: Scalars of the canonical-temperature correct-vs-wrong vector split, or
     #: ``None`` when the diagnostic was not requested.
     vector_split: dict[str, Any] | None = None
-    #: ``[D_g, K]`` count sketch of each position's canonical gradient, or
-    #: ``None`` when sketching was not requested. Always the canonical row of
-    #: ``temperature_gradient_sketches`` rather than a separately measured
-    #: quantity, so the two cannot disagree.
+    #: ``[D_g, K]`` at ``M = 1`` and ``[D_g, M, K]`` above it: the count sketch of
+    #: each position's canonical gradient, or ``None`` when sketching was not
+    #: requested. Always the canonical row of ``temperature_gradient_sketches``
+    #: rather than a separately measured quantity, so the two cannot disagree.
+    #:
+    #: The rank is conditional; **the map count is not read from it**. It is
+    #: ``sketch_protocol["map_count"]``, which is written at every ``M`` including
+    #: one. Inferring ``M`` from rank or width would misread any future array that
+    #: happens to gain an axis for another reason.
     gradient_sketches: torch.Tensor | None = None
 
-    #: ``[N_T, D_g, K]`` count sketch of every position's gradient at every
-    #: measured loss temperature, or ``None`` when sketching was not requested.
+    #: ``[N_T, D_g, K]`` at ``M = 1``, ``[N_T, D_g, M, K]`` above it: the count
+    #: sketch of every position's gradient at every measured loss temperature, or
+    #: ``None`` when sketching was not requested.
     #:
     #: Direction, unlike magnitude, is not recoverable from a scalar, so a
     #: directional analysis at ``T_g != 1`` needs its own projection. Each row is
@@ -205,6 +211,12 @@ class PositionGradientResult:
     #: The production sketch map as ``(buckets, signs)`` NumPy vectors, so the
     #: offline fidelity analysis projects with the map the run actually used
     #: rather than re-deriving one from a different RNG.
+    #:
+    #: **Map 0, always**, in its historical ``int64``/``float64`` form, whatever
+    #: ``M`` was. No all-map table export exists: the ordered ``map_seeds`` in
+    #: ``sketch_protocol`` plus the deterministic construction identify the whole
+    #: bank, and exporting ``M`` full-length table pairs would add ``M`` times the
+    #: largest arrays in the result for information already recorded.
     sketch_map: tuple[Any, Any] | None = None
     #: Parameter element counts in order, so an offline analysis can rebuild
     #: another realization of the same production construction.
@@ -310,6 +322,51 @@ _SKETCH_MAP_SEED_STRIDE = 1_000_000_007
 #: with an explanation instead of overflowing into an unrelated stream.
 _MIN_GENERATOR_SEED = -(2**63)
 _MAX_GENERATOR_SEED = 2**64 - 1
+
+
+#: Identifies how ``map_seeds`` were derived, so a stored bank can be checked
+#: rather than trusted. The rule name says which arithmetic produced them; the
+#: version is bumped only if that arithmetic ever changes, which would make every
+#: map but the zeroth a different projection.
+_SKETCH_SEED_DERIVATION = "base_seed + 1000000007 * map_index"
+_SKETCH_SEED_DERIVATION_VERSION = 1
+
+
+def _validated_map_count(map_count: Any, *, name: str) -> int:
+    """Return ``map_count`` as a positive ``int``, or explain why it is not.
+
+    One definition shared by :class:`_GradientSketcher` and
+    :func:`compute_position_gradient_norms`, so the two cannot drift into
+    disagreeing about what a legal map count is -- which would let a value the
+    measurement accepts reach a sketcher that rejects it, or worse, the reverse.
+
+    ``bool`` is refused explicitly: ``True == 1`` in Python, so ``map_count=True``
+    would otherwise pass as a single map and read as if someone had asked a
+    yes/no question and got a count.
+
+    Args:
+        map_count: The candidate value.
+        name: The caller's parameter name, so the message names what the caller
+            actually passed rather than an internal spelling.
+
+    Returns:
+        The value as an ``int``.
+
+    Raises:
+        ValueError: If it is boolean, non-integral, or below one.
+    """
+
+    try:
+        count = int(map_count)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be an integer of at least one; got {map_count!r}."
+        ) from None
+    if isinstance(map_count, bool) or count != map_count or count < 1:
+        raise ValueError(
+            f"{name} must be an integer of at least one; got {map_count!r}."
+        )
+    return count
 
 
 def _production_sketch_map_seed(base_seed: int, map_index: int) -> int:
@@ -421,16 +478,7 @@ class _GradientSketcher:
     ) -> None:
         if dimension < 1:
             raise ValueError(f"sketch dimension must be positive; got {dimension}.")
-        try:
-            count = int(map_count)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"map_count must be an integer of at least one; got {map_count!r}."
-            ) from None
-        if isinstance(map_count, bool) or count != map_count or count < 1:
-            raise ValueError(
-                f"map_count must be an integer of at least one; got {map_count!r}."
-            )
+        count = _validated_map_count(map_count, name="map_count")
         # Materialized before anything consumes it. The annotation says
         # Sequence, but a caller handing over a generator would otherwise have it
         # exhausted by tensor_sizes below and leave every table list EMPTY --
@@ -853,6 +901,7 @@ def compute_position_gradient_norms(
     sketch_dimension: int = DEFAULT_SKETCH_DIMENSION,
     sketch_seed: int = 20240917,
     progress: Callable[[int, int], None] | None = None,
+    sketch_maps: int = 1,
 ) -> PositionGradientResult:
     """Measure ``g_d`` exactly, one evaluation position at a time.
 
@@ -890,11 +939,30 @@ def compute_position_gradient_norms(
         sketch_dimension: Width ``K`` of that sketch.
         sketch_seed: Seed of the projection. Fixed across runs so two
             experiments produce comparable sketches; drawn from its own
-            generator, never the global RNG.
+            generator, never the global RNG. This is the **base** seed: map 0
+            uses it unchanged, so a single-map run is unaffected by the replica
+            schedule existing.
         progress: Optional ``callback(windows_done, windows_total)``.
+        sketch_maps: Number of independent production CountSketch maps ``M``.
+            One by default, which is what every existing caller gets and what
+            the runner still asks for. Above one, each position's gradient is
+            projected through every map -- from the **same** ``autograd.grad``
+            result, so the backward-pass count does not change -- and the sketch
+            arrays gain a replica axis. Requires ``gradient_sketch``.
 
     Returns:
         A :class:`PositionGradientResult` with one entry per evaluated position.
+
+        The sketch arrays are rank-conditional, and deliberately so. At ``M = 1``
+        they keep their historical shapes exactly -- ``[N_T, D_g, K]`` and
+        ``[D_g, K]`` -- with no length-one replica axis to squeeze, so nothing
+        downstream sees a change. At ``M > 1`` they become ``[N_T, D_g, M, K]``
+        and ``[D_g, M, K]``. **Read the map count from
+        ``sketch_protocol["map_count"]``, never from the array's rank or width.**
+
+    Raises:
+        ValueError: If ``sketch_maps`` is not a positive integer, or exceeds one
+            while ``gradient_sketch`` is off.
     """
 
     if window_indices is None:
@@ -948,17 +1016,42 @@ def compute_position_gradient_norms(
         else set()
     )
     captured: dict[int, torch.Tensor] = {}
+    map_count = _validated_map_count(sketch_maps, name="sketch_maps")
+    if map_count != 1 and not gradient_sketch:
+        # Refused rather than ignored. Silently measuring one map after being
+        # asked for four would make the resulting record claim a replica budget
+        # it never had, and the error would only surface as a missing axis much
+        # further downstream.
+        raise ValueError(
+            f"sketch_maps={map_count} was requested but gradient_sketch is off, "
+            "so no map would be built at all. Enable gradient_sketch or leave "
+            "sketch_maps at 1."
+        )
     sketcher = (
-        _GradientSketcher(parameters, dimension=sketch_dimension, seed=sketch_seed)
+        _GradientSketcher(
+            parameters,
+            dimension=sketch_dimension,
+            seed=sketch_seed,
+            map_count=map_count,
+        )
         if gradient_sketch
         else None
     )
     # One tensor for every temperature. The canonical row is taken from it at
     # the end rather than accumulated separately, so no second T = 1 gradient
     # field can drift away from this one.
+    #
+    # The replica axis is present only when there are replicas: at M = 1 the
+    # shape is exactly what it has always been, rather than a [.., 1, K] block
+    # that would have to be squeezed on the way out. A squeeze is one more place
+    # for a stray axis to reach a record, and the M = 1 arrays are the ones every
+    # existing consumer and the frozen fixture depend on.
     temperature_sketches = (
         torch.empty(
-            (len(grid), total_positions, sketch_dimension), dtype=torch.float32
+            (len(grid), total_positions, sketch_dimension)
+            if map_count == 1
+            else (len(grid), total_positions, map_count, sketch_dimension),
+            dtype=torch.float32,
         )
         if gradient_sketch
         else None
@@ -1025,8 +1118,16 @@ def compute_position_gradient_norms(
                         # Same gradient set the norm came from, at this very
                         # temperature; no second backward pass and nothing
                         # full-sized is retained.
+                        #
+                        # The single-map branch calls the historical `project`
+                        # directly rather than `project_maps(grads)[0]`. The two
+                        # give the same numbers, but routing M = 1 through the
+                        # replica path would put a stack-and-index between the
+                        # established observable and its own code, for nothing.
                         temperature_sketches[index, cursor] = (
                             sketcher.project(grads).cpu()
+                            if map_count == 1
+                            else sketcher.project_maps(grads).cpu()
                         )
                     if (
                         wanted
@@ -1094,12 +1195,29 @@ def compute_position_gradient_norms(
             None
             if sketcher is None
             else {
+                # Every key below this line predates replicas and keeps its
+                # exact meaning. `seed` in particular is the historical
+                # production base seed and is not renamed: artifacts and readers
+                # already refer to it by that name.
                 "dimension": sketcher.dimension,
                 "seed": sketcher.seed,
                 "temperature": CANONICAL_GRADIENT_TEMPERATURE,
                 "projection": "count_sketch_signed_feature_hashing",
                 "preserves": "inner_products_in_expectation",
                 "parameter_count": sum(p.numel() for p in parameters),
+                # Additive, and written at M = 1 too. Single-map operation was
+                # previously knowable only from the source that produced the
+                # artifact; recording it closes that provenance gap for every
+                # newly written record, and gives downstream code an explicit
+                # count to branch on instead of an array's rank.
+                "map_count": sketcher.map_count,
+                "base_seed": sketcher.seed,
+                # Read off the bank the sketcher actually built, not recomputed
+                # from the formula here -- a duplicated derivation is exactly how
+                # recorded seeds and real seeds drift apart.
+                "map_seeds": [int(value) for value in sketcher._map_seeds],
+                "seed_derivation": _SKETCH_SEED_DERIVATION,
+                "seed_derivation_version": _SKETCH_SEED_DERIVATION_VERSION,
             }
         ),
         parameter_count=sum(parameter.numel() for parameter in parameters),
