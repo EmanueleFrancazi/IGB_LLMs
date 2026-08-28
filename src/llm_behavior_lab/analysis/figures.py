@@ -2994,6 +2994,20 @@ def _population_annotation(
     # ensemble mean across maps. Same precision as the centres, so a spread
     # small enough to vanish at this precision is visibly small rather than
     # silently dropped.
+    #
+    # The permutation count is spelled out here, and **only** here.
+    #
+    # The single-map branch above writes it as `(M = n)`, which was unambiguous
+    # while `M` appeared once in the annotation. It is not unambiguous now: this
+    # branch adds a `maps M=` line two lines below, so one block would show `M`
+    # meaning permutation draws and `M` meaning CountSketch maps. The project
+    # reserves `M` for the map count -- `D` positions, `N_T` loss temperatures,
+    # `K` sketch width, `M` maps -- and the same collision was already corrected
+    # once in the tracked README.
+    #
+    # The historical branch keeps `(M = n)` deliberately: its text is the
+    # reference every existing figure was produced against, no `maps M=` line
+    # can appear beside it, and there is nothing there to be ambiguous with.
     maps = spread["delta"]["map_count"]
     return (
         f"All positions (D = {population['num_positions']:,})\n"
@@ -3002,7 +3016,7 @@ def _population_annotation(
         f" | between {population['between']:+.5f}"
         f" +/- {spread['between']['standard_error']:.5f}\n"
         f"Permutation null 95%: [{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
-        f"  (M = {null['permutations']})\n"
+        f"  (permutations = {null['permutations']})\n"
         f"maps M={maps}, df={maps - 1}; +/- is the standard error across maps"
     )
 

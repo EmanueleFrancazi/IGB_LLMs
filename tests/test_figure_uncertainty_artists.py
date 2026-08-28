@@ -124,16 +124,51 @@ def _capture(monkeypatch):
 
 # -- Figure 20: annotation only ------------------------------------------------
 
+#: The single-map annotation exactly as committed, for the frozen ``_record(1)``
+#: fixture above. Pinned as a literal rather than rebuilt from the result,
+#: because "the historical text" is a claim about *bytes*: a format change and a
+#: numerics change are both regressions here, and rebuilding the expected string
+#: from the same values would only ever catch the first.
+#:
+#: If this fails, decide which moved before touching it. The wording is the
+#: reference every existing figure 20 was produced against; the numbers are the
+#: clustering result on a seeded fixture.
+HISTORICAL_SINGLE_MAP_ANNOTATION = (
+    "All positions (D = 12)\n"
+    "delta = +0.19590\n"
+    "within +0.09911 | between -0.09679\n"
+    "Permutation null 95%: [-0.12923, +0.11731]  (M = 8)"
+)
+
+
+def _multi_map_spread(record, *, permutations=8):
+    """The spread block figure 20 is handed at ``M > 1``."""
+
+    per_map = gc.gradient_clustering_per_map(record, permutations=permutations)
+    return {
+        name: {**per_map[name], "map_count": per_map["map_count"]}
+        for name in ("within", "between", "delta")
+    }
+
 
 def test_the_single_map_annotation_is_the_historical_text() -> None:
-    """No 'unavailable', no NaN, no zero spread -- exactly what it always said."""
+    """Byte for byte. No 'unavailable', no NaN, no zero spread.
+
+    The single-map branch deliberately keeps ``(M = n)`` for the permutation
+    count. Disambiguating it was a change to the *multi-map* branch only,
+    because that is the only branch where a second meaning of ``M`` can appear
+    beside it -- and rewording this one would invalidate the comparison every
+    already-produced figure rests on.
+    """
 
     result = gc.gradient_clustering(_record(1), permutations=8)
     text = figures._population_annotation(result)
 
+    assert text == HISTORICAL_SINGLE_MAP_ANNOTATION
     assert "+/-" not in text
     assert "df=" not in text
     assert "maps M=" not in text
+    assert "permutations = " not in text
     assert text.startswith("All positions (D = ")
     assert text.count("\n") == 3
 
@@ -141,22 +176,103 @@ def test_the_single_map_annotation_is_the_historical_text() -> None:
 def test_the_multi_map_annotation_carries_centres_and_standard_errors() -> None:
     record = _record(4)
     result = gc.gradient_clustering(record, permutations=8)
-    per_map = gc.gradient_clustering_per_map(record, permutations=8)
-    spread = {
-        name: {**per_map[name], "map_count": per_map["map_count"]}
-        for name in ("within", "between", "delta")
-    }
+    spread = _multi_map_spread(record)
 
     text = figures._population_annotation(result, spread)
 
     # Centres are the ensemble values, unchanged.
     assert f"delta = {result['population']['delta']:+.5f}" in text
     assert f"within {result['population']['within']:+.5f}" in text
+    assert f"between {result['population']['between']:+.5f}" in text
     # Each carries its own standard error.
     for name in ("delta", "within", "between"):
         assert f"+/- {spread[name]['standard_error']:.5f}" in text
     assert "maps M=4, df=3" in text
     assert "standard error across maps" in text
+
+
+def test_the_multi_map_annotation_names_the_permutation_count_explicitly() -> None:
+    """The two counts in this block must not both be spelled ``M``.
+
+    At ``M > 1`` the annotation carries a permutation count and a CountSketch
+    map count two lines apart. Writing both as ``M`` put two meanings on one
+    symbol, against the project's own convention -- ``D`` positions, ``N_T``
+    loss temperatures, ``K`` sketch width, ``M`` maps -- and the reader has no
+    way to tell which is which from the text.
+    """
+
+    record = _record(4)
+    result = gc.gradient_clustering(record, permutations=8)
+    text = figures._population_annotation(result, _multi_map_spread(record))
+
+    # The permutation count, named.
+    assert "(permutations = 8)" in text
+    # The map count and its degrees of freedom, still separate and still there.
+    assert "maps M=4" in text
+    assert "df=3" in text
+    # And the ambiguous label is gone from this branch.
+    assert "(M = 8)" not in text
+    assert "(M = " not in text
+
+
+def test_the_relabel_changed_no_number_in_the_multi_map_annotation() -> None:
+    """Only the label moved. Every quantity beside it is what it was.
+
+    Asserted against independently computed values rather than a copy of the
+    string, so a relabel that also perturbed rounding, ordering or a statistic
+    would fail here rather than pass on the label alone.
+    """
+
+    record = _record(4)
+    result = gc.gradient_clustering(record, permutations=8)
+    per_map = gc.gradient_clustering_per_map(record, permutations=8)
+    spread = _multi_map_spread(record)
+    text = figures._population_annotation(result, spread)
+
+    population, null = result["population"], result["null"]
+
+    # Centres, at the historical .5f precision.
+    assert f"All positions (D = {population['num_positions']:,})" in text
+    assert f"delta = {population['delta']:+.5f}" in text
+    assert f"within {population['within']:+.5f}" in text
+    assert f"between {population['between']:+.5f}" in text
+    # Standard errors, each SD/sqrt(M) of its own statistic.
+    for name in ("delta", "within", "between"):
+        assert spread[name]["standard_error"] == pytest.approx(
+            spread[name]["sample_sd"] / np.sqrt(4.0)
+        )
+        assert f"+/- {spread[name]['standard_error']:.5f}" in text
+    # Permutation null bounds and count.
+    assert (
+        f"Permutation null 95%: [{null['delta_low']:+.5f}, {null['delta_high']:+.5f}]"
+        in text
+    )
+    assert null["permutations"] == 8
+    # Map count and degrees of freedom.
+    assert per_map["map_count"] == 4
+    assert spread["delta"]["degrees_of_freedom"] == 3
+    # Line count is unchanged: four lines at M = 1, five at M > 1.
+    assert text.count("\n") == 4
+
+
+def test_only_figure_twenty_uses_the_population_annotation() -> None:
+    """So the relabel cannot have leaked into another figure.
+
+    Figures 22, 23 and 24 build their own text. A single production call site
+    is what makes "this changed figure 20 and nothing else" checkable rather
+    than merely intended.
+    """
+
+    import inspect
+
+    source = inspect.getsource(figures)
+    calls = [
+        line.strip()
+        for line in source.splitlines()
+        if "_population_annotation(" in line and not line.strip().startswith("def ")
+    ]
+
+    assert len(calls) == 1, calls
 
 
 def test_figure_twenty_gains_no_axes_or_error_bars(tmp_path, monkeypatch) -> None:
