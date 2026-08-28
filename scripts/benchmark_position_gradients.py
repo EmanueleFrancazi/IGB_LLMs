@@ -42,18 +42,25 @@ which have one entry per parameter regardless of how many buckets those entries
 point into. So doubling ``K`` costs host storage, while adding a map replica
 costs device memory.
 
-Only ``M = 1`` can be benchmarked. The production estimator builds a single map
--- :func:`~llm_behavior_lab.evaluation.position_gradients.compute_position_gradient_norms`
-takes ``sketch_dimension`` and ``sketch_seed`` and has no replica count -- so a
-larger ``M`` is projected, not measured:
+``M > 1`` is now **measured rather than projected**. ``--sketch-maps`` is passed
+straight through to
+:func:`~llm_behavior_lab.evaluation.position_gradients.compute_position_gradient_norms`,
+which builds the full bank and projects every gradient through all of it from one
+backward pass, so the CUDA columns include whatever the replicas really cost --
+tables and transients alike. The analytical figures printed beside them,
 
 .. code-block:: text
 
-    projected_M_peak  ~=  measured_M1_peak + (M - 1) * 5 * P bytes
+    total device map tables       =  M * 5 * P bytes
+    incremental against M = 1     =  (M - 1) * 5 * P bytes
 
-plus whatever replica-dependent transient the implementation turns out to add.
-That projection is a first-order estimate anchored on a real measurement; the
-fully analytical figure remains a cross-check, not a substitute for it.
+are a **cross-check on the measurement, not a substitute for it**: they account
+for the persistent tables only and say nothing about construction transients.
+Where an earlier revision of this file projected the ``M > 1`` peak, read the
+measured row instead.
+
+None of this makes benchmark output scientific evidence. It is timing and memory
+for a configuration; it writes no record and answers no research question.
 """
 
 from __future__ import annotations
@@ -96,6 +103,7 @@ from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
 # device dtypes stay private because they are an implementation choice.
 from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
     _SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER,
+    _validated_map_count,
 )
 from llm_behavior_lab.models import build_model_from_config  # noqa: E402
 from llm_behavior_lab.utils import get_device, load_yaml_config, seed_everything  # noqa: E402
@@ -205,11 +213,19 @@ def parse_args() -> argparse.Namespace:
     sketch.add_argument(
         "--sketch-maps",
         type=int,
-        default=1,
+        # None, not 1, for the same reason as --sketch-dimension above: only
+        # ``is None`` can tell "not asked for" from "asked for explicitly", and
+        # an explicit --sketch-maps 0 must be refused rather than silently
+        # replaced by the default.
+        default=None,
         metavar="M",
         help=(
-            "Independent map replicas. Only 1 can be measured: the production "
-            "estimator builds a single map. Larger M is projected, not timed."
+            "Independent map replicas M, measured rather than projected. Every "
+            "map projects the same gradient from one backward pass, so timing "
+            "moves only by the projection work; the device-resident map tables "
+            f"grow by {_SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER} bytes per "
+            "parameter per map. Requires --gradient-sketch above 1. Defaults to "
+            "1, which is the historical measurement."
         ),
     )
     sketch.add_argument(
@@ -251,13 +267,19 @@ def _resolve_sketch(args: argparse.Namespace, experiment_config: dict) -> dict:
         enabled : --gradient-sketch  OR  gradient_analysis.sketch
         K       : --sketch-dimension  >  gradient_analysis.sketch_dimension  >  default
         seed    : --sketch-seed       >  production default
-        M       : --sketch-maps, and it must be 1
+        M       : --sketch-maps       >  gradient_analysis.sketch_maps       >  1
+
+    ``M`` reads the experiment config for the same reason ``K`` does. This script
+    exists to report what a campaign configuration costs, and the map tables are
+    device resident -- so a config that asks for four maps must not be timed at
+    one here, which would understate device memory by exactly the quantity the
+    benchmark was run to find.
 
     Raises:
-        ValueError: If ``M != 1``, or if ``K`` is not positive. ``M > 1`` is a
-            selected but unimplemented design; the benchmark refuses to pretend
-            it measured one rather than silently timing a single map under a
-            label that says four.
+        ValueError: If ``K`` is not positive, if ``M`` is not an integer of at
+            least one, or if ``M > 1`` is requested with the sketch off -- in
+            which case no map would be built at all and the measurement would
+            silently be of something else.
     """
 
     gradients = experiment_config.get("gradient_analysis", {}) or {}
@@ -271,19 +293,23 @@ def _resolve_sketch(args: argparse.Namespace, experiment_config: dict) -> dict:
         else gradients.get("sketch_dimension", DEFAULT_SKETCH_DIMENSION)
     )
     seed = int(args.sketch_seed if args.sketch_seed is not None else DEFAULT_SKETCH_SEED)
-    maps = int(args.sketch_maps)
+    # The estimator's own rule, not a second opinion about it, so this parser
+    # cannot accept a count the measurement below would refuse.
+    maps = _validated_map_count(
+        args.sketch_maps
+        if args.sketch_maps is not None
+        else gradients.get("sketch_maps", 1),
+        name="--sketch-maps",
+    )
 
     if dimension < 1:
         raise ValueError(f"--sketch-dimension must be positive; got {dimension}.")
-    if maps != 1:
+    if maps != 1 and not enabled:
         raise ValueError(
-            f"--sketch-maps must be 1; got {maps}. The production estimator "
-            "constructs a single count sketch -- compute_position_gradient_norms "
-            "takes sketch_dimension and sketch_seed and has no replica count -- "
-            "so M > 1 cannot be timed without first implementing it, which this "
-            "benchmark deliberately does not do. Project it instead: each "
-            f"replica adds {_SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER} bytes per parameter "
-            "of device-resident map tables on top of the measured M = 1 peak."
+            f"--sketch-maps {maps} was requested but the count sketch is off, so "
+            "no map would be built and the memory columns would describe a "
+            "single-map run under a label that says "
+            f"{maps}. Pass --gradient-sketch, or leave --sketch-maps at 1."
         )
 
     return {"enabled": enabled, "dimension": dimension, "maps": maps, "seed": seed}
@@ -383,6 +409,12 @@ def main() -> None:
     model_config = load_yaml_config(args.model_config)
     experiment_config = load_yaml_config(args.experiment_config)
 
+    # Resolved here rather than beside its first use further down. An
+    # unusable count -- zero maps, or replicas with the sketch off -- is a
+    # command-line mistake, and the run should end on it before the dataset is
+    # resolved, the tokenizer built and the corpus encoded, not after.
+    sketch = _resolve_sketch(args, experiment_config)
+
     temperatures = tuple(args.temperatures) if args.temperatures else GRADIENT_TEMPERATURES
     window_counts = sorted(set(int(value) for value in args.window_counts))
     if not window_counts or window_counts[0] <= 0:
@@ -434,7 +466,6 @@ def main() -> None:
         device=device,
     )
 
-    sketch = _resolve_sketch(args, experiment_config)
     vocabulary_warning = _check_vocabulary_match(
         tokenizer,
         model_config["model"]["params"],
@@ -463,7 +494,13 @@ def main() -> None:
         "forward graph per window."
     )
     if sketch["enabled"]:
-        map_bytes = _SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER * parameter_count
+        # Per map, per parameter. Total is what the run holds; incremental is
+        # what the replicas cost against the single-map configuration every
+        # earlier measurement was taken at, which is the number a memory gate is
+        # actually read against.
+        per_map_bytes = _SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER * parameter_count
+        map_bytes = sketch["maps"] * per_map_bytes
+        incremental_bytes = (sketch["maps"] - 1) * per_map_bytes
         print(
             f"Count sketch: ON  K = {sketch['dimension']}, M = {sketch['maps']}, "
             f"seed {sketch['seed']}"
@@ -473,6 +510,11 @@ def main() -> None:
             f"x {parameter_count:,} "
             f"parameters = {map_bytes / (1024 ** 2):,.1f} MiB, included in the "
             "CUDA columns below"
+        )
+        print(
+            f"  incremental against M = 1: {incremental_bytes / (1024 ** 2):,.1f} MiB "
+            "of persistent tables. Analytical: it counts the tables only, and the "
+            "measured columns below are what actually happened."
         )
     else:
         print(
@@ -510,6 +552,7 @@ def main() -> None:
             gradient_sketch=sketch["enabled"],
             sketch_dimension=sketch["dimension"],
             sketch_seed=sketch["seed"],
+            sketch_maps=sketch["maps"],
         )
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -517,7 +560,20 @@ def main() -> None:
             # Asserted rather than assumed: the map tables are built inside this
             # call, so a wrong shape here would mean the peaks above described
             # something other than the requested configuration.
-            expected = (len(temperatures), result.num_positions, sketch["dimension"])
+            #
+            # The replica axis is present only above one map, matching the
+            # estimator's rank-conditional contract exactly. Writing the M = 1
+            # shape as [.., 1, K] here would pass for the wrong reason.
+            expected = (
+                (len(temperatures), result.num_positions, sketch["dimension"])
+                if sketch["maps"] == 1
+                else (
+                    len(temperatures),
+                    result.num_positions,
+                    sketch["maps"],
+                    sketch["dimension"],
+                )
+            )
             if tuple(result.temperature_gradient_sketches.shape) != expected:
                 raise RuntimeError(
                     "Sketch shape "

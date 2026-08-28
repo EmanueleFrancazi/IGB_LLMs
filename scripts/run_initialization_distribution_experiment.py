@@ -41,6 +41,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from llm_behavior_lab.analysis import (  # noqa: E402
     DEFAULT_NULL_REPLICATES,
+    RECORD_VERSION,
     InitializationExperimentRecord,
     simulate_uniform_null,
     sampling_adequacy,
@@ -86,6 +87,17 @@ from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
     GRADIENT_TEMPERATURES,
     DEFAULT_SKETCH_DIMENSION,
     compute_position_gradient_norms,
+)
+
+# Deliberately reaching for a private helper, the same way the benchmark reaches
+# for the private device-bytes constant. What counts as a legal map count is the
+# measurement's rule, and the CLI exists to refuse the illegal ones *early*
+# rather than to invent a second opinion about them: a value this parser accepted
+# and the estimator then rejected would fail hours into a run, and a value the
+# parser rejected and the estimator would have accepted is a CLI that cannot
+# reach its own measurement.
+from llm_behavior_lab.evaluation.position_gradients import (  # noqa: E402
+    _validated_map_count,
 )
 from llm_behavior_lab.experiment import ExperimentRun, experiment_settings_from_config  # noqa: E402
 from llm_behavior_lab.experiment.naming import compose_run_id  # noqa: E402
@@ -266,6 +278,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sketch-maps",
+        type=int,
+        # None for the same reason as --sketch-dimension above: the resolution
+        # must be able to tell "not asked for" from "asked for explicitly".
+        default=None,
+        metavar="M",
+        help=(
+            "Number of independent CountSketch maps M to project every gradient "
+            "through. Omitted, the experiment config's "
+            "gradient_analysis.sketch_maps applies, then the default (1), which "
+            "is exactly the historical single-map measurement. Above one, each "
+            "gradient is projected through every map from the SAME backward "
+            "pass, so the backward-pass count does not change, and the persisted "
+            "sketch arrays gain a replica axis. Requires --gradient-sketch. Each "
+            "extra map costs device-resident map tables and widens the record."
+        ),
+    )
+    parser.add_argument(
         "--gradient-temperatures",
         type=float,
         nargs="+",
@@ -401,6 +431,75 @@ def _resolve_sketch_dimension(
     return dimension
 
 
+def _resolve_sketch_maps(args: argparse.Namespace, gradients: dict[str, Any]) -> int:
+    """Resolve the map count ``M``: command line, then config, then the default.
+
+    Same shape as :func:`_resolve_sketch_dimension`, and ``None``-based for the
+    same reason: only ``is None`` distinguishes "not asked for" from "asked for
+    explicitly", and truthiness cannot -- an explicit ``--sketch-maps 0`` is
+    falsy and an ``or`` chain would silently hand back a single map instead of
+    refusing a count nobody can measure.
+
+    The default is 1, so a command line that says nothing about maps measures
+    exactly what it always did, and ``--sketch-maps 1`` is indistinguishable
+    from omitting the flag.
+
+    Validation is the measurement's own, via ``_validated_map_count``, so the
+    CLI cannot accept a value the estimator would refuse or refuse one it would
+    accept. **The count is never inferred** -- not from the sketch width, not
+    from an array's rank.
+
+    Raises:
+        ValueError: If the resolved count is boolean, non-integral, or below one.
+    """
+
+    requested = getattr(args, "sketch_maps", None)
+    return _validated_map_count(
+        requested if requested is not None else gradients.get("sketch_maps", 1),
+        name="--sketch-maps",
+    )
+
+
+def _validate_sketch_map_request(protocol: dict[str, Any]) -> None:
+    """Refuse a map count the rest of the run cannot honour, before it starts.
+
+    Both refusals below would eventually happen anyway -- the estimator raises on
+    the first, and the Stage 8b2-c writer guard raises on the second -- but they
+    would happen *after* the dataset, the tokenizer, the model and, in the second
+    case, the entire gradient measurement. At campaign scale that is hours spent
+    reaching a guaranteed failure, so they are hoisted to argument resolution,
+    which runs before anything is loaded or built. The downstream guards stay
+    exactly where they are: this is the early exit, not a replacement for them.
+    """
+
+    map_count = protocol["sketch_maps"]
+    if map_count == 1:
+        return
+
+    if not protocol["gradient_sketch"]:
+        raise ValueError(
+            f"--sketch-maps {map_count} was requested but the gradient sketch is "
+            "off, so no map would be built at all. Pass --gradient-sketch (or set "
+            "gradient_analysis.sketch in the experiment config), or leave "
+            "--sketch-maps at 1."
+        )
+
+    if protocol["countsketch_fidelity_sanity"]:
+        raise ValueError(
+            f"--sketch-maps {map_count} cannot be combined with "
+            "--countsketch-fidelity-sanity.\n"
+            "Production replicas themselves are supported; what is not is this "
+            "diagnostic's reconstruction, which is map-0 only and assumes "
+            "two-dimensional [positions, K] sketches. A multi-map measurement "
+            "produces [positions, M, K], so every line of it would be wrong.\n"
+            "This says nothing about the offline alternate-map fidelity "
+            "methodology, which re-projects retained exact gradients through "
+            "independent maps and remains valid and unaffected.\n"
+            "Re-run the fidelity sanity check with --sketch-maps 1, and measure "
+            "the replicas in a separate run."
+        )
+
+
 def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     """Merge the experiment config with command-line overrides."""
 
@@ -413,7 +512,7 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
     structure = experiment_config.get("input_structure", {})
     gradients = experiment_config.get("gradient_analysis", {})
 
-    return {
+    protocol = {
         "num_initializations": int(
             args.num_initializations
             if args.num_initializations is not None
@@ -469,6 +568,10 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             or bool(getattr(args, "gradient_sketch", False))
         ),
         "sketch_dimension": _resolve_sketch_dimension(args, gradients),
+        # Beside the width, resolved the same way, and carried at every M
+        # including 1 -- a run that measured one map should say so explicitly
+        # rather than leave it to be inferred from an array's shape.
+        "sketch_maps": _resolve_sketch_maps(args, gradients),
         "gradient_vector_split": (
             bool(gradients.get("vector_split", False))
             or bool(getattr(args, "gradient_vector_split", False))
@@ -496,6 +599,12 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
             gradients.get("temperatures"),
         ),
     }
+    # Cross-option checks belong here rather than in main(): every caller that
+    # resolves a protocol -- the runner, and the tests that resolve one directly
+    # -- gets the same refusal, and main() reaches this before it loads a dataset
+    # or builds a model.
+    _validate_sketch_map_request(protocol)
+    return protocol
 
 
 def _resolve_gradient_temperatures(
@@ -542,6 +651,22 @@ def _resolve_gradient_temperatures(
     return grid
 
 
+def _measured_map_count(gradient_result) -> int:
+    """How many production maps the measurement actually built.
+
+    Read from the protocol the measurement wrote, never from the request that
+    asked for it and never from an array's rank. The request is what someone
+    typed; this is what happened, and only the second belongs in a record or in
+    a decision about how to store one.
+
+    A missing key means an in-memory result from before the map count was
+    recorded. Those were single-map by construction, so they read as ``M = 1``.
+    """
+
+    protocol = getattr(gradient_result, "sketch_protocol", None) or {}
+    return int(protocol.get("map_count", 1))
+
+
 def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
     """Run the offline fidelity analysis and persist only its derived results.
 
@@ -567,8 +692,7 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
     #
     # A missing key means an older in-memory result from before the map count was
     # recorded; those were single-map by construction, so they are read as M = 1.
-    sketch_protocol = getattr(gradient_result, "sketch_protocol", None) or {}
-    fidelity_map_count = int(sketch_protocol.get("map_count", 1))
+    fidelity_map_count = _measured_map_count(gradient_result)
     if fidelity_map_count != 1:
         raise ValueError(
             f"The CountSketch fidelity sanity check cannot run at "
@@ -999,6 +1123,7 @@ def main() -> None:
                 vector_split=protocol["gradient_vector_split"],
                 gradient_sketch=protocol["gradient_sketch"],
                 sketch_dimension=protocol["sketch_dimension"],
+                sketch_maps=protocol["sketch_maps"],
                 exact_gradient_positions=sanity_positions,
             )
             if gradient_result.vector_split is not None:
@@ -1020,6 +1145,16 @@ def main() -> None:
                 f"over {gradient_result.parameter_count:,} parameters in "
                 f"{gradient_result.seconds:,.1f}s ({rate:,.1f} positions/s)"
             )
+            # Read back off the protocol the measurement wrote, not off the
+            # request: this line is evidence about what happened, and restating
+            # the request here would make it agree with itself by construction.
+            if gradient_result.sketch_protocol is not None:
+                measured_protocol = gradient_result.sketch_protocol
+                print(
+                    f"    count sketch: K = {measured_protocol['dimension']}, "
+                    f"M = {measured_protocol['map_count']}, "
+                    f"base seed {measured_protocol['base_seed']}"
+                )
         if protocol["input_structure_enabled"]:
             # Same model object, same weights, same nucleus uniforms: only the
             # input changes, so any difference is attributable to the input.
@@ -1199,6 +1334,21 @@ def main() -> None:
     )
 
     record_metadata = dict(metadata)
+    # Declared by the writer, not left to be stamped on the way out.
+    #
+    # `save()` writes exactly this value anyway, so the persisted record is
+    # unchanged. What changes is the *in-memory* record between `build()` and
+    # `save()`: validation runs at construction, and the multi-map layout is
+    # legal only at record_version 12, so a freshly built M > 1 record with no
+    # declared version was refused by its own schema before it could be written.
+    # A record that cannot state its schema until it reaches disk is not
+    # self-describing, and every other writer in this project -- the tests
+    # included -- states it up front.
+    #
+    # It is stamped at every map count, not only above one: this is the writer
+    # saying which schema it wrote, which is true of the M = 1 records too.
+    # `record_metadata` is a copy, so the run's own `metadata.json` is untouched.
+    record_metadata["record_version"] = RECORD_VERSION
     record_metadata["num_positions"] = positions.num_positions
     record_metadata["tokens"] = [
         tokenizer.token_repr(token_id) for token_id in range(tokenizer.vocab_size)
@@ -1273,13 +1423,34 @@ def main() -> None:
             if gradient_result is None
             else gradient_result.temperature_gradient_norms.numpy()
         ),
+        # Conditional on the measured map count, and this is the whole of the
+        # multi-map storage decision.
+        #
+        # At M = 1 the canonical [D, K] block is stored exactly as it always has
+        # been. At M > 1 it is *omitted*: the canonical sketch is the canonical
+        # row of the temperature array below, reachable through
+        # `record.per_map_sketches()`, and record v12 refuses a physically stored
+        # canonical array above one map. Storing one anyway would re-admit the
+        # possibility that two canonical representations disagree, and would
+        # duplicate about 512 MiB per campaign record to do it.
+        #
+        # Note what is *not* written here: map 0 alone. A [D, K] slice of a
+        # four-map measurement is not the canonical sketch of that measurement,
+        # it is one quarter of it, and it would load without complaint.
         gradient_position_sketches=(
             None
-            if gradient_result is None or gradient_result.gradient_sketches is None
+            if gradient_result is None
+            or gradient_result.gradient_sketches is None
+            or _measured_map_count(gradient_result) != 1
             else gradient_result.gradient_sketches.numpy()
         ),
-        # The canonical field above is a row of this one, so the two cannot
-        # disagree; the record validates that they do not.
+        # [N_T, D, K] at M = 1 and [N_T, D, M, K] above it, under the same field
+        # name deliberately: a released v11 loader raises on the rank it does not
+        # understand, where a new name would have loaded silently with the
+        # sketches reported absent.
+        #
+        # At M = 1 the canonical field above is a row of this one, so the two
+        # cannot disagree; the record validates that they do not.
         gradient_temperature_position_sketches=(
             None
             if gradient_result is None

@@ -171,18 +171,31 @@ def test_a_missing_protocol_entirely_is_read_as_one_map(tmp_path) -> None:
         )
 
 
-def test_the_runner_still_exposes_no_sketch_maps_flag() -> None:
-    """The guard is deliberately unreachable through today's production CLI.
+def test_the_runner_now_exposes_the_flag_and_refuses_the_combination() -> None:
+    """The tripwire this replaced was a *dated* one, and it has now fired.
 
-    Stage 8c adds the flag; until then this asserts nobody has added it early,
-    which would make ``M > 1`` reachable before the consumers can read it.
+    It asserted ``--sketch-maps`` was absent from the runner, so that ``M > 1``
+    could not become reachable before the consumers could read it. They can now,
+    the flag exists, and that assertion has done its job.
+
+    What must not weaken is the reason it existed. The guard below stays the
+    last line of defence, and the runner gains an *earlier* one: the two
+    together mean the combination is refused at argument resolution, before a
+    dataset is loaded, and refused again at the writer for any caller that
+    never passed through argument resolution at all.
     """
 
     source = (
         REPO_ROOT / "scripts" / "run_initialization_distribution_experiment.py"
     ).read_text(encoding="utf-8")
 
-    assert "--sketch-maps" not in source
+    assert '"--sketch-maps",' in source
+    # The early refusal.
+    assert "def _validate_sketch_map_request" in source
+    assert "--countsketch-fidelity-sanity" in source
+    # The writer guard, unchanged in its role.
+    assert "def _write_countsketch_fidelity" in source
+    assert "if fidelity_map_count != 1:" in source
 
 
 def test_the_offline_alternate_map_bank_is_untouched() -> None:

@@ -128,13 +128,134 @@ def test_the_command_line_width_overrides_the_experiment_config() -> None:
     assert resolved["enabled"] is True
 
 
-def test_more_than_one_map_is_refused_rather_than_faked() -> None:
-    """M > 1 is selected but unimplemented; timing one map under that label lies."""
+def test_replicas_are_now_measured_rather_than_refused() -> None:
+    """The refusal this replaced was correct while ``M > 1`` did not exist.
+
+    It said the estimator "takes sketch_dimension and sketch_seed and has no
+    replica count". It does now, so refusing would understate device memory by
+    exactly the quantity someone runs this benchmark to find.
+    """
 
     module = _benchmark_module()
 
-    with pytest.raises(ValueError, match="--sketch-maps must be 1"):
+    resolved = module._resolve_sketch(
+        _args(module, ["--gradient-sketch", "--sketch-maps", "4"]), {}
+    )
+
+    assert resolved["maps"] == 4
+    assert resolved["enabled"] is True
+
+
+def test_the_map_count_defaults_to_one_when_the_flag_is_omitted() -> None:
+    """Every historical invocation still means what it meant."""
+
+    module = _benchmark_module()
+
+    assert _args(module).sketch_maps is None
+    assert module._resolve_sketch(_args(module), {})["maps"] == 1
+
+
+def test_the_experiment_config_can_request_replicas() -> None:
+    """The runner's vocabulary, for the same reason the width uses it.
+
+    The map tables are device resident, so a campaign config asking for four
+    maps must not be timed at one here.
+    """
+
+    module = _benchmark_module()
+    config = {"gradient_analysis": {"sketch": True, "sketch_maps": 4}}
+
+    assert module._resolve_sketch(_args(module), config)["maps"] == 4
+    assert (
+        module._resolve_sketch(_args(module, ["--sketch-maps", "2"]), config)["maps"]
+        == 2
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_an_unusable_map_count_is_refused(value) -> None:
+    module = _benchmark_module()
+
+    with pytest.raises(ValueError, match=r"--sketch-maps must be an integer"):
+        module._resolve_sketch(_args(module, ["--sketch-maps", value]), {})
+
+
+def test_replicas_without_the_sketch_are_refused() -> None:
+    """Otherwise the memory columns would describe a single-map run.
+
+    Which is the same failure mode ``--gradient-sketch`` exists to prevent: a
+    plausible number measured for a configuration nobody asked about.
+    """
+
+    module = _benchmark_module()
+
+    with pytest.raises(ValueError, match="count sketch is off"):
         module._resolve_sketch(_args(module, ["--sketch-maps", "4"]), {})
+
+
+class _Detonator:
+    """Raises if called at all, naming what should never have been reached."""
+
+    def __init__(self, what: str) -> None:
+        self.what = what
+
+    def __call__(self, *args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError(
+            f"{self.what} was reached; the refusal was not early enough."
+        )
+
+
+def _benchmark_expecting_refusal(monkeypatch, argv):
+    """Drive ``main()`` with every expensive entry point mined."""
+
+    module = _benchmark_module()
+    for name in (
+        "resolve_dataset",
+        "build_tokenizer",
+        "build_evaluation_positions",
+        "build_model_from_config",
+        "compute_position_gradient_norms",
+    ):
+        monkeypatch.setattr(module, name, _Detonator(name))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_position_gradients.py",
+            "--window-counts", "1",
+            "--block-size", "4",
+            "--temperatures", "1.0",
+            "--offline",
+            "--allow-narrow-vocabulary",
+            *argv,
+        ],
+    )
+    with pytest.raises(ValueError) as error:
+        module.main()
+    return str(error.value)
+
+
+def test_a_zero_map_count_fails_before_anything_is_loaded(monkeypatch) -> None:
+    message = _benchmark_expecting_refusal(monkeypatch, ["--sketch-maps", "0"])
+
+    assert "--sketch-maps" in message
+
+
+def test_replicas_without_the_sketch_fail_before_anything_is_loaded(
+    monkeypatch,
+) -> None:
+    message = _benchmark_expecting_refusal(monkeypatch, ["--sketch-maps", "4"])
+
+    assert "count sketch is off" in message
+    assert "--gradient-sketch" in message
+
+
+def test_the_map_validation_rule_is_the_estimator_s_own() -> None:
+    from llm_behavior_lab.evaluation import position_gradients
+
+    module = _benchmark_module()
+
+    assert module._validated_map_count is position_gradients._validated_map_count
 
 
 def test_a_non_positive_width_is_refused() -> None:
@@ -261,8 +382,99 @@ def test_the_benchmark_forwards_its_resolved_sketch_settings(monkeypatch) -> Non
     assert captured["gradient_sketch"] is True
     assert captured["sketch_dimension"] == 16
     assert captured["sketch_seed"] == 99
+    assert captured["sketch_maps"] == 1
     # The optional vector-split diagnostic stays off.
     assert captured.get("vector_split", False) is False
+
+
+def test_four_maps_are_forwarded_and_really_measured(monkeypatch, capsys) -> None:
+    """Accepted *and* acted on, which are different claims.
+
+    Merely no longer raising would leave the benchmark timing one map under a
+    label that says four -- the exact deception the old refusal existed to
+    prevent. So this checks the forwarded argument, the replica axis on the
+    array that came back, and the reported map count together.
+    """
+
+    module = _benchmark_module()
+    captured = {}
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        result = compute_position_gradient_norms(*args, **kwargs)
+        captured["shape"] = tuple(result.temperature_gradient_sketches.shape)
+        captured["protocol_maps"] = result.sketch_protocol["map_count"]
+        return result
+
+    monkeypatch.setattr(module, "compute_position_gradient_norms", spy)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_position_gradients.py",
+            "--window-counts", "1",
+            "--block-size", "4",
+            "--temperatures", "1.0",
+            "--offline",
+            "--allow-narrow-vocabulary",
+            "--gradient-sketch",
+            "--sketch-dimension", "16",
+            "--sketch-maps", "4",
+        ],
+    )
+    module.main()
+
+    assert captured["sketch_maps"] == 4
+    # [temperatures, positions, maps, buckets] -- the replica axis is present
+    # only above one map, matching the estimator's rank-conditional contract.
+    assert captured["shape"] == (1, 4, 4, 16)
+    assert captured["protocol_maps"] == 4
+    assert "M = 4" in capsys.readouterr().out
+
+
+def test_the_reported_map_memory_is_total_and_incremental(monkeypatch, capsys) -> None:
+    """Both figures, because a memory gate is read against the second one.
+
+    Total says what the run holds; incremental says what the replicas added on
+    top of the single-map configuration every earlier measurement was taken at.
+    """
+
+    module = _benchmark_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_position_gradients.py",
+            "--window-counts", "1",
+            "--block-size", "4",
+            "--temperatures", "1.0",
+            "--offline",
+            "--allow-narrow-vocabulary",
+            "--gradient-sketch",
+            "--sketch-dimension", "8",
+            "--sketch-maps", "4",
+        ],
+    )
+    module.main()
+    out = capsys.readouterr().out
+
+    per_map = module._SKETCH_MAP_DEVICE_BYTES_PER_PARAMETER
+    # Derived from the implementation, never restated: a hard-coded copy of this
+    # constant went stale here once already.
+    assert f"4 x {per_map} B" in out
+    assert "incremental against M = 1" in out
+
+    total = next(line for line in out.splitlines() if "device map tables" in line)
+    incremental = next(
+        line for line in out.splitlines() if "incremental against M = 1" in line
+    )
+    total_mib = float(total.split("= ")[1].split(" MiB")[0].replace(",", ""))
+    incremental_mib = float(
+        incremental.split(": ")[1].split(" MiB")[0].replace(",", "")
+    )
+
+    # M * 5 * P against (M - 1) * 5 * P, so the ratio is exactly 4 : 3.
+    assert incremental_mib == pytest.approx(total_mib * 3.0 / 4.0, rel=1e-3)
 
 
 def test_the_no_sketch_path_still_runs_and_asks_for_no_sketch(monkeypatch) -> None:
