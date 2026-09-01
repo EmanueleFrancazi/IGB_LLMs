@@ -209,6 +209,14 @@ class PositionGradientResult:
     exact_gradients: torch.Tensor | None = None
     #: Flat indices of those positions, or ``None``.
     exact_positions: torch.Tensor | None = None
+    #: ``[m, M, K]`` float32 sketches of the same positions, taken from the
+    #: **live** production projection rather than re-derived afterwards.
+    #:
+    #: Rebuilding the maps to re-project would compare exact gradients against a
+    #: reconstruction of the instrument, not against the instrument. Temporary:
+    #: the caller computes the fidelity summary and releases these with the
+    #: gradients.
+    exact_sketches: torch.Tensor | None = None
     #: The production sketch map as ``(buckets, signs)`` NumPy vectors, so the
     #: offline fidelity analysis projects with the map the run actually used
     #: rather than re-deriving one from a different RNG.
@@ -1010,6 +1018,7 @@ def compute_position_gradient_norms(
     sketch_seed: int = 20240917,
     progress: Callable[[int, int], None] | None = None,
     sketch_maps: int = 1,
+    row_sink: Any = None,
 ) -> PositionGradientResult:
     """Measure ``g_d`` exactly, one evaluation position at a time.
 
@@ -1051,6 +1060,18 @@ def compute_position_gradient_norms(
             uses it unchanged, so a single-map run is unaffected by the replica
             schedule existing.
         progress: Optional ``callback(windows_done, windows_total)``.
+        row_sink: Optional destination for the projected rows, implementing
+            ``write_row(temperature_index, position, [M, K] float32)`` and
+            ``seal()``. Given one, this function streams each position's rows to
+            it and does **not** allocate the ``[N_T, D, M, K]`` array -- which is
+            3.5 GiB at experiment scale and is the single largest allocation the
+            measurement makes. Omitted, an in-memory sink is used and the arrays
+            come back on the result exactly as they always have.
+
+            The sink is deliberately the only thing this function knows about
+            storage. It learns nothing about run directories, manifests,
+            artifact formats or storage modes, so the projection path emits the
+            same quantized rows in the same order whatever the destination is.
         sketch_maps: Number of independent production CountSketch maps ``M``.
             One by default, which is what every existing caller gets and what
             the runner still asks for. Above one, each position's gradient is
@@ -1124,6 +1145,7 @@ def compute_position_gradient_norms(
         else set()
     )
     captured: dict[int, torch.Tensor] = {}
+    captured_sketches: dict[int, torch.Tensor] = {}
     map_count = _validated_map_count(sketch_maps, name="sketch_maps")
     if map_count != 1 and not gradient_sketch:
         # Refused rather than ignored. Silently measuring one map after being
@@ -1154,16 +1176,31 @@ def compute_position_gradient_norms(
     # that would have to be squeezed on the way out. A squeeze is one more place
     # for a stray axis to reach a record, and the M = 1 arrays are the ones every
     # existing consumer and the frozen fixture depend on.
-    temperature_sketches = (
-        torch.empty(
-            (len(grid), total_positions, sketch_dimension)
-            if map_count == 1
-            else (len(grid), total_positions, map_count, sketch_dimension),
-            dtype=torch.float32,
+    #
+    # The rows go to a sink rather than into an array owned here. At experiment
+    # scale that array is 3.5 GiB, and holding it was the reason a production arm
+    # could not be scaled; the sink lets the same rows stream to bounded disk
+    # instead, without this loop knowing that is where they went.
+    sink = row_sink
+    if gradient_sketch and sink is None:
+        from llm_behavior_lab.evaluation.sketch_store import (
+            InMemoryRowSink,
+            SketchStoreLayout,
         )
-        if gradient_sketch
-        else None
-    )
+
+        sink = InMemoryRowSink(
+            SketchStoreLayout(
+                num_temperatures=len(grid),
+                num_positions=total_positions,
+                num_maps=map_count,
+                num_buckets=sketch_dimension,
+            )
+        )
+    if sink is not None and not gradient_sketch:
+        raise ValueError(
+            "A row_sink was given but gradient_sketch is off, so no row would "
+            "ever be projected into it."
+        )
     canonical_temperature_index = grid.index(CANONICAL_GRADIENT_TEMPERATURE)
 
     was_training = model.training
@@ -1232,11 +1269,31 @@ def compute_position_gradient_norms(
                         # give the same numbers, but routing M = 1 through the
                         # replica path would put a stack-and-index between the
                         # established observable and its own code, for nothing.
-                        temperature_sketches[index, cursor] = (
-                            sketcher.project(grads).cpu()
+                        #
+                        # `.cpu()` returns float64; the float32 conversion below
+                        # is the same narrowing the preallocated buffer used to
+                        # perform on assignment, in the same place in the order
+                        # of operations. Nothing about the quantization moved.
+                        projected = (
+                            sketcher.project(grads).cpu().reshape(1, -1)
                             if map_count == 1
                             else sketcher.project_maps(grads).cpu()
                         )
+                        rows_f32 = projected.to(torch.float32)
+                        sink.write_row(index, cursor, rows_f32.numpy())
+                        if (
+                            wanted
+                            and index == canonical_temperature_index
+                            and int(position_indices[cursor]) in wanted
+                        ):
+                            # The sketch the production maps actually produced
+                            # for this position, kept alongside its exact
+                            # gradient. Rebuilding the maps afterwards to
+                            # re-project would measure a reconstruction of the
+                            # instrument rather than the instrument.
+                            captured_sketches[int(position_indices[cursor])] = (
+                                rows_f32.clone()
+                            )
                     if (
                         wanted
                         and index == canonical_temperature_index
@@ -1271,6 +1328,20 @@ def compute_position_gradient_norms(
     seconds = time.perf_counter() - started
 
     canonical = grid.index(CANONICAL_GRADIENT_TEMPERATURE)
+
+    # Seal before anything reads the rows. For a temporary store this is what
+    # validates sizes, row counts and digests; for the in-memory sink it checks
+    # that every position was written. Either way the arrays below are only
+    # reachable once the sink says the collection is complete.
+    temperature_sketches = None
+    if sink is not None:
+        sink.seal()
+        # Only an in-memory sink can hand back arrays. A store deliberately
+        # cannot: its whole purpose is that the rows never enter the record.
+        temperature_sketches = getattr(sink, "temperature_sketches", None)
+        if temperature_sketches is not None:
+            temperature_sketches = torch.from_numpy(temperature_sketches)
+
     return PositionGradientResult(
         position_indices=position_indices,
         target_ids=target_ids,
@@ -1297,6 +1368,13 @@ def compute_position_gradient_norms(
             None
             if not captured
             else torch.tensor(sorted(captured), dtype=torch.long)
+        ),
+        exact_sketches=(
+            None
+            if not captured_sketches
+            else torch.stack(
+                [captured_sketches[key] for key in sorted(captured_sketches)]
+            )
         ),
         sketch_map=None if sketcher is None else sketcher.numpy_map(),
         sketch_protocol=(

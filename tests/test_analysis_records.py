@@ -12,7 +12,11 @@ import json
 import numpy as np
 import pytest
 
-from llm_behavior_lab.analysis import InitializationExperimentRecord, load_record
+from llm_behavior_lab.analysis import (
+    RECORD_VERSION,
+    InitializationExperimentRecord,
+    load_record,
+)
 
 VOCAB_SIZE = 5
 NUM_INITIALIZATIONS = 3
@@ -89,12 +93,38 @@ def test_round_trip_preserves_token_alignment_under_a_permutation(tmp_path) -> N
 def test_saved_metadata_is_human_readable_json(tmp_path) -> None:
     """The protocol must be inspectable without NumPy."""
 
-    _record().save(tmp_path)
+    _record(
+        metadata={
+            "num_positions": 40,
+            "tokens": list("abcde"),
+            "record_version": RECORD_VERSION,
+        }
+    ).save(tmp_path)
 
     payload = json.loads((tmp_path / "initialization_distribution.json").read_text(encoding="utf-8"))
 
     assert payload["num_positions"] == 40
-    assert payload["record_version"] >= 1
+    assert payload["record_version"] == RECORD_VERSION
+
+
+def test_a_record_that_declares_no_version_saves_without_one(tmp_path) -> None:
+    """Absence is a real value, not a gap to be filled in.
+
+    Records predating the field carry no version, and `save()` must not invent
+    one for them -- stamping the module constant is exactly how a re-saved v11
+    archive used to come back claiming to be current.
+    """
+
+    record = _record()
+    assert record.record_version is None
+
+    record.save(tmp_path)
+    payload = json.loads(
+        (tmp_path / "initialization_distribution.json").read_text(encoding="utf-8")
+    )
+
+    assert "record_version" not in payload
+    assert load_record(tmp_path).record_version is None
 
 
 def test_two_files_are_written_with_deterministic_names(tmp_path) -> None:

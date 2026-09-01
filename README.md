@@ -1402,10 +1402,10 @@ pooled within- and between-class directional similarity, and `Δ = within − be
 `N_T` and `M` are deliberately separate letters. A loss temperature is a **different
 gradient field**; a map is a **second projection of the same gradient**.
 
-`M` counts **production** maps. The gradient estimator, the experiment runner, the
-benchmark, and the persisted records all currently operate at `M = 1`: one map is built, so
-the map axis appears in no record shape below, and `--sketch-maps` refuses any value above
-one.
+`M` counts **production** maps. `--sketch-maps` accepts any positive count; above
+one the sketch arrays gain a map axis and the record refuses to store a second
+canonical representation beside it. Every map projects the same gradient from the
+same backward pass, so raising `M` does not add a backward pass.
 
 The fidelity methodology is the exception, and it is not a counter-example. Figure 23
 re-projects a deterministic handful of *retained exact* gradients through several
@@ -1499,9 +1499,120 @@ Individual pairwise values carry the projection's noise; the pooled class-level 
 what these analyses report. How close the estimator actually is to exact geometry is
 checked separately — see figure 23.
 
+### Storage modes and the finalized metrics artifact
+
+From record version 13 a run declares what it keeps of its per-position sketches.
+The mode says what was **additionally** retained; all three finalize the same
+metrics while the rows still exist.
+
+| `--sketch-storage` | Keeps | Cost per production arm |
+|---|---|---|
+| `metrics_only` (default) | finalized metrics only | ~2 MiB, against ~3.5 GiB of rows |
+| `compact_factors` | metrics plus an explicitly declared factor selection | metrics plus `C·M·K·8` bytes per selection |
+| `per_position` | metrics plus the full `[N_T, D, M, K]` row surface | ~3.5 GiB, refused above `--sketch-storage-max-bytes` |
+
+**Protocol configuration versus operational controls.** The two are separated
+deliberately, and the separation is visible in where each may be set:
+
+| | Where it may be set | Recorded |
+|---|---|---|
+| Storage **mode** (`--sketch-storage`) | experiment config, overridden by the command line, else the `metrics_only` default | `storage_mode` |
+| Resource **limits** (`--sketch-storage-max-bytes`, `--sketch-factors-max-bytes`, `--gradient-temp-max-bytes`, `--fidelity-max-*`) | command line only | `storage_limits`, `temporary_store.preflight`, `sanity.bounds` |
+| Temporary-store location (`--gradient-temp-dir`) | command line only | as a **policy** (`output_root_gradient_tmp` or `explicit_override`), never as a path |
+
+The mode is protocol: it changes what a run *measures and keeps*, so it belongs
+with the rest of the experiment definition. The limits are operational: they
+express what this machine and this operator will spend, so they stay on the
+command line where someone reading the invocation can see every ceiling that
+applied. Whichever route a value took, the **resolved** value is persisted, so a
+record can always say what admitted it.
+
+The resolved temporary directory is deliberately *not* published. A completed
+record must stay portable, and that path may be node-local scratch that no longer
+resolves anywhere; it lives in the store's own manifest, where it is
+operationally necessary while the store exists.
+
+Finalization computes every declared statistic — target and greedy references at
+every measured `T_g`, the nucleus control and matched designs, the
+cross-partition geometry, the heatmaps, the supports and all 26 permutation
+nulls — and publishes them as `analyses/gradient_alignment_metrics.npz` plus a
+readable `.json` carrying the archive's size and SHA-256. The record's metadata
+records those hashes, so the pair is self-checking and a record cannot be read
+beside another run's metrics.
+
+Two loaders, deliberately distinct:
+
+- `load_record` is the primary-record loader and attaches nothing;
+- `load_finalized_record` is the canonical v13 bundle loader; it attaches the
+  metrics after validating them against the hashes the record itself carries.
+
+A v13 consumer handed the first does **not** fall back to recomputing from rows —
+there are none — it fails loudly.
+
+`compact_factors` retains summed **gradient sketches**, named as such in the
+archive (`factor_0_gradient_sketch_sum`), accumulated and stored in float64. A
+selection is a grouping in one gradient field, e.g.
+`--sketch-factors target@1.0,greedy@1.0,cross@1.0,nucleus:0.6@0.6`. Queries
+outside the declared set are refused rather than approximated, and per-position
+relabelling is refused outright: a class sum cannot be re-partitioned once the
+membership it was formed over is gone.
+
+**What `metrics_only` gives up**, stated plainly: arbitrary post-hoc
+per-position similarity queries, arbitrary relabelling, undeclared nucleus
+`(T_s, T_g)` pairings, and new row-label permutation designs. Everything the
+declared production contract reports remains available.
+
+### What finalization costs
+
+Two sets of numbers, kept apart because they measure different things.
+
+**Synthetic production-shaped** (`D = 32,768`, `N_T = 7`, `M = 4`, `K = 1,024`):
+
+| | |
+|---|---|
+| Permutation nulls (26 jobs x 4 maps) | ~33 min |
+| Finalization workspace, measured RSS increment | 512-525 MiB |
+| Metrics artifact | 0.26 MiB |
+| Rendering, all five targets | 2.43 s, 45 MiB |
+| Permanent gradient-alignment storage vs. 3.5 GiB of rows | -99.99% |
+
+**Tiny validation run** (48 positions, `M = 4`, `K = 8`, two temperatures) --
+useful for checking wiring, not for extrapolating cost:
+
+| | |
+|---|---|
+| Finalization | 1.1 s |
+| Complete bundle | 103 KB (`metrics_only`), 140 KB (`compact_factors`), 113 KB (`per_position`) |
+
+The permutation null dominates finalization and is not reducible without
+changing the null: all 26 jobs are current scientific outputs. At the production
+grid that is 14 references (target and greedy at every measured `T_g`), 6 nucleus
+control points, 6 matched points, and a cross-partition identity null computed
+from group factors rather than rows.
+
+### The reduction epoch
+
+v13 forms class sums blockwise, where v12 uses `np.add.reduceat`. The statistic,
+the draws, the estimator and the permutation sequence are identical; only the
+float64 accumulation order inside a class sum differs. Measured effect on the
+reported null statistics: at most `7.6e-14` relative, against a declared
+tolerance of `1e-12`. Raw projections and float32 quantization are bitwise
+unchanged at every `M`.
+
+Every artifact records which accumulation produced it:
+
+| Key | Value |
+|---|---|
+| `estimator_convention` | `countsketch_pairwise_mean_q_self/v1` |
+| `reduction_convention` | `blockwise_class_sum/v1` |
+| `numerical_epoch` | `alignment_reduction_epoch/v1` |
+
+**v12 analysis keeps its exact `reduceat` route, bitwise unchanged.** Derived v13
+results are therefore no longer bitwise equal to v12 ones, including at `M = 1`.
+
 ### Temperature-resolved fields in the record
 
-With `--gradient-sketch`, a record (version 11) carries:
+With `--gradient-sketch` and `--sketch-storage per_position`, a record carries:
 
 | Field | Shape | Meaning |
 |---|---|---|
@@ -1520,9 +1631,24 @@ directional analysis. They must not be treated as containing arbitrary `T_g` dir
 asking such a record for another loss temperature raises and names what was measured. There
 is no interpolation between measured temperatures and no silent fallback to `T_g = 1`.
 
-### Exact nucleus reconstruction
+### Nucleus labels
 
-The experiment streams its logits and keeps only per-token counts, so the record knows *how
+From version 13 the labels are **captured during the run**. The draw has already
+happened when the counts are tallied, so the per-position samples are simply kept
+(`[S, D]` int32, about 786 KiB at experiment scale) instead of discarded and
+recovered later. They are still gated against the recorded histograms with exact
+integer equality: the gate checks the data, and "correct by construction" is a
+reason to expect it to pass rather than a reason to skip it.
+
+This removes the roughly five hours per arm the reconstruction used to cost, and
+with it the batch-size sensitivity the reconstruction had to manage — labels
+taken from the original draw cannot disagree with the counts that draw produced.
+
+The reconstruction below remains for records written before version 13.
+
+#### Exact nucleus reconstruction (v12 and earlier)
+
+Those experiments streamed their logits and kept only per-token counts, so the record knows *how
 many* positions sampled each token at each `T_s`, but not *which* position sampled what.
 Grouping gradients by the sampled token therefore requires recovering those labels.
 
@@ -1689,8 +1815,28 @@ python3 scripts/run_initialization_distribution_experiment.py \
   --offline --output-dir outputs
 ```
 
-The artifact lands at `<run>/sanity/countsketch_fidelity.npz`, and the renderer picks it up
-from the run root when rendering that run.
+From version 13 the summary lands **inside** the authoritative metrics artifact,
+so there is one v13 artifact to keep in step; `<run>/sanity/countsketch_fidelity.npz`
+remains the v12 location and the renderer still reads it for older records.
+
+The v13 check compares against the sketches every production map actually
+produced, captured live during the measurement -- so it validates the ensemble
+estimator the figures use, not a map-0 reconstruction of it. It is bounded three
+ways independently (`--fidelity-max-positions`, `--fidelity-max-gradient-bytes`,
+`--fidelity-max-sketch-bytes`), because a position count says nothing about a
+134M-parameter model and a gradient budget says nothing about a wide sketch at
+many maps. Warning and failure thresholds are `2/sqrt(K*M)` and `6/sqrt(K*M)` --
+the estimator's own error scale rather than tuned constants.
+
+Error statistics are computed over **ordered off-diagonal** matrix entries: 12
+retained gradients give 132 of those and 66 unique unordered pairs. The matrix is
+symmetric so the duplication moves neither MAE nor the correlation, but the
+artifact records `sanity_num_ordered_pairs`, `sanity_num_unordered_pairs` and
+`sanity_pair_convention` so a stored count is never ambiguous.
+
+Only derived results are persisted. The exact gradients and the sampled sketch
+matrices are released in a `finally` on every path, success or failure, before
+finalization continues.
 
 **Figure 24 — target↔greedy cross-partition geometry.** Figure 20 finds structure under
 both groupings; this asks how the two relate. With target classes `A_i` (positions whose

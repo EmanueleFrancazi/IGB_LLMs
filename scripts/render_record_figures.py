@@ -38,6 +38,9 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from llm_behavior_lab.analysis.alignment_metrics import (  # noqa: E402
+    load_finalized_record,
+)
 from llm_behavior_lab.analysis import (  # noqa: E402
     gradient_guess_correlations,
     gradient_observable_summary,
@@ -520,6 +523,23 @@ def _render_nucleus_clustering(
     which artifact they read and which stem they write.
     """
 
+    # A v13 record already carries both designs: the nucleus labels were kept
+    # during the run, so there is nothing left to reconstruct and no artifact to
+    # write first. A missing or corrupt v13 artifact fails loudly here rather
+    # than falling back to the legacy reconstruction -- that path would rebuild
+    # the corpus and the model and run a forward pass per temperature, which is
+    # not a fallback but a different, five-hour computation.
+    if getattr(record, "has_finalized_gradient_metrics", False):
+        from llm_behavior_lab.analysis.alignment_views import nucleus_view
+
+        result = nucleus_view(
+            record.alignment_metrics, design="matched" if matched else "control"
+        )
+        return figure_module.plot_nucleus_temperature_clustering(
+            result, figures_dir, record=record,
+            stem_suffix="_matched_TsTg" if matched else "",
+        )
+
     from llm_behavior_lab.analysis.nucleus_clustering_artifact import (
         ARTIFACT_NAME,
         MATCHED_ARTIFACT_NAME,
@@ -534,7 +554,7 @@ def _render_nucleus_clustering(
     )
 
 
-def _render_countsketch_fidelity(figure_module, record_dir, figures_dir):
+def _render_countsketch_fidelity(figure_module, record_dir, figures_dir, record=None):
     """Draw figure 23 from the run's fidelity artifact.
 
     Figure 23 is the one figure not backed by the initialization-distribution
@@ -543,6 +563,18 @@ def _render_countsketch_fidelity(figure_module, record_dir, figures_dir):
     it -- category routing, output directory, printed path -- follows the normal
     conventions.
     """
+
+    # v13 keeps the fidelity summary inside the authoritative metrics artifact,
+    # so there is exactly one v13 artifact to keep in step. The separate
+    # `sanity/countsketch_fidelity.npz` remains the v12 source.
+    if record is not None and getattr(
+        record, "has_finalized_gradient_metrics", False
+    ):
+        from llm_behavior_lab.analysis.alignment_views import sanity_view
+
+        return figure_module.plot_countsketch_fidelity(
+            sanity_view(record.alignment_metrics), figures_dir
+        )
 
     from llm_behavior_lab.analysis.countsketch_fidelity import (
         load_fidelity_artifact,
@@ -558,7 +590,14 @@ def main() -> None:
     """Report the available statistics and redraw the requested figures."""
 
     args = parse_args()
+    # The canonical v13 bundle loader: a record loaded on its own carries no
+    # metrics, and every v13 figure would then silently take the legacy path.
+    # It falls back to the plain record when there is no artifact to attach.
     record = load_record(args.record_dir, name=args.name)
+    if record.gradient_analysis.get("gradient_alignment", {}).get(
+        "metrics_artifact"
+    ):
+        record = load_finalized_record(args.record_dir)
 
     print(f"Record: {args.record_dir}")
     print(f"  vocabulary {record.vocab_size:,}, initializations {record.num_initializations}")
@@ -602,7 +641,7 @@ def main() -> None:
         skipped: list[str] = []
         try:
             written = written + _render_countsketch_fidelity(
-                figure_module, args.record_dir, figures_dir
+                figure_module, args.record_dir, figures_dir, record
             )
         except FileNotFoundError:
             skipped.append(_FIGURE23_UNAVAILABLE)
@@ -620,7 +659,15 @@ def main() -> None:
                 print(note)
     else:
         required = CONDITIONAL_FIGURES.get(args.only)
-        if required is not None and not getattr(record, required):
+        # A v13 record has the finalized answers and no rows, so the row
+        # predicate is false while every one of these figures is drawable.
+        # Gating on rows alone would silently switch them off for exactly the
+        # records that carry the results.
+        satisfied = required is None or getattr(record, required, False) or (
+            required == "has_gradient_position_sketches"
+            and getattr(record, "has_finalized_gradient_metrics", False)
+        )
+        if not satisfied:
             raise SystemExit(
                 f"This record does not carry the analysis behind {args.only} "
                 f"({required} is false), so it cannot be drawn from it."
@@ -628,7 +675,7 @@ def main() -> None:
         if args.only in ("figure22", "figure22-matched", "figure23"):
             written = (
                 _render_countsketch_fidelity(
-                    figure_module, args.record_dir, figures_dir
+                    figure_module, args.record_dir, figures_dir, record
                 )
                 if args.only == "figure23"
                 else _render_nucleus_clustering(

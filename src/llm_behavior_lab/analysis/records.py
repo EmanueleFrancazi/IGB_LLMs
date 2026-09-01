@@ -39,11 +39,13 @@ __all__ = [
 #: predictive-probability diagnostics, and version 7 the temperature-conditioned
 #: greedy-confidence grid, and version 8 the temperature-conditioned gradient
 #: norms, and version 9 the identity-preserving mean token probabilities.
+#: Version 13 added the storage-mode surface and the finalized
+#: gradient-alignment metrics artifact.
 #: Older records load unchanged: version 1 predates special-token
 #: exclusion, so every token was eligible -- exactly the
 #: default applied when that array is absent -- and every later addition is
 #: optional, so its absence simply means the run did not carry that analysis.
-RECORD_VERSION = 12
+RECORD_VERSION = 13
 
 _ARRAY_NAMES = (
     "token_ids",
@@ -149,6 +151,24 @@ TEMPERATURE_MATCH_TOLERANCE = 1e-6
 #: written before replicas existed, which is v1 by definition and can only ever
 #: describe a single map.
 SKETCH_PROTOCOL_SCHEMA_VERSION = 2
+
+#: How a v13 run kept its per-position sketches.
+#:
+#: ``metrics_only`` is the production default and retains neither rows nor
+#: subgroup factors; ``compact_factors`` retains an explicitly declared factor
+#: selection; ``per_position`` retains the full exploratory row surface at its
+#: full cost. All three finalize metrics -- the mode says what was *additionally*
+#: kept, never whether the analysis ran.
+STORAGE_MODES = ("metrics_only", "compact_factors", "per_position")
+
+#: Record versions whose containers may carry a schema-v2 sketch protocol.
+#:
+#: Not ``RECORD_VERSION``: the multi-map layout was introduced at 12 and is
+#: unchanged at 13, so pinning this to "whatever this build is" would make every
+#: previously written v12 record unreadable the moment the version was bumped
+#: for an unrelated reason. The set grows when a new version keeps the layout,
+#: and a version that *changes* it is simply left out.
+_SKETCH_V2_RECORD_VERSIONS = (12, 13)
 
 #: Required keys and their exact permitted values under schema v2. Exact values,
 #: not free text: these describe how the arrays beside them must be *read*, so a
@@ -298,10 +318,10 @@ def _resolve_sketch_map_count(
     if temperature_rank == 4:
         # The multi-map layout. All three conditions, together: the rank alone
         # must never be enough to establish it.
-        if record_version != RECORD_VERSION:
+        if record_version not in _SKETCH_V2_RECORD_VERSIONS:
             raise ValueError(
                 "A four-dimensional gradient_temperature_position_sketches array "
-                f"requires record_version {RECORD_VERSION}; got "
+                f"requires record_version in {_SKETCH_V2_RECORD_VERSIONS}; got "
                 f"{record_version!r}."
             )
         if schema != SKETCH_PROTOCOL_SCHEMA_VERSION:
@@ -323,10 +343,11 @@ def _resolve_sketch_map_count(
                 "[temperatures, positions, K]."
             )
     elif schema == SKETCH_PROTOCOL_SCHEMA_VERSION:
-        if record_version != RECORD_VERSION:
+        if record_version not in _SKETCH_V2_RECORD_VERSIONS:
             raise ValueError(
                 f"A schema-v{SKETCH_PROTOCOL_SCHEMA_VERSION} sketch protocol "
-                f"requires record_version {RECORD_VERSION}; got {record_version!r}."
+                f"requires record_version in {_SKETCH_V2_RECORD_VERSIONS}; got "
+                f"{record_version!r}."
             )
         if declared is None:
             raise ValueError(
@@ -494,12 +515,46 @@ _GRADIENT_SKETCH_ARRAY_NAME = "gradient_position_sketches"
 _GRADIENT_TEMPERATURE_SKETCH_ARRAY_NAME = "gradient_temperature_position_sketches"
 
 
+def fsync_directory(directory: Path) -> None:
+    """Flush a directory entry, so a rename survives a crash.
+
+    ``os.replace`` makes the new name visible to other processes immediately, but
+    the *directory entry* can still be lost on power failure until the directory
+    itself is synced. That matters here because the record's ``.json`` is the
+    commit marker for a whole run: a marker that survives while the bytes it
+    commits do not is precisely the state the publication order exists to
+    prevent.
+
+    Best effort by design. Directory ``fsync`` is not portable -- Windows refuses
+    to open a directory, and some filesystems return ``EINVAL`` -- and on those
+    platforms the rename is still atomic, which is the property the transaction
+    depends on. Failing the publication over a missing durability nicety would
+    trade a real result for a theoretical one.
+    """
+
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write_bytes(path: Path, write) -> Path:
     """Write via a temporary file in the destination directory, then rename.
 
     The temporary file keeps the destination's extension: ``np.savez_compressed``
     appends ``.npz`` when a path lacks it, which would leave the archive beside
     the file that gets renamed into place.
+
+    The temporary file is flushed to disk **before** the rename. Without that,
+    the rename can be durable while the contents are not, which produces a file
+    that exists, has the right name, and is truncated or empty -- the one failure
+    mode an atomic write is supposed to make impossible.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -510,6 +565,11 @@ def _atomic_write_bytes(path: Path, write) -> Path:
     temporary_path = Path(temporary_name)
     try:
         write(temporary_path)
+        handle = os.open(temporary_path, os.O_RDONLY)
+        try:
+            os.fsync(handle)
+        finally:
+            os.close(handle)
         os.replace(temporary_path, path)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
@@ -636,8 +696,52 @@ class InitializationExperimentRecord:
     #: ``[I, N_T]`` mean per-position predictive entropy, in nats.
     predictive_temperature_mean_entropy: np.ndarray | None = None
 
+    #: The schema version this record **is**, not the one this build writes.
+    #:
+    #: ``None`` is a real, load-bearing value: records predating the field carry
+    #: no version and must keep round-tripping without acquiring one. It is set
+    #: from the metadata on load and passed explicitly by the production build
+    #: boundary; nothing infers it from the module constant, because a record's
+    #: version describes the record and re-stamping it on save silently promoted
+    #: every re-saved legacy archive to whatever the current build happened to be.
+    record_version: int | None = None
+
+    #: The finalized alignment metrics published beside this record, attached by
+    #: :func:`llm_behavior_lab.analysis.alignment_metrics.load_finalized_record`
+    #: once they have validated against the hashes recorded in this record's own
+    #: metadata. ``None`` for a record held in memory or loaded on its own.
+    #:
+    #: **Attached, never fetched.** A predicate that went to the filesystem would
+    #: make an innocuous-looking property do I/O whose answer depended on what
+    #: happened to sit beside the record -- and an in-memory record has no
+    #: directory to look in at all. Only the loader knows where a record came
+    #: from, so only the loader fills this in.
+    alignment_metrics: Any = None
+
     def __post_init__(self) -> None:
+        self._validate_record_version()
         self.validate()
+
+    def _validate_record_version(self) -> None:
+        """The field and the metadata must not disagree.
+
+        Two representations of one fact is one too many, so this refuses the
+        disagreement rather than picking a winner. ``sketch_map_count`` and the
+        v13 predicates all read the field; the metadata copy exists only because
+        it is what gets serialized.
+        """
+
+        _require_supported_record_version(self.record_version)
+        if "record_version" not in self.metadata:
+            return
+        declared = self.metadata["record_version"]
+        if declared != self.record_version:
+            raise ValueError(
+                f"record_version is {self.record_version!r} on the record but "
+                f"{declared!r} in its metadata. These describe the same fact and "
+                "cannot differ; a record built from loaded metadata must carry "
+                "that metadata's version."
+            )
 
     # -- shape helpers ---------------------------------------------------
 
@@ -906,6 +1010,37 @@ class InitializationExperimentRecord:
         except ValueError:
             return False
         return True
+
+    @property
+    def storage_mode(self) -> str | None:
+        """How this run kept its per-position sketches, or ``None`` before v13."""
+
+        block = self.gradient_analysis.get("gradient_alignment", {})
+        return block.get("storage_mode")
+
+    @property
+    def has_finalized_gradient_metrics(self) -> bool:
+        """Whether finalized alignment metrics are attached and validated.
+
+        Deliberately **not** the same question as
+        :attr:`has_gradient_position_sketches`. Overloading that predicate would
+        mean a ``metrics_only`` record -- which carries every result and none of
+        the rows -- reported its analyses as unavailable, and every figure gated
+        on it would silently switch itself off.
+        """
+
+        return self.alignment_metrics is not None
+
+    @property
+    def has_gradient_sketch_factors(self) -> bool:
+        """Whether compact subgroup factors were retained.
+
+        These are summed gradient sketches. A record that kept them can answer
+        the similarity queries its retained factors support, and no others.
+        """
+
+        block = self.gradient_analysis.get("gradient_alignment", {})
+        return bool(block.get("factor_selection"))
 
     def _canonical_sketch_temperature_index(self) -> int:
         """Row of the temperature axis holding the canonical ``T = 1``."""
@@ -1262,7 +1397,7 @@ class InitializationExperimentRecord:
         temperature = self.gradient_temperature_position_sketches
         return _resolve_sketch_map_count(
             protocol=self._sketch_protocol,
-            record_version=self.metadata.get("record_version"),
+            record_version=self.record_version,
             has_canonical_array=self.gradient_position_sketches is not None,
             temperature_rank=None if temperature is None else int(temperature.ndim),
         )
@@ -1755,7 +1890,15 @@ class InitializationExperimentRecord:
             lambda path: np.savez_compressed(path, **arrays),
         )
         payload = dict(self.metadata)
-        payload["record_version"] = RECORD_VERSION
+        # The record's own version, never the module constant. Stamping the
+        # current version here promoted every re-saved legacy archive: loading a
+        # v11 record and saving it back produced a file claiming to be whatever
+        # this build was, around contents that had not changed. A record with no
+        # version keeps having none.
+        if self.record_version is None:
+            payload.pop("record_version", None)
+        else:
+            payload["record_version"] = self.record_version
         _atomic_write_bytes(
             directory / f"{name}.json",
             lambda path: path.write_text(
@@ -1782,6 +1925,7 @@ class InitializationExperimentRecord:
         # funnel: archive loads and direct in-memory construction both arrive
         # here.
         _require_supported_record_version(metadata.get("record_version"))
+        record_version = metadata.get("record_version")
 
         missing = sorted(set(_ARRAY_NAMES) - set(arrays))
         if missing:
@@ -1820,6 +1964,7 @@ class InitializationExperimentRecord:
             **loaded,
             eligible_token_ids=eligible,
             metadata=dict(metadata),
+            record_version=record_version,
             condition_greedy_counts=collect(_CONDITION_GREEDY_PREFIX),
             condition_nucleus_counts=collect(_CONDITION_NUCLEUS_PREFIX),
             uniform_null=collect(_NULL_PREFIX),
@@ -1839,6 +1984,7 @@ class InitializationExperimentRecord:
         mean_predicted_probabilities: np.ndarray,
         model_seeds: Sequence[int] | np.ndarray,
         metadata: Mapping[str, Any],
+        record_version: int | None = None,
         eligible_token_ids: Sequence[int] | np.ndarray | None = None,
         condition_greedy_counts: Mapping[str, np.ndarray] | None = None,
         condition_nucleus_counts: Mapping[str, np.ndarray] | None = None,
@@ -1872,6 +2018,13 @@ class InitializationExperimentRecord:
         structural tokens.
         """
 
+        # The record's version is whatever the caller's metadata declares, parsed
+        # into a field. Never the module constant: `build` must not be able to
+        # mint a version the caller did not ask for, and absence must survive as
+        # absence.
+        if record_version is None:
+            record_version = metadata.get("record_version")
+
         corpus = np.asarray(corpus_counts)
         eligible = (
             np.arange(corpus.shape[0])
@@ -1888,6 +2041,7 @@ class InitializationExperimentRecord:
             model_seeds=np.asarray(model_seeds),
             eligible_token_ids=eligible,
             metadata=dict(metadata),
+            record_version=record_version,
             condition_greedy_counts={
                 key: np.asarray(value) for key, value in (condition_greedy_counts or {}).items()
             },

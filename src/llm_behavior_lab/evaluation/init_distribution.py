@@ -203,6 +203,15 @@ class InitializationMeasurement:
     sweep_agreement: torch.Tensor | None = None
     #: The sweep temperatures, in the order the arrays are stored.
     sweep_temperatures: tuple[float, ...] = ()
+    #: ``[S, D]`` the token each position actually sampled at each sweep
+    #: temperature, or ``None`` when they were not requested.
+    #:
+    #: These come from the same draw on the same logits that produced
+    #: ``sweep_counts``, so the histogram gate downstream is satisfied by
+    #: construction -- which is a reason to expect it to pass, never a reason to
+    #: skip it. Recovering them after the fact needs a forward pass per
+    #: temperature and inherits the batch-size sensitivity of the logits.
+    sweep_labels: torch.Tensor | None = None
 
     @property
     def nucleus_counts_mean(self) -> torch.Tensor:
@@ -630,6 +639,8 @@ def _accumulate_batch(
     sweep_temperatures: tuple[float, ...] = (),
     sweep_counts: torch.Tensor | None = None,
     sweep_matches: list[int] | None = None,
+    sweep_labels: torch.Tensor | None = None,
+    label_offset: int = 0,
     probabilities_accumulator: _ProbabilityAccumulator | None = None,
     target_ids: torch.Tensor | None = None,
     eligible_size: int | None = None,
@@ -658,6 +669,16 @@ def _accumulate_batch(
             sampled = sampled_by_temperature[temperature]
             sweep_counts[index] += guess_counts(sampled, vocab_size=vocab_size)
             sweep_matches[index] += int((sampled == greedy_ids).sum())
+            if sweep_labels is not None:
+                # The very draw that produced the counts above, kept per
+                # position instead of only tallied. Recovering these afterwards
+                # costs a full forward pass per temperature -- about five hours
+                # for a production arm -- and reintroduces the batch-size
+                # sensitivity the reconstruction has to guard against, because
+                # the logits are the draw's other input. Keeping them here is
+                # 786 KiB and cannot drift from the histogram by construction.
+                flat = sampled.reshape(-1)
+                sweep_labels[index, label_offset : label_offset + flat.numel()] = flat
 
     for replicate in range(sampling.num_replicates):
         sampled = nucleus_guess_ids(
@@ -707,6 +728,7 @@ def measure_initialization(
     sweep_temperatures: Sequence[float] = (),
     collect_probability_statistics: bool = False,
     confidence_temperatures: Sequence[float] = CONFIDENCE_TEMPERATURES,
+    collect_sweep_labels: bool = False,
 ) -> InitializationMeasurement:
     """Measure one initialization without ever holding all logits.
 
@@ -776,6 +798,17 @@ def measure_initialization(
         else None
     )
     sweep_matches = [0] * len(temperatures) if temperatures else None
+    # [S, D] int32 -- 786 KiB at experiment scale, against a five-hour forward
+    # replay per arm to recover the same labels afterwards. Off by default, so a
+    # run that does not need them pays nothing.
+    sweep_labels = (
+        torch.zeros(
+            (len(temperatures), positions.num_positions),
+            dtype=torch.int32, device=device,
+        )
+        if temperatures and collect_sweep_labels
+        else None
+    )
 
     if input_ids is not None and inputs_embeds is not None:
         raise ValueError("Provide at most one of input_ids or inputs_embeds.")
@@ -842,6 +875,8 @@ def measure_initialization(
                 sweep_temperatures=temperatures,
                 sweep_counts=sweep_counts,
                 sweep_matches=sweep_matches,
+                sweep_labels=sweep_labels,
+                label_offset=consumed,
                 probabilities_accumulator=probabilities_accumulator,
                 # The targets never change with the input condition, so the
                 # target probability always refers to the real corpus token.
@@ -895,6 +930,7 @@ def measure_initialization(
 
     return InitializationMeasurement(
         model_seed=model_seed,
+        sweep_labels=None if sweep_labels is None else sweep_labels.cpu(),
         greedy_counts=greedy_counts.cpu(),
         nucleus_counts=nucleus_counts.cpu(),
         mean_predicted_probabilities=(probability_sum / consumed).float().cpu(),

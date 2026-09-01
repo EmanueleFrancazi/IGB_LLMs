@@ -920,3 +920,250 @@ def methodology_sweep(
         "per_map_cosines": per_map,
         "grid": grid,
     }
+
+
+# -- bounded, all-production-map fidelity summary (v13) ----------------------
+#
+# The v12 check re-projected retained gradients through map 0 only, which made
+# it structurally single-map. The production estimator averages inner products
+# over M independent maps, so a single-map check validates a different
+# instrument from the one the figures report.
+#
+# This uses the sketches the production maps actually produced, captured live
+# during the measurement. Rebuilding the maps afterwards to re-project would
+# compare exact gradients against a *reconstruction* of the instrument -- which
+# can agree perfectly while the instrument itself is wrong.
+
+#: Warning and failure thresholds on the mean absolute cosine error, expressed
+#: in the estimator's own error scale rather than as tuned constants. A
+#: CountSketch inner product has relative error of order ``1/sqrt(K)``, and
+#: averaging ``M`` independent maps divides its standard deviation by
+#: ``sqrt(M)`` -- so ``1/sqrt(K*M)`` is the natural unit and these are 2 and 6 of
+#: them.
+WARN_ERROR_SCALE = 2.0
+FAIL_ERROR_SCALE = 6.0
+
+
+def error_thresholds(dimension: int, maps: int) -> dict[str, float]:
+    """Warning and failure levels for one ``(K, M)`` configuration."""
+
+    scale = 1.0 / np.sqrt(float(dimension) * float(maps))
+    return {
+        "unit": scale,
+        "warn": WARN_ERROR_SCALE * scale,
+        "fail": FAIL_ERROR_SCALE * scale,
+    }
+
+
+def check_sanity_bounds(
+    *,
+    num_positions: int,
+    num_parameters: int,
+    maps: int,
+    dimension: int,
+    max_positions: int,
+    max_gradient_bytes: int,
+    max_sketch_bytes: int,
+) -> dict[str, Any]:
+    """Three independent bounds, because no one of them is sufficient.
+
+    A position count says nothing about a model with 134M parameters; a gradient
+    byte budget says nothing about a wide sketch at many maps; and a sketch
+    budget says nothing about the full gradients held beside it. Each is checked
+    on the *requested* size, before anything is allocated.
+    """
+
+    gradient_bytes = int(num_positions) * int(num_parameters) * 4
+    sketch_bytes = int(num_positions) * int(maps) * int(dimension) * 4
+    if num_positions > max_positions:
+        raise ValueError(
+            f"The fidelity check would retain {num_positions} positions, above "
+            f"the {max_positions} bound. It is a bounded diagnostic over a "
+            "deterministic handful, not a second analysis."
+        )
+    if gradient_bytes > max_gradient_bytes:
+        raise ValueError(
+            f"Retaining {num_positions} complete gradients over "
+            f"{num_parameters:,} parameters needs {gradient_bytes:,} bytes, "
+            f"above the {max_gradient_bytes:,} bound."
+        )
+    if sketch_bytes > max_sketch_bytes:
+        raise ValueError(
+            f"Retaining the matching sketches at M={maps}, K={dimension} needs "
+            f"{sketch_bytes:,} bytes, above the {max_sketch_bytes:,} bound."
+        )
+    return {
+        "num_positions": int(num_positions),
+        "gradient_bytes": gradient_bytes,
+        "sketch_bytes": sketch_bytes,
+        "max_positions": int(max_positions),
+        "max_gradient_bytes": int(max_gradient_bytes),
+        "max_sketch_bytes": int(max_sketch_bytes),
+    }
+
+
+def ensemble_fidelity_summary(
+    gradients: np.ndarray,
+    sketches: np.ndarray,
+    norms: np.ndarray,
+    target_ids: np.ndarray,
+    greedy_ids: np.ndarray,
+    *,
+    dimension: int,
+    quantiles: Sequence[float] = (95.0, 99.0),
+) -> dict[str, Any]:
+    """Compare exact cosines against the **production ensemble** estimate.
+
+    Args:
+        gradients: ``[m, P]`` retained exact gradients.
+        sketches: ``[m, M, K]`` the sketches the production maps produced for
+            those same positions, captured live.
+        norms: ``[m]`` exact gradient norms.
+
+    Only **non-self** pairs enter the error statistics: a diagonal entry
+    compares a gradient with itself, where the estimator is trivially
+    well-behaved, and including it would dilute exactly the error being
+    measured. The subgroup comparison uses the same ``Q``-corrected diagonal
+    exclusion the production statistics use, so it exercises the estimator
+    rather than a simplified stand-in.
+    """
+
+    from llm_behavior_lab.analysis.sketch_estimator import (
+        retained_ensemble_cosine_matrix,
+    )
+
+    exact = cosine_from_gram(np.asarray(gradients, dtype=np.float64),
+                             np.asarray(norms, dtype=np.float64))
+    unit = np.asarray(sketches, dtype=np.float64) / np.asarray(
+        norms, dtype=np.float64
+    )[:, None, None]
+    estimated = retained_ensemble_cosine_matrix(unit)
+
+    size = exact.shape[0]
+    off = ~np.eye(size, dtype=bool)
+    error = estimated[off] - exact[off]
+
+    # Both counts, named for what they are. The error statistics are computed
+    # over the **ordered** off-diagonal entries -- every unordered pair appears
+    # twice, once as (a, b) and once as (b, a) -- which leaves MAE, RMSE and the
+    # correlation unchanged because the matrix is symmetric, but makes "132" and
+    # "66" both true statements about 12 gradients. Reporting one number called
+    # `num_pairs` left the reader to guess which.
+    summary: dict[str, Any] = {
+        "num_gradients": int(size),
+        "num_ordered_pairs": int(off.sum()),
+        "num_unordered_pairs": int(off.sum() // 2),
+        "pair_convention": "ordered_off_diagonal",
+        "map_count": int(np.asarray(sketches).shape[1]),
+        "dimension": int(dimension),
+        "bias": float(error.mean()),
+        "mean_absolute_error": float(np.abs(error).mean()),
+        "median_absolute_error": float(np.median(np.abs(error))),
+        "rmse": float(np.sqrt((error ** 2).mean())),
+        "max_absolute_error": float(np.abs(error).max()),
+        "num_below_minus_one": int((estimated[off] < -1.0).sum()),
+        "num_above_plus_one": int((estimated[off] > 1.0).sum()),
+        "exact_cosines": exact,
+        "production_cosines": estimated,
+    }
+    for level in quantiles:
+        summary[f"p{int(level)}_absolute_error"] = float(
+            np.percentile(np.abs(error), level)
+        )
+    if error.size >= 3 and exact[off].std() > 0 and estimated[off].std() > 0:
+        summary["pearson_correlation"] = float(
+            np.corrcoef(exact[off], estimated[off])[0, 1]
+        )
+    else:
+        summary["pearson_correlation"] = float("nan")
+
+    summary["pair_types"] = pair_type_breakdown(
+        exact, estimated, target_ids, greedy_ids
+    )
+    summary["subgroup_deltas"] = {}
+    for name, labels in (("target", target_ids), ("greedy", greedy_ids)):
+        exact_delta = subgroup_delta(exact, labels)
+        sketch_delta = subgroup_delta(estimated, labels)
+        entry = {"exact": exact_delta, "sketch": sketch_delta}
+        if exact_delta["available"] and sketch_delta["available"]:
+            entry["delta_error"] = sketch_delta["delta"] - exact_delta["delta"]
+        summary["subgroup_deltas"][name] = entry
+
+    thresholds = error_thresholds(dimension, summary["map_count"])
+    summary["thresholds"] = thresholds
+    mae = summary["mean_absolute_error"]
+    summary["outcome"] = (
+        "fail" if mae > thresholds["fail"]
+        else "warn" if mae > thresholds["warn"]
+        else "pass"
+    )
+    return summary
+
+
+def sanity_arrays(
+    summary: dict[str, Any],
+    *,
+    position_indices: np.ndarray | None = None,
+    target_ids: np.ndarray | None = None,
+    greedy_ids: np.ndarray | None = None,
+    seed: int = 0,
+) -> dict[str, np.ndarray]:
+    """The compact form that goes into the metrics artifact.
+
+    Derived results only. The exact gradients and the sampled sketch matrices
+    are **never** persisted: they are the largest things the check touches, they
+    exist for the duration of one comparison, and an artifact carrying them
+    would defeat the storage design they are diagnosing.
+    """
+
+    out = {
+        "sanity_exact_cosine_matrix": np.asarray(summary["exact_cosines"]),
+        "sanity_production_cosine_matrix": np.asarray(summary["production_cosines"]),
+        "sanity_dimension": np.asarray(summary["dimension"], dtype=np.int64),
+        "sanity_map_count": np.asarray(summary["map_count"], dtype=np.int64),
+        "sanity_num_ordered_pairs": np.asarray(
+            summary["num_ordered_pairs"], dtype=np.int64
+        ),
+        "sanity_num_unordered_pairs": np.asarray(
+            summary["num_unordered_pairs"], dtype=np.int64
+        ),
+        # Named in the artifact so a stored count is never ambiguous.
+        "sanity_pair_convention": np.asarray(
+            summary["pair_convention"], dtype="<U24"
+        ),
+        "sanity_threshold_outcome": np.asarray(summary["outcome"], dtype="<U8"),
+        "sanity_seed": np.asarray(seed, dtype=np.int64),
+    }
+    # Which positions were compared, so the figure can label its axes and a
+    # reader can see the selection was made from labels and position order
+    # alone -- never from a similarity value, which would make the check
+    # circular. Twelve int64s each.
+    for name, values in (
+        ("selected_position_indices", position_indices),
+        ("selected_target_ids", target_ids),
+        ("selected_greedy_ids", greedy_ids),
+    ):
+        if values is not None:
+            out[f"sanity_{name}"] = np.asarray(values, dtype=np.int64)
+    for name in (
+        "bias", "mean_absolute_error", "median_absolute_error", "rmse",
+        "max_absolute_error", "pearson_correlation",
+    ):
+        out[f"sanity_{name}"] = np.asarray(summary[name], dtype=np.float64)
+    for key, value in summary.items():
+        if key.startswith("p") and key.endswith("_absolute_error"):
+            out[f"sanity_{key}"] = np.asarray(value, dtype=np.float64)
+    for name in ("warn", "fail"):
+        out[f"sanity_threshold_{name}"] = np.asarray(
+            summary["thresholds"][name], dtype=np.float64
+        )
+    for grouping, entry in summary["subgroup_deltas"].items():
+        for side in ("exact", "sketch"):
+            for field in ("within", "between", "delta"):
+                out[f"sanity_{grouping}_{side}_{field}"] = np.asarray(
+                    entry[side].get(field, np.nan), dtype=np.float64
+                )
+        out[f"sanity_{grouping}_delta_error"] = np.asarray(
+            entry.get("delta_error", np.nan), dtype=np.float64
+        )
+    return out

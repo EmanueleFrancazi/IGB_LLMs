@@ -48,6 +48,7 @@ from llm_behavior_lab.analysis import (  # noqa: E402
     summarize_policy,
     within_initialization_sampling_spread,
 )
+from llm_behavior_lab.analysis.records import STORAGE_MODES  # noqa: E402
 from llm_behavior_lab.analysis.reporting import (  # noqa: E402
     report_gradient_norms,
     report_input_structure,
@@ -278,6 +279,84 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sketch-storage",
+        choices=STORAGE_MODES,
+        default=None,
+        help=(
+            "What a run keeps of its per-position sketches. 'metrics_only' (the "
+            "default) finalizes every declared statistic and then retains "
+            "neither rows nor factors -- about 2 MiB per arm instead of 3.5 GiB. "
+            "'per_position' keeps the full exploratory row surface at that cost "
+            "and is bounded by --sketch-storage-max-bytes. All three modes "
+            "finalize metrics; the mode says what was ADDITIONALLY kept."
+        ),
+    )
+    parser.add_argument(
+        "--sketch-storage-max-bytes",
+        type=int,
+        default=512 * 1024 * 1024,
+        help=(
+            "Ceiling on retained per-position sketches. A production arm is "
+            "about 3.5 GiB, so the default refuses one outright: keeping rows at "
+            "experiment scale is a deliberate diagnostic choice, not a default."
+        ),
+    )
+    parser.add_argument(
+        "--fidelity-max-positions",
+        type=int,
+        default=12,
+        help="Bound on retained sanity positions.",
+    )
+    parser.add_argument(
+        "--fidelity-max-gradient-bytes",
+        type=int,
+        default=1024 ** 3,
+        help=(
+            "Bound on the retained complete gradients. Independent of the "
+            "position bound: a count says nothing about a 134M-parameter model."
+        ),
+    )
+    parser.add_argument(
+        "--fidelity-max-sketch-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+        help=(
+            "Bound on the retained sketches. Independent again: a gradient "
+            "budget says nothing about a wide sketch at many maps."
+        ),
+    )
+    parser.add_argument(
+        "--sketch-factors",
+        default=None,
+        help=(
+            "Which subgroup gradient-sketch factors compact_factors retains, "
+            "e.g. 'target@1.0,greedy@1.0,cross@1.0,nucleus:0.6@0.6'. Explicit "
+            "by design: retaining factors decides which questions stay askable "
+            "afterwards, so there is no wildcard and no default set."
+        ),
+    )
+    parser.add_argument(
+        "--sketch-factors-max-bytes",
+        type=int,
+        default=512 * 1024 * 1024,
+        help="Ceiling on the retained factor arrays.",
+    )
+    parser.add_argument(
+        "--gradient-temp-dir",
+        default=None,
+        help=(
+            "Where the temporary sketch slabs live. The durable manifest always "
+            "stays in the run directory, so losing node-local scratch remains "
+            "diagnosable from the run alone."
+        ),
+    )
+    parser.add_argument(
+        "--gradient-temp-max-bytes",
+        type=int,
+        default=8 * 1024 ** 3,
+        help="Ceiling on the temporary sketch store.",
+    )
+    parser.add_argument(
         "--sketch-maps",
         type=int,
         # None for the same reason as --sketch-dimension above: the resolution
@@ -484,20 +563,10 @@ def _validate_sketch_map_request(protocol: dict[str, Any]) -> None:
             "--sketch-maps at 1."
         )
 
-    if protocol["countsketch_fidelity_sanity"]:
-        raise ValueError(
-            f"--sketch-maps {map_count} cannot be combined with "
-            "--countsketch-fidelity-sanity.\n"
-            "Production replicas themselves are supported; what is not is this "
-            "diagnostic's reconstruction, which is map-0 only and assumes "
-            "two-dimensional [positions, K] sketches. A multi-map measurement "
-            "produces [positions, M, K], so every line of it would be wrong.\n"
-            "This says nothing about the offline alternate-map fidelity "
-            "methodology, which re-projects retained exact gradients through "
-            "independent maps and remains valid and unaffected.\n"
-            "Re-run the fidelity sanity check with --sketch-maps 1, and measure "
-            "the replicas in a separate run."
-        )
+    # The M>1 refusal is gone: the check now compares against the sketches every
+    # production map actually produced, captured live during the measurement,
+    # so it validates the ensemble estimator the figures use rather than map 0
+    # alone.
 
 
 def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -572,6 +641,32 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         # including 1 -- a run that measured one map should say so explicitly
         # rather than leave it to be inferred from an array's shape.
         "sketch_maps": _resolve_sketch_maps(args, gradients),
+        # metrics_only is the production default: every declared statistic is
+        # finalized while the rows exist, and then the rows go. A mode chosen on
+        # the command line wins over the config, as every other sketch knob does.
+        "sketch_storage": (
+            args.sketch_storage
+            if getattr(args, "sketch_storage", None) is not None
+            else gradients.get("sketch_storage", "metrics_only")
+        ),
+        "sketch_storage_max_bytes": int(
+            getattr(args, "sketch_storage_max_bytes", 512 * 1024 * 1024)
+        ),
+        "fidelity_max_positions": int(getattr(args, "fidelity_max_positions", 12)),
+        "fidelity_max_gradient_bytes": int(
+            getattr(args, "fidelity_max_gradient_bytes", 1024 ** 3)
+        ),
+        "fidelity_max_sketch_bytes": int(
+            getattr(args, "fidelity_max_sketch_bytes", 256 * 1024 * 1024)
+        ),
+        "sketch_factors": getattr(args, "sketch_factors", None),
+        "sketch_factors_max_bytes": int(
+            getattr(args, "sketch_factors_max_bytes", 512 * 1024 * 1024)
+        ),
+        "gradient_temp_dir": getattr(args, "gradient_temp_dir", None),
+        "gradient_temp_max_bytes": int(
+            getattr(args, "gradient_temp_max_bytes", 8 * 1024 ** 3)
+        ),
         "gradient_vector_split": (
             bool(gradients.get("vector_split", False))
             or bool(getattr(args, "gradient_vector_split", False))
@@ -603,6 +698,26 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
     # resolves a protocol -- the runner, and the tests that resolve one directly
     # -- gets the same refusal, and main() reaches this before it loads a dataset
     # or builds a model.
+    if protocol["sketch_storage"] == "compact_factors" and not protocol[
+        "sketch_factors"
+    ]:
+        raise ValueError(
+            "compact_factors retains an explicitly declared factor set, so "
+            "--sketch-factors is required. Retaining nothing is what "
+            "metrics_only already does."
+        )
+    if protocol["sketch_storage"] != "compact_factors" and protocol[
+        "sketch_factors"
+    ]:
+        raise ValueError(
+            "--sketch-factors only applies to --sketch-storage compact_factors; "
+            "no other mode persists subgroup factors."
+        )
+    if protocol["sketch_storage"] not in STORAGE_MODES:
+        raise ValueError(
+            f"Unknown --sketch-storage {protocol['sketch_storage']!r}; expected "
+            f"one of {', '.join(STORAGE_MODES)}."
+        )
     _validate_sketch_map_request(protocol)
     return protocol
 
@@ -685,27 +800,11 @@ def _write_countsketch_fidelity(run, gradient_result, protocol) -> None:
     # directory is touched, so a refusal cannot leave a half-written fidelity
     # result behind.
     #
-    # The reconstruction below is map-0 and strictly two-dimensional -- it takes
-    # one (buckets, signs) pair and a [positions, K] block. At M > 1 the sketch
-    # rows are [positions, M, K] and every line of it would be wrong, so this
-    # refuses rather than producing a number that looks plausible.
-    #
-    # A missing key means an older in-memory result from before the map count was
-    # recorded; those were single-map by construction, so they are read as M = 1.
+    # At M > 1 the check reads the sketches the production maps actually
+    # produced, captured live beside the exact gradients, so there is no
+    # reconstruction to be map-0 or two-dimensional about. What used to be
+    # refused here is now the ordinary path.
     fidelity_map_count = _measured_map_count(gradient_result)
-    if fidelity_map_count != 1:
-        raise ValueError(
-            f"The CountSketch fidelity sanity check cannot run at "
-            f"map_count={fidelity_map_count}. Its reconstruction is map-0 only "
-            "and assumes two-dimensional [positions, K] sketches, which is not "
-            "what a multi-map measurement produces.\n"
-            "This is not the offline alternate-map methodology: that one "
-            "re-projects retained exact gradients through independent maps to "
-            "estimate how far a reported error would move, and it remains valid "
-            "and unaffected. What is refused here is reconstructing *production* "
-            "replicas, which needs a map-aware reconstruction that does not exist "
-            "yet. Re-run the fidelity sanity check with a single production map."
-        )
 
     gradients = gradient_result.exact_gradients.numpy()
     indices = gradient_result.exact_positions.numpy()
@@ -1004,6 +1103,12 @@ def main() -> None:
     embedding_moment_log: list[dict[str, Any]] = []
     parameter_count = 0
     gradient_result = None
+    # Scoped here so the publication step below can see them whether or not the
+    # gradient analysis ran at all.
+    sketch_store = None
+    row_sink = None
+    sweep_labels = None
+    nucleus_gate_outcome = None
     scale_applied: dict[str, Any] = {}
     scale_report: dict[str, Any] = {}
     logit_diagnostics: list[dict[str, Any]] = []
@@ -1072,6 +1177,14 @@ def main() -> None:
                 forward_batch_size=protocol["forward_batch_size"],
                 device=device,
                 sweep_temperatures=sweep_temperatures,
+                # Only for the initialization whose gradients are measured: the
+                # labels exist to group *those* gradients, and capturing them for
+                # every initialization would keep twelve copies of something only
+                # one of them can use.
+                collect_sweep_labels=(
+                    protocol["gradient_analysis_enabled"]
+                    and index == protocol["gradient_initialization_index"]
+                ),
                 **condition_inputs,
             )
 
@@ -1088,6 +1201,44 @@ def main() -> None:
             protocol["gradient_analysis_enabled"]
             and index == protocol["gradient_initialization_index"]
         ):
+            # The nucleus labels this initialization actually drew, kept rather
+            # than only tallied. Recovering them afterwards costs a forward pass
+            # per sampling temperature -- about five hours for a production arm.
+            #
+            # They come from the same draw on the same logits that produced the
+            # recorded counts, so the gate below is expected to pass. It still
+            # runs: the gate is a check on the data, and a reconstruction that
+            # does not reproduce the recorded histogram is a reconstruction of
+            # some other model. Replacing a check with an argument is how that
+            # protection gets lost.
+            if measurements[-1].sweep_labels is not None:
+                from llm_behavior_lab.analysis.nucleus_clustering import (
+                    histogram_gate,
+                )
+
+                sweep_labels = measurements[-1].sweep_labels.numpy()
+                histogram_gate(
+                    sweep_labels,
+                    measurements[-1].sweep_counts.numpy(),
+                    vocab_size=tokenizer.vocab_size,
+                    temperatures=sweep_temperatures,
+                )
+                nucleus_gate_outcome = {
+                    "passed": True,
+                    "comparison": "exact_integer_equality",
+                    "temperatures": [float(value) for value in sweep_temperatures],
+                    "model_seed": int(model_seed),
+                    "forward_batch_size": int(protocol["forward_batch_size"]),
+                    "top_p": float(sampling.top_p),
+                    "sampling_seed": int(sampling.seed),
+                    "source": "captured_during_run",
+                }
+                print(
+                    f"    nucleus labels captured for "
+                    f"{len(sweep_temperatures)} sampling temperatures; "
+                    "histogram gate passed"
+                )
+
             # Measured on the model object that was just measured above, not on a
             # re-seeded reconstruction of it: the observable describes *this*
             # initialization. The call leaves every parameter, buffer, gradient,
@@ -1113,6 +1264,93 @@ def main() -> None:
                     f"    countsketch fidelity sanity: capturing "
                     f"{len(sanity_positions)} exact gradients"
                 )
+            # metrics_only and compact_factors stream their rows to bounded
+            # disk; per_position keeps the historical in-memory surface, capped,
+            # because at experiment scale it is 3.5 GiB.
+            sketch_store = None
+            if protocol["gradient_sketch"] and protocol["sketch_storage"] == (
+                "per_position"
+            ):
+                # The rows are kept, so the sink is the historical in-memory
+                # array -- but the run still finalizes, because the mode says
+                # what was ADDITIONALLY retained, never whether the analysis ran.
+                from llm_behavior_lab.evaluation.sketch_store import (
+                    InMemoryRowSink,
+                    SketchStoreLayout,
+                )
+
+                measured_positions = (
+                    positions.num_positions
+                    if protocol["gradient_num_windows"] is None
+                    else protocol["gradient_num_windows"] * positions.block_size
+                )
+                retained_bytes = (
+                    len(protocol["gradient_temperatures"]) * measured_positions
+                    * protocol["sketch_maps"] * protocol["sketch_dimension"] * 4
+                )
+                if retained_bytes > protocol["sketch_storage_max_bytes"]:
+                    raise ValueError(
+                        f"per_position would retain {retained_bytes:,} bytes "
+                        f"({retained_bytes / 1024 ** 3:.2f} GiB) but the limit is "
+                        f"{protocol['sketch_storage_max_bytes']:,}. Keeping rows "
+                        "at experiment scale is a deliberate diagnostic choice; "
+                        "raise --sketch-storage-max-bytes to make it one."
+                    )
+                row_sink = InMemoryRowSink(
+                    SketchStoreLayout(
+                        num_temperatures=len(protocol["gradient_temperatures"]),
+                        num_positions=measured_positions,
+                        num_maps=protocol["sketch_maps"],
+                        num_buckets=protocol["sketch_dimension"],
+                    )
+                )
+            elif protocol["gradient_sketch"]:
+                from llm_behavior_lab.evaluation.sketch_store import (
+                    SketchStoreLayout,
+                    TemporarySketchStore,
+                    preflight_storage,
+                )
+
+                store_layout = SketchStoreLayout(
+                    num_temperatures=len(protocol["gradient_temperatures"]),
+                    num_positions=positions.num_positions
+                    if protocol["gradient_num_windows"] is None
+                    else protocol["gradient_num_windows"] * positions.block_size,
+                    num_maps=protocol["sketch_maps"],
+                    num_buckets=protocol["sketch_dimension"],
+                )
+                # The run directory does not exist yet -- `ExperimentRun.create`
+                # runs after the measurement -- so the durable manifest is
+                # anchored to the output directory, which does. Its path is
+                # recorded in the published record, so a store left behind on
+                # lost node-local scratch is still traceable from the run.
+                manifest_dir = resolve_repo_path(
+                    experiment_settings_from_config(experiment_config).output_dir
+                    if args.output_dir is None
+                    else args.output_dir
+                ) / "_gradient_tmp"
+                bulk_dir = (
+                    Path(protocol["gradient_temp_dir"])
+                    if protocol["gradient_temp_dir"]
+                    else manifest_dir
+                )
+                store_preflight = preflight_storage(
+                    store_layout, bulk_dir,
+                    max_bytes=protocol["gradient_temp_max_bytes"],
+                    reserve_bytes=2 * 1024 ** 3,
+                )
+                row_sink = sketch_store = TemporarySketchStore.create(
+                    manifest_dir=manifest_dir, bulk_dir=bulk_dir,
+                    layout=store_layout,
+                    run_id=str(args.run_id or "pending"),
+                    preflight=store_preflight,
+                )
+                print(
+                    f"    temporary sketch store: "
+                    f"{store_layout.total_bytes / 1024 ** 2:,.0f} MiB in "
+                    f"{store_layout.num_slabs} slabs"
+                )
+
             gradient_result = compute_position_gradient_norms(
                 model,
                 positions,
@@ -1125,6 +1363,7 @@ def main() -> None:
                 sketch_dimension=protocol["sketch_dimension"],
                 sketch_maps=protocol["sketch_maps"],
                 exact_gradient_positions=sanity_positions,
+                row_sink=row_sink,
             )
             if gradient_result.vector_split is not None:
                 split = gradient_result.vector_split
@@ -1467,16 +1706,306 @@ def main() -> None:
             }
         ),
     )
-    record.save(run.paths.analyses_dir)
+    # -- finalize and publish -------------------------------------------------
+    #
+    # Everything the declared analysis contract promises is computed here, while
+    # the rows still exist, and the whole bundle is published as one transaction.
+    # Only once that bundle has been re-read from its real location are the rows
+    # released: they are the only thing that could regenerate what was published.
+    if row_sink is not None and gradient_result is not None:
+        import dataclasses as _dataclasses
+
+        from llm_behavior_lab.analysis.alignment_estimators import (
+            ESTIMATOR_CONVENTION,
+            NUMERICAL_EPOCH,
+            REDUCTION_CONVENTION,
+        )
+        from llm_behavior_lab.analysis.alignment_finalization import (
+            FinalizationInputs,
+            build_metrics_arrays,
+            finalize_alignment_metrics,
+        )
+        from llm_behavior_lab.analysis.alignment_metrics import AlignmentMetrics
+        from llm_behavior_lab.analysis.alignment_publication import (
+            publish_finalized_run,
+        )
+
+        if sketch_store is not None:
+            sketch_store.begin_finalization()
+        try:
+            finalization_started = time.perf_counter()
+
+            # The bounded fidelity summary, computed from the sketches every
+            # production map actually produced. It goes into the authoritative
+            # artifact rather than a second file, so there is one v13 artifact
+            # to keep in step.
+            #
+            # The gradients and their sketches are the largest things this run
+            # still holds -- hundreds of megabytes at experiment scale -- and
+            # they are released in the `finally` below on every path, success or
+            # failure, before anything else is attempted.
+            sanity_summary = None
+            sanity_selection = None
+            if (
+                gradient_result.exact_gradients is not None
+                and gradient_result.exact_sketches is not None
+            ):
+                from llm_behavior_lab.analysis.countsketch_fidelity import (
+                    check_sanity_bounds,
+                    ensemble_fidelity_summary,
+                )
+
+                try:
+                    exact = gradient_result.exact_gradients.numpy()
+                    sampled = gradient_result.exact_sketches.numpy()
+                    lookup = {
+                        int(value): row
+                        for row, value in enumerate(
+                            gradient_result.position_indices.numpy()
+                        )
+                    }
+                    rows = [
+                        lookup[int(index)]
+                        for index in gradient_result.exact_positions.numpy()
+                    ]
+                    check_sanity_bounds(
+                        num_positions=exact.shape[0],
+                        num_parameters=exact.shape[1],
+                        maps=protocol["sketch_maps"],
+                        dimension=protocol["sketch_dimension"],
+                        max_positions=protocol["fidelity_max_positions"],
+                        max_gradient_bytes=protocol["fidelity_max_gradient_bytes"],
+                        max_sketch_bytes=protocol["fidelity_max_sketch_bytes"],
+                    )
+                    sanity_summary = ensemble_fidelity_summary(
+                        exact, sampled,
+                        gradient_result.gradient_norms.numpy()[rows],
+                        gradient_result.target_ids.numpy()[rows],
+                        gradient_result.greedy_ids.numpy()[rows],
+                        dimension=protocol["sketch_dimension"],
+                    )
+                    sanity_selection = {
+                        "positions": gradient_result.exact_positions.numpy(),
+                        "targets": gradient_result.target_ids.numpy()[rows],
+                        "greedy": gradient_result.greedy_ids.numpy()[rows],
+                    }
+                    print(
+                        f"    countsketch fidelity ({sanity_summary['map_count']} "
+                        f"maps): MAE {sanity_summary['mean_absolute_error']:.5f}, "
+                        f"outcome {sanity_summary['outcome']}"
+                    )
+                finally:
+                    # Released here, not after publication: nothing downstream
+                    # needs them and holding them through finalization would
+                    # double the run's peak for no reason.
+                    gradient_result = dataclasses.replace(
+                        gradient_result, exact_gradients=None, exact_sketches=None
+                    )
+                    exact = sampled = None
+
+            factor_selections = ()
+            if protocol["sketch_factors"]:
+                from llm_behavior_lab.analysis.compact_factors import (
+                    estimate_factor_bytes,
+                    parse_factor_selection,
+                )
+
+                factor_selections = tuple(
+                    parse_factor_selection(protocol["sketch_factors"])
+                )
+                # Estimated against the realized class count, before anything is
+                # built: float64 factors at a subword vocabulary are hundreds of
+                # megabytes per selection.
+                realized_classes = int(
+                    np.unique(gradient_result.target_ids.numpy()).size
+                )
+                factor_bytes = estimate_factor_bytes(
+                    factor_selections,
+                    num_classes=realized_classes,
+                    num_maps=protocol["sketch_maps"],
+                    num_buckets=protocol["sketch_dimension"],
+                )
+                if factor_bytes > protocol["sketch_factors_max_bytes"]:
+                    raise ValueError(
+                        f"The declared factor selection would retain "
+                        f"{factor_bytes:,} bytes but the limit is "
+                        f"{protocol['sketch_factors_max_bytes']:,}. Narrow the "
+                        "selection or raise --sketch-factors-max-bytes."
+                    )
+                print(
+                    f"    retaining {len(factor_selections)} factor selection(s), "
+                    f"about {factor_bytes / 1024 ** 2:,.1f} MiB"
+                )
+
+            inputs = FinalizationInputs(
+                loss_temperatures=np.asarray(gradient_result.temperatures),
+                norms=gradient_result.temperature_gradient_norms.numpy(),
+                target_ids=gradient_result.target_ids.numpy(),
+                greedy_ids=gradient_result.greedy_ids.numpy(),
+                nucleus_labels=sweep_labels,
+                sampling_temperatures=np.asarray(sweep_temperatures, dtype=float),
+                factor_selections=factor_selections,
+            )
+            finalized = finalize_alignment_metrics(
+                row_sink.iter_slabs(), inputs,
+                num_maps=protocol["sketch_maps"],
+                progress=lambda stage, done, total, elapsed: print(
+                    f"    {stage}: {done}/{total} slabs, {elapsed:.0f}s"
+                ),
+            )
+            arrays = build_metrics_arrays(finalized, inputs)
+            if sanity_summary is not None:
+                from llm_behavior_lab.analysis.countsketch_fidelity import (
+                    sanity_arrays,
+                )
+
+                arrays.update(
+                    sanity_arrays(
+                        sanity_summary,
+                        position_indices=sanity_selection["positions"],
+                        target_ids=sanity_selection["targets"],
+                        greedy_ids=sanity_selection["greedy"],
+                        seed=protocol["sketch_seed"]
+                        if "sketch_seed" in protocol else 20240917,
+                    )
+                )
+            finalization_seconds = time.perf_counter() - finalization_started
+
+            def _factory(reference):
+                block = {
+                    "storage_mode": protocol["sketch_storage"],
+                    "alignment_metrics_schema_version": 1,
+                    "estimator_convention": ESTIMATOR_CONVENTION,
+                    "reduction_convention": REDUCTION_CONVENTION,
+                    "numerical_epoch": NUMERICAL_EPOCH,
+                    "metrics_artifact": reference,
+                    # One authoritative home for the operational limits that
+                    # have no other owner. `gradient_temp_max_bytes`,
+                    # `reserve_bytes` and `safety_factor` are deliberately NOT
+                    # repeated here: `temporary_store.preflight` already owns
+                    # them, and two copies of one fact is one too many.
+                    #
+                    # The resolved temp directory is recorded as a *policy*, not
+                    # a path. A completed record must stay portable, and the
+                    # absolute location -- which may be node-local scratch that
+                    # no longer exists -- belongs in the live manifest, where it
+                    # is operationally necessary, not in the published artifact.
+                    "storage_limits": {
+                        "sketch_storage_max_bytes": protocol[
+                            "sketch_storage_max_bytes"
+                        ],
+                        "sketch_factors_max_bytes": protocol[
+                            "sketch_factors_max_bytes"
+                        ],
+                        "temp_dir_policy": (
+                            "explicit_override"
+                            if protocol["gradient_temp_dir"]
+                            else "output_root_gradient_tmp"
+                        ),
+                        "temp_dir_overridden": bool(protocol["gradient_temp_dir"]),
+                    },
+                    "finalization_status": "complete",
+                    "factor_selection": [
+                        selection.as_dict() for selection in factor_selections
+                    ],
+                    "finalization_seconds": round(finalization_seconds, 3),
+                    # The compact, path-free form: a completed run must stay
+                    # portable, and the bulk directory it names is deleted
+                    # moments later. The full manifest keeps its absolute paths
+                    # under the temporary root, where they are only useful while
+                    # a store still exists to point at.
+                    "temporary_store": (
+                        None if sketch_store is None
+                        else sketch_store.compact_manifest()
+                    ),
+                    "nucleus_histogram_gate": nucleus_gate_outcome,
+                    "sanity": (
+                        None if sanity_summary is None
+                        else {
+                            "enabled": True,
+                            "map_count": sanity_summary["map_count"],
+                            "num_ordered_pairs": sanity_summary[
+                                "num_ordered_pairs"
+                            ],
+                            "num_unordered_pairs": sanity_summary[
+                                "num_unordered_pairs"
+                            ],
+                            "pair_convention": sanity_summary["pair_convention"],
+                            "outcome": sanity_summary["outcome"],
+                            "thresholds": sanity_summary["thresholds"],
+                            "bounds": {
+                                "max_positions": protocol["fidelity_max_positions"],
+                                "max_gradient_bytes": protocol[
+                                    "fidelity_max_gradient_bytes"
+                                ],
+                                "max_sketch_bytes": protocol[
+                                    "fidelity_max_sketch_bytes"
+                                ],
+                            },
+                        }
+                    ),
+                }
+                metadata = dict(record_metadata)
+                analysis = dict(metadata.get("analysis", {}))
+                gradient = dict(analysis.get("gradient_analysis", {}))
+                gradient["gradient_alignment"] = block
+                analysis["gradient_analysis"] = gradient
+                metadata["analysis"] = analysis
+                return _dataclasses.replace(record, metadata=metadata)
+
+            publish_finalized_run(
+                run.paths.analyses_dir,
+                record_factory=_factory,
+                metrics=AlignmentMetrics(
+                    arrays=arrays,
+                    provenance={
+                        "storage_mode": protocol["sketch_storage"],
+                        "declared_analyses": sorted(
+                            {job.kind for job in finalized["jobs"]}
+                        ),
+                        "permutations": inputs.permutations,
+                        "permutation_seed": inputs.permutation_seed,
+                        "min_support": inputs.min_support,
+                        "factor_selection": [
+                            selection.as_dict() for selection in factor_selections
+                        ],
+                    },
+                ),
+            )
+        except BaseException as error:
+            # Collection succeeded; only finalization did not. The rows are
+            # hours of measurement and are kept so the run can be finalized
+            # again -- never discarded because a later step failed.
+            if sketch_store is not None:
+                sketch_store.mark_recoverable(f"{type(error).__name__}: {error}")
+                print(
+                    f"    finalization failed: {error}\n"
+                    f"    rows retained at {sketch_store.directory}"
+                )
+            raise
+        if sketch_store is not None:
+            sketch_store.mark_published()
+            sketch_store.discard()
+        print(f"    finalized in {finalization_seconds:.1f}s; rows released")
+    else:
+        record.save(run.paths.analyses_dir)
 
     # After the record, because the artifact belongs to a run directory and that
     # only exists once ExperimentRun.create has run. gradient_result is still the
     # object the gradient loop produced -- it is read a few lines above to build
     # the record -- so nothing is recomputed and no second backward pass happens.
     # The captured vectors are released as soon as this returns.
+    # Legacy path only. A v13 run has already folded the fidelity summary into
+    # the authoritative metrics artifact and released the buffers, so reaching
+    # here means no finalization ran and the separate file is the only home the
+    # summary has.
     if gradient_result is not None and gradient_result.exact_gradients is not None:
-        _write_countsketch_fidelity(run, gradient_result, protocol)
-        gradient_result = dataclasses.replace(gradient_result, exact_gradients=None)
+        try:
+            _write_countsketch_fidelity(run, gradient_result, protocol)
+        finally:
+            gradient_result = dataclasses.replace(
+                gradient_result, exact_gradients=None, exact_sketches=None
+            )
 
     # ---- scalar summaries through the existing metric pipeline ------------
     adequacy = sampling_adequacy(record)

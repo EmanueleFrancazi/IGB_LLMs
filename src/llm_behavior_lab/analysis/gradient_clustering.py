@@ -53,6 +53,11 @@ from typing import Any
 
 import numpy as np
 
+from llm_behavior_lab.analysis.alignment_estimators import (
+    permutation_orders as _permutation_orders,
+    pooled_from_factors,
+)
+
 __all__ = [
     "GROUPINGS",
     "class_similarity_matrix",
@@ -346,60 +351,19 @@ def _summary_from_matrix(result: dict[str, Any]) -> dict[str, Any]:
 DEFAULT_PERMUTATIONS = 256
 
 
-def _pooled_from_blocks(
-    sums: np.ndarray, counts: np.ndarray, self_squared: np.ndarray
-) -> tuple[float, float]:
-    """Pooled within and between similarity, without forming the C x C matrix.
+# Both of these live in `alignment_estimators` now, and are imported rather than
+# restated. They are shared across the reduction epochs, not duplicated by them:
+# the epoch changed how a class sum is *accumulated*, and neither of these
+# accumulates one. `_pooled_from_blocks` consumes finished factors, and
+# `permutation_orders` only draws indices. Two copies of either would be two
+# places for the v12 route and the v13 route to drift apart while both looked
+# correct.
+#
+# The import direction is deliberate and cannot cycle: `alignment_estimators` is
+# NumPy-only and imports nothing from this package.
+_pooled_from_blocks = pooled_from_factors
 
-    Summing over all ordered pairs gives ``||T||^2`` with ``T = sum_i S_i``, and
-    the within-class part is ``sum_i ||S_i||^2``. Subtracting one from the other
-    leaves the between-class part, and removing the self terms from the first
-    leaves the distinct within-class part::
-
-        within  = (sum_i ||S_i||^2 - sum_i Q_i) / sum_i n_i (n_i - 1)
-        between = (||T||^2 - sum_i ||S_i||^2) / ((sum_i n_i)^2 - sum_i n_i^2)
-
-    That is the same number the matrix route produces -- a test asserts it -- at
-    ``O(C K)`` instead of ``O(C^2 K)``, which is what makes a 256-permutation
-    null affordable at experiment scale.
-    """
-
-    class_squared = np.einsum("ij,ij->i", sums, sums)
-    total = sums.sum(axis=0)
-    within_pairs = float((counts * (counts - 1)).sum())
-    between_pairs = float(counts.sum() ** 2 - (counts.astype(np.float64) ** 2).sum())
-
-    within = (
-        float((class_squared.sum() - self_squared.sum()) / within_pairs)
-        if within_pairs > 0
-        else float("nan")
-    )
-    between = (
-        float((float(total @ total) - class_squared.sum()) / between_pairs)
-        if between_pairs > 0
-        else float("nan")
-    )
-    return within, between
-
-
-def permutation_orders(
-    counts: np.ndarray, *, permutations: int, seed: int
-) -> list[np.ndarray]:
-    """The permutation index draws for a null, generated once.
-
-    Extracted so a multi-map null can hand **the same draws** to every map. The
-    across-map spread is supposed to isolate projection randomness; if each map
-    drew its own permutations, that spread would also contain permutation noise
-    and would overstate the projection error.
-
-    The sequence is exactly the one the single-map path produced when it drew
-    inline -- same generator, same seed, same order of calls -- so existing
-    numbers do not move.
-    """
-
-    generator = np.random.default_rng(seed)
-    total = int(np.sum(counts))
-    return [generator.permutation(total) for _ in range(permutations)]
+permutation_orders = _permutation_orders
 
 
 def _permutation_null(

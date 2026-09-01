@@ -3056,6 +3056,29 @@ def plot_gradient_directional_clustering(
     training checkpoints, where the greedy grouping stops being near-degenerate.
     """
 
+    # A v13 record carries finalized metrics and no rows, so the numbers are
+    # read rather than recomputed. A v12 record has rows and no metrics, so the
+    # established route runs unchanged. There is deliberately no third path: a
+    # finalized record that cannot answer from its artifact raises, because the
+    # only remaining way to "answer" would be to recompute from arrays that are
+    # not there.
+    if getattr(record, "has_finalized_gradient_metrics", False):
+        from llm_behavior_lab.analysis.alignment_views import (
+            clustering_spread,
+            clustering_view,
+        )
+
+        metrics = record.alignment_metrics
+        target = clustering_view(metrics, "target")
+        greedy = clustering_view(metrics, "greedy")
+        spreads = {
+            grouping: clustering_spread(metrics, grouping)
+            for grouping in ("target", "greedy")
+        }
+        return _draw_directional_clustering(
+            record, directory, target, greedy, spreads
+        )
+
     from llm_behavior_lab.analysis.gradient_clustering import gradient_clustering
 
     target = gradient_clustering(
@@ -3066,6 +3089,34 @@ def plot_gradient_directional_clustering(
         record, grouping="greedy", min_support=min_support,
         display_classes=display_classes,
     )
+
+    # Spread only when there is more than one map to spread across.
+    spreads: dict[str, Any] = {"target": None, "greedy": None}
+    if int(getattr(record, "sketch_map_count", 1)) > 1:
+        from llm_behavior_lab.analysis.gradient_clustering import (
+            gradient_clustering_per_map,
+        )
+
+        for grouping in ("target", "greedy"):
+            per_map = gradient_clustering_per_map(
+                record, grouping=grouping, min_support=min_support
+            )
+            spreads[grouping] = {
+                name: {**per_map[name], "map_count": per_map["map_count"]}
+                for name in ("within", "between", "delta")
+            }
+    return _draw_directional_clustering(record, directory, target, greedy, spreads)
+
+
+def _draw_directional_clustering(
+    record: Any, directory: str | Path, target, greedy, spreads
+) -> list[Path]:
+    """Figure 20's panels, from results of either origin.
+
+    Split out so a v12 record and a v13 record produce the *same* figure rather
+    than two figures that happen to look alike. Everything above this point
+    decides where the numbers come from; nothing below it can tell.
+    """
 
     # One normalization across both panels, from both panels' values.
     values = np.concatenate([
@@ -3118,26 +3169,6 @@ def plot_gradient_directional_clustering(
     # Anchored in figure coordinates from each panel's own box, so the statistic
     # sits directly beneath its heatmap rather than at a fixed axes offset that
     # leaves a gap once the rotated tick labels are laid out.
-    # Spread only when there is more than one map to spread across. At M = 1
-    # `spreads` stays None-valued and the annotation is the historical one.
-    spreads: dict[str, Any] = {"target": None, "greedy": None}
-    if int(getattr(record, "sketch_map_count", 1)) > 1:
-        from llm_behavior_lab.analysis.gradient_clustering import (
-            gradient_clustering_per_map,
-        )
-
-        for grouping in ("target", "greedy"):
-            per_map = gradient_clustering_per_map(
-                record, grouping=grouping, min_support=min_support
-            )
-            spreads[grouping] = {
-                name: {
-                    **per_map[name],
-                    "map_count": per_map["map_count"],
-                }
-                for name in ("within", "between", "delta")
-            }
-
     for axes, result, grouping in zip(panels, (target, greedy), ("target", "greedy")):
         box = axes.get_position()
         figure.text(
@@ -3391,6 +3422,16 @@ def plot_cross_partition_geometry(
     Diagnostic rather than a headline result, hence ``diagnostics/``.
     """
 
+    # Read, never recomputed, when the record is finalized. This figure used to
+    # rebuild every cross-partition statistic *and* a 256-draw null from raw
+    # rows on every render -- hours per arm -- while a `gradient_cross_partition`
+    # artifact sat unused beside it. A v13 record has the answers and no rows.
+    if getattr(record, "has_finalized_gradient_metrics", False):
+        from llm_behavior_lab.analysis.alignment_views import cross_partition_view
+
+        view = cross_partition_view(record.alignment_metrics)
+        return _draw_cross_partition(record, directory, view)
+
     from llm_behavior_lab.analysis.gradient_clustering import unit_sketches
     from llm_behavior_lab.analysis.gradient_cross_partition import (
         contingency_summary,
@@ -3442,9 +3483,50 @@ def plot_cross_partition_geometry(
     eligible = np.flatnonzero(score >= min_support)
     order = eligible[np.argsort(-score[eligible], kind="stable")][:display_classes]
     shown = np.sort(classes[order])
-
     drawn = cross_partition_matrix(rows, targets, greedy, shown, shown)
-    matrix = drawn["matrix"]
+
+    return _draw_cross_partition(
+        record, directory,
+        {
+            "pooled": pooled,
+            "null": null,
+            "mixture": mixture,
+            "contingency": {
+                "targets": contingency["target_ids"],
+                "greedy": contingency["greedy_ids"],
+                "counts": contingency["counts"],
+            },
+            "displayed": {
+                "classes": shown,
+                "matrix": drawn["matrix"],
+                "contingency": drawn["contingency"],
+                "target_counts": drawn["target_counts"],
+                "greedy_counts": drawn["greedy_counts"],
+            },
+            "map_count": int(getattr(record, "sketch_map_count", 1)),
+            "min_support": min_support,
+            "num_positions": int(contingency["num_positions"]),
+        },
+        spread,
+    )
+
+
+def _draw_cross_partition(
+    record: Any, directory: str | Path, view: dict[str, Any], spread=None
+) -> list[Path]:
+    """Figure 24's panels, from results of either origin.
+
+    Split out so a v13 record -- which has the answers and no rows -- and a v12
+    record -- which has rows and no answers -- produce the same figure rather
+    than two that merely resemble each other.
+    """
+
+    pooled = view["pooled"]
+    null = view["null"]
+    mixture = view["mixture"]
+    contingency = view["contingency"]
+    shown = np.asarray(view["displayed"]["classes"])
+    matrix = np.asarray(view["displayed"]["matrix"])
     finite = matrix[np.isfinite(matrix)]
     extent = float(np.abs(finite).max()) if finite.size else 1.0
 
@@ -3563,8 +3645,9 @@ def plot_cross_partition_geometry(
         "rows: true-target token   columns: greedy-predicted token   |   "
         "every shared position removed per cell, off-diagonal included\n"
         f"displayed: {shown.size} tokens by min(target, greedy) support >= "
-        f"{min_support}   |   {contingency['num_true_positive_positions']:,} of "
-        f"{contingency['num_positions']:,} positions have target == greedy",
+        f"{view['min_support']}   |   "
+        f"{pooled['num_true_positive_positions']:,} of "
+        f"{view['num_positions']:,} positions have target == greedy",
         ha="center", fontsize=7, color="#444444",
     )
     figure.text(
@@ -3671,9 +3754,14 @@ def plot_nucleus_temperature_clustering(
     # says which gradient field produced the points. A result assembled before
     # the pair split carries only the sampling temperatures; the loss
     # temperature is then read at the established historical value.
-    temperatures = np.asarray(
-        result.get("sampling_temperatures", result["temperatures"]), dtype=float
-    )
+    # `dict.get(k, default)` evaluates its default eagerly, so the historical
+    # fallback below used to raise KeyError whenever `temperatures` was absent --
+    # exactly the case it exists to cover. It only stayed hidden because the v12
+    # artifact loader happens to supply both keys.
+    if "sampling_temperatures" in result:
+        temperatures = np.asarray(result["sampling_temperatures"], dtype=float)
+    else:
+        temperatures = np.asarray(result["temperatures"], dtype=float)
     loss_temperatures = np.asarray(
         result.get("loss_temperatures", np.ones_like(temperatures)), dtype=float
     )

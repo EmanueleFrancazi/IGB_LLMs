@@ -34,6 +34,7 @@ import numpy as np
 import pytest
 import yaml
 
+from llm_behavior_lab.analysis import records as rec
 from llm_behavior_lab.analysis.records import RECORD_VERSION, load_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +101,12 @@ def _run(directory: Path, run_id: str, extra=(), *, module=None) -> Path:
         "--gradient-sketch",
         "--sketch-dimension", str(WIDTH),
         "--gradient-temperatures", *TEMPERATURES,
+        # This file is about the persisted per-position row layout, so it asks
+        # for the mode that keeps one. The production default is `metrics_only`,
+        # which finalizes the same statistics and then retains no rows at all --
+        # a different subject, tested elsewhere. Naming the mode here is what
+        # keeps these assertions about the layout rather than about the default.
+        "--sketch-storage", "per_position",
         "--no-figures",
         "--offline",
         "--output-dir", str(directory),
@@ -474,6 +481,24 @@ def test_the_two_single_map_runs_agree_on_everything_but_run_identity(
         payload.pop("environment", None)
         payload.pop("runtime", None)
         payload["analysis"]["gradient_analysis"].pop("seconds", None)
+        # Wall-clock and per-run identity are pruned; **content is not**.
+        #
+        # `slab_digests` was pruned in an earlier draft on the assumption that it
+        # was identity too. It is not: the keys are logical slab names
+        # (`sketch_T00_M00.f32`), independent of path and store id, and the
+        # values hash the sketch rows themselves. Two identical runs produce
+        # identical rows, so identical digests -- and comparing them is one of
+        # the strongest reproducibility assertions available here. Measured
+        # across two independent runs: 8 of 8 identical.
+        alignment = payload["analysis"]["gradient_analysis"].get(
+            "gradient_alignment"
+        )
+        if alignment is not None:
+            alignment.pop("finalization_seconds", None)
+            store = alignment.get("temporary_store")
+            if store is not None:
+                for key in ("store_id", "run_id", "manifest_filename"):
+                    store.pop(key, None)
         return payload
 
     omitted = prune(_run(tmp_path / "a", "omitted"))
@@ -587,6 +612,12 @@ def test_the_multi_map_archive_is_shaped_for_the_released_loader_probe(
     assert TEMPERATURE_KEY in arrays
     assert arrays[TEMPERATURE_KEY].ndim == 4
     assert CANONICAL_KEY not in arrays
-    assert payload["record_version"] == RECORD_VERSION == 12
+    # The *shape* is the probe: a released v11 loader raises on a rank it cannot
+    # interpret, whatever version the container declares. The container version
+    # is asserted to be one that carries this layout rather than pinned to a
+    # literal, which would need editing every time the record version moved for
+    # an unrelated reason -- and would say nothing about the probe either way.
+    assert payload["record_version"] == RECORD_VERSION
+    assert payload["record_version"] in rec._SKETCH_V2_RECORD_VERSIONS
     assert protocol["schema_version"] == 2
     assert protocol["map_count"] == 4

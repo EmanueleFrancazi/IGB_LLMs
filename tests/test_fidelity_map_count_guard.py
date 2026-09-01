@@ -62,71 +62,33 @@ def _result(map_count, *, include_key=True):
     return SimpleNamespace(sketch_protocol=protocol, exact_gradients=None)
 
 
-def test_an_explicit_multi_map_result_is_refused(tmp_path) -> None:
-    runner = _runner()
+def test_a_multi_map_result_is_no_longer_refused(tmp_path) -> None:
+    """The M = 1 restriction has been deliberately lifted.
 
-    with pytest.raises(ValueError, match="map_count=4"):
-        runner._write_countsketch_fidelity(
-            SimpleNamespace(paths=SimpleNamespace(run_dir=tmp_path)),
-            _result(4),
-            {"sketch_dimension": 4},
-        )
+    It existed because the check re-projected retained gradients through map 0
+    and assumed two-dimensional ``[positions, K]`` sketches, which is not what a
+    multi-map measurement produces. The check now reads the sketches every
+    production map actually produced, captured live during the measurement, so
+    there is no reconstruction left to be map-0 about -- and validating map 0
+    alone would have validated an instrument the figures do not use.
 
-
-def test_the_refusal_happens_before_any_reconstruction(tmp_path) -> None:
-    """``exact_gradients`` is ``None``.
-
-    If the guard ran late, the reconstruction would raise ``AttributeError`` on
-    it instead. Getting a ``ValueError`` naming the map count is what proves the
-    ordering.
+    Asserted as the *absence* of the old refusal: reaching the null-object's
+    missing attribute proves the guard let the result through, exactly as the
+    single-map case has always been checked.
     """
 
-    runner = _runner()
-
-    with pytest.raises(ValueError) as caught:
-        runner._write_countsketch_fidelity(
-            SimpleNamespace(paths=SimpleNamespace(run_dir=tmp_path)),
-            _result(2),
-            {"sketch_dimension": 4},
-        )
-
-    assert "map_count=2" in str(caught.value)
-    assert not isinstance(caught.value, AttributeError)
+    module = _runner()
+    run = SimpleNamespace(paths=SimpleNamespace(run_dir=tmp_path))
+    with pytest.raises(AttributeError):
+        module._write_countsketch_fidelity(run, _result(4), {})
 
 
-def test_the_refusal_leaves_no_partial_artifact(tmp_path) -> None:
-    """A rejected run must not leave anything a later reader could trust."""
+def test_the_multi_map_path_reports_its_map_count(tmp_path) -> None:
+    """The count comes from the protocol, never inferred from an array's rank."""
 
-    runner = _runner()
-    before = set(tmp_path.rglob("*"))
-
-    with pytest.raises(ValueError):
-        runner._write_countsketch_fidelity(
-            SimpleNamespace(paths=SimpleNamespace(run_dir=tmp_path)),
-            _result(4),
-            {"sketch_dimension": 4},
-        )
-
-    assert set(tmp_path.rglob("*")) == before
-    assert list(tmp_path.rglob("countsketch_fidelity.npz")) == []
-
-
-def test_the_error_separates_replicas_from_the_offline_methodology(tmp_path) -> None:
-    """The two are easy to confuse and the message must not let them be."""
-
-    runner = _runner()
-
-    with pytest.raises(ValueError) as caught:
-        runner._write_countsketch_fidelity(
-            SimpleNamespace(paths=SimpleNamespace(run_dir=tmp_path)),
-            _result(4),
-            {"sketch_dimension": 4},
-        )
-
-    message = str(caught.value)
-    assert "alternate-map" in message
-    assert "remains valid" in message
-    assert "map-0" in message
+    module = _runner()
+    assert module._measured_map_count(_result(4)) == 4
+    assert module._measured_map_count(_result(1)) == 1
 
 
 @pytest.mark.parametrize(
@@ -171,31 +133,19 @@ def test_a_missing_protocol_entirely_is_read_as_one_map(tmp_path) -> None:
         )
 
 
-def test_the_runner_now_exposes_the_flag_and_refuses_the_combination() -> None:
-    """The tripwire this replaced was a *dated* one, and it has now fired.
+def test_the_runner_no_longer_refuses_the_flag_with_replicas() -> None:
+    """``--countsketch-fidelity-sanity`` and ``--sketch-maps N`` now compose.
 
-    It asserted ``--sketch-maps`` was absent from the runner, so that ``M > 1``
-    could not become reachable before the consumers could read it. They can now,
-    the flag exists, and that assertion has done its job.
-
-    What must not weaken is the reason it existed. The guard below stays the
-    last line of defence, and the runner gains an *earlier* one: the two
-    together mean the combination is refused at argument resolution, before a
-    dataset is loaded, and refused again at the writer for any caller that
-    never passed through argument resolution at all.
+    The pairing used to be rejected during argument resolution. Keeping that
+    rejection after the check became map-aware would have left the flag refusing
+    the only configuration it is now most useful in.
     """
 
     source = (
         REPO_ROOT / "scripts" / "run_initialization_distribution_experiment.py"
     ).read_text(encoding="utf-8")
-
-    assert '"--sketch-maps",' in source
-    # The early refusal.
-    assert "def _validate_sketch_map_request" in source
     assert "--countsketch-fidelity-sanity" in source
-    # The writer guard, unchanged in its role.
-    assert "def _write_countsketch_fidelity" in source
-    assert "if fidelity_map_count != 1:" in source
+    assert "cannot be combined with" not in source
 
 
 def test_the_offline_alternate_map_bank_is_untouched() -> None:

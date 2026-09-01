@@ -180,8 +180,17 @@ def _multi_map(maps=4, *, protocol=None, **kwargs):
 # -- version and forward guard ------------------------------------------------
 
 
-def test_the_record_version_is_twelve() -> None:
-    assert RECORD_VERSION == 12
+def test_the_record_version_is_thirteen() -> None:
+    """Bumped for the v13 storage-mode surface.
+
+    The multi-map sketch layout introduced at 12 is unchanged, which is why the
+    schema-v2 gate accepts both versions rather than pinning to whatever this
+    build happens to be -- pinning is what would have made every existing v12
+    record unreadable the moment this constant moved.
+    """
+
+    assert RECORD_VERSION == 13
+    assert rec._SKETCH_V2_RECORD_VERSIONS == (12, 13)
 
 
 def test_a_newer_record_version_is_refused() -> None:
@@ -326,8 +335,10 @@ def test_the_legacy_wrapper_rule_end_to_end(tmp_path) -> None:
     legacy.save(tmp_path)
     reloaded = load_record(tmp_path)
 
-    # The container is stamped with the current version ...
-    assert reloaded.metadata["record_version"] == RECORD_VERSION
+    # The container keeps the version it was written at -- re-saving a v11
+    # record must not promote it to whatever this build happens to be ...
+    assert reloaded.record_version == 11
+    assert reloaded.metadata["record_version"] == 11
     # ... while the protocol inside it still carries no schema version ...
     assert "schema_version" not in reloaded.gradient_analysis["gradient_sketch"]
     # ... and it still reads as a single map.
@@ -354,12 +365,13 @@ def test_a_v12_schema_absent_four_dimensional_array_is_refused() -> None:
 
 
 def test_re_saving_a_legacy_record_does_not_make_it_unloadable(tmp_path) -> None:
-    """`save()` stamps the current version onto legacy content.
+    """`save()` preserves the record's own version.
 
     Loading an old record and writing it back out is ordinary, and it must not
-    turn a valid archive into one this reader refuses. The masquerade guard
-    lives where it belongs instead: schema v2 requires an explicit count, and
-    the multi-map layout requires all three conditions.
+    turn a valid archive into one this reader refuses -- nor into one that
+    *claims* to be current. An earlier implementation stamped the module
+    constant here, so a round trip silently relabelled v11 content as v12; the
+    masquerade guard lives where it belongs instead, in the schema rules.
     """
 
     _build(
@@ -369,7 +381,8 @@ def test_re_saving_a_legacy_record_does_not_make_it_unloadable(tmp_path) -> None
     ).save(tmp_path)
     reloaded = load_record(tmp_path)
 
-    assert reloaded.metadata["record_version"] == RECORD_VERSION
+    assert reloaded.record_version == 11
+    assert reloaded.metadata["record_version"] == 11
     assert reloaded.sketch_map_count == 1
 
 

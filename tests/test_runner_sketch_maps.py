@@ -258,36 +258,6 @@ def test_the_sketch_may_be_enabled_from_the_config_side() -> None:
     assert module._resolve_protocol(config, _args(["--sketch-maps", "4"]))["sketch_maps"] == 4
 
 
-def test_replicas_with_the_fidelity_sanity_check_are_refused() -> None:
-    """And the message must say all four things a reader needs.
-
-    The refusal is narrow, and stating it loosely would be worse than not
-    stating it: production replicas *are* supported, it is this diagnostic's
-    map-0 two-dimensional reconstruction that is not, the separate offline
-    alternate-map methodology is unaffected, and the way forward is M = 1.
-    """
-
-    module = _runner()
-
-    with pytest.raises(ValueError) as error:
-        module._resolve_protocol(
-            {},
-            _args(
-                [
-                    "--sketch-maps", "4",
-                    "--gradient-sketch",
-                    "--countsketch-fidelity-sanity",
-                ]
-            ),
-        )
-
-    message = str(error.value)
-    assert "--countsketch-fidelity-sanity" in message
-    assert "map-0" in message
-    assert "offline alternate-map" in message
-    assert "--sketch-maps 1" in message
-
-
 def test_the_fidelity_sanity_check_still_runs_at_one_map() -> None:
     """The diagnostic is not disabled; it is scoped."""
 
@@ -299,22 +269,34 @@ def test_the_fidelity_sanity_check_still_runs_at_one_map() -> None:
     assert protocol["sketch_maps"] == 1
 
 
-def test_the_stage_8b2c_writer_guard_is_still_in_place() -> None:
-    """Defence in depth: the early refusal does not replace the late one.
+def _run_expecting_refusal(monkeypatch, argv, tmp_path):
+    """Drive ``main()`` with every expensive entry point mined."""
 
-    The CLI check makes the failure cheap. The writer guard makes it
-    *unavoidable* -- including for any caller that reaches the fidelity writer
-    without passing through argument resolution at all.
-    """
-
-    source = SCRIPT.read_text(encoding="utf-8")
-
-    assert "def _write_countsketch_fidelity" in source
-    assert "fidelity_map_count = _measured_map_count(gradient_result)" in source
-    assert "if fidelity_map_count != 1:" in source
-
-
-# -- refusal happens before any expensive work --------------------------------
+    module = _runner()
+    for name in (
+        "resolve_dataset",
+        "build_tokenizer",
+        "build_model_from_config",
+        "build_evaluation_positions",
+        "compute_position_gradient_norms",
+    ):
+        monkeypatch.setattr(module, name, _Detonator(name))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_initialization_distribution_experiment.py",
+            "--data-config", str(DATA_CONFIG),
+            "--model-config", str(MODEL_CONFIG),
+            "--experiment-config", str(EXPERIMENT_CONFIG),
+            "--output-dir", str(tmp_path),
+            "--offline",
+            *argv,
+        ],
+    )
+    with pytest.raises(ValueError) as error:
+        module.main()
+    return str(error.value)
 
 
 class _Detonator:
@@ -375,25 +357,6 @@ def test_replicas_without_the_sketch_fail_before_anything_is_loaded(
     assert "gradient sketch is off" in message
 
 
-def test_replicas_with_fidelity_sanity_fail_before_the_measurement(
-    monkeypatch, tmp_path
-) -> None:
-    """The expensive one. Without this hoist the refusal costs a full run."""
-
-    message = _run_expecting_refusal(
-        monkeypatch,
-        [
-            "--gradient-analysis",
-            "--gradient-sketch",
-            "--sketch-maps", "4",
-            "--countsketch-fidelity-sanity",
-        ],
-        tmp_path,
-    )
-
-    assert "--countsketch-fidelity-sanity" in message
-
-
 def test_nothing_was_written_by_a_refused_run(monkeypatch, tmp_path) -> None:
     """A refusal must not leave a half-created run directory behind."""
 
@@ -402,3 +365,19 @@ def test_nothing_was_written_by_a_refused_run(monkeypatch, tmp_path) -> None:
     )
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_replicas_and_the_fidelity_sanity_check_now_compose() -> None:
+    """The pairing was refused while the check was structurally single-map.
+
+    It re-projected retained gradients through map 0 and assumed
+    ``[positions, K]`` sketches, so a multi-map run would have produced a
+    plausible-looking number for the wrong instrument. The check now compares
+    against the sketches every production map actually produced, captured live
+    during the measurement, so refusing the combination would leave the flag
+    rejecting the configuration it is most useful in.
+    """
+
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "cannot be combined with" not in source
+    assert "--countsketch-fidelity-sanity" in source
