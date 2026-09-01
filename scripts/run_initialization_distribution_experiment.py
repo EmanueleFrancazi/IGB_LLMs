@@ -302,6 +302,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--finalization-max-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Ceiling on the accounted finalization workspace -- every buffer "
+            "held at once while metrics are computed. Defaults to 1 GiB. "
+            "Checked against an estimate from the realized dimensions and class "
+            "counts before anything is allocated, so a run that would not fit "
+            "declines instead of dying part-way through a reduction."
+        ),
+    )
+    parser.add_argument(
         "--fidelity-max-positions",
         type=int,
         default=12,
@@ -652,6 +664,7 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         "sketch_storage_max_bytes": int(
             getattr(args, "sketch_storage_max_bytes", 512 * 1024 * 1024)
         ),
+        "finalization_max_bytes": _resolve_finalization_max_bytes(args),
         "fidelity_max_positions": int(getattr(args, "fidelity_max_positions", 12)),
         "fidelity_max_gradient_bytes": int(
             getattr(args, "fidelity_max_gradient_bytes", 1024 ** 3)
@@ -720,6 +733,29 @@ def _resolve_protocol(experiment_config: dict[str, Any], args: argparse.Namespac
         )
     _validate_sketch_map_request(protocol)
     return protocol
+
+
+def _resolve_finalization_max_bytes(args: argparse.Namespace) -> int:
+    """The accounted-workspace ceiling, validated as a positive integer.
+
+    ``None`` means "not given" and takes the default; a zero or negative value
+    is a mistake rather than a request for "unlimited", because an unlimited
+    workspace is exactly what this control exists to prevent.
+    """
+
+    from llm_behavior_lab.analysis.alignment_finalization import (
+        DEFAULT_FINALIZATION_MAX_BYTES,
+    )
+
+    requested = getattr(args, "finalization_max_bytes", None)
+    if requested is None:
+        return DEFAULT_FINALIZATION_MAX_BYTES
+    value = int(requested)
+    if value < 1:
+        raise ValueError(
+            f"--finalization-max-bytes must be a positive integer; got {value}."
+        )
+    return value
 
 
 def _resolve_gradient_temperatures(
@@ -1846,6 +1882,38 @@ def main() -> None:
                 sampling_temperatures=np.asarray(sweep_temperatures, dtype=float),
                 factor_selections=factor_selections,
             )
+            # Refused **before** `finalize_alignment_metrics` touches a slab.
+            # The widest grouping shapes the class-sum buffers, so the estimate
+            # is taken over the largest realized class count the run will meet.
+            from llm_behavior_lab.analysis.alignment_finalization import (
+                check_finalization_workspace,
+                estimate_finalization_bytes,
+            )
+
+            realized_classes = max(
+                [int(np.unique(inputs.target_ids).size),
+                 int(np.unique(inputs.greedy_ids).size),
+                 int(np.union1d(
+                     np.unique(inputs.target_ids), np.unique(inputs.greedy_ids)
+                 ).size)]
+                + ([int(np.unique(row).size) for row in inputs.nucleus_labels]
+                   if inputs.nucleus_labels is not None else [])
+            )
+            workspace = estimate_finalization_bytes(
+                num_positions=int(gradient_result.num_positions),
+                num_buckets=int(protocol["sketch_dimension"]),
+                num_classes=realized_classes,
+                draw_batch=32,
+            )
+            finalization_limits = check_finalization_workspace(
+                workspace, protocol["finalization_max_bytes"]
+            )
+            print(
+                f"    finalization workspace: "
+                f"{workspace['total'] / 1024 ** 2:,.0f} MiB estimated against a "
+                f"{protocol['finalization_max_bytes'] / 1024 ** 2:,.0f} MiB limit"
+            )
+
             finalized = finalize_alignment_metrics(
                 row_sink.iter_slabs(), inputs,
                 num_maps=protocol["sketch_maps"],
@@ -1904,11 +1972,20 @@ def main() -> None:
                         ),
                         "temp_dir_overridden": bool(protocol["gradient_temp_dir"]),
                     },
-                    "finalization_status": "complete",
+                    # One block, so the cap, the estimate, the outcome and the
+                    # elapsed time are read together and none of them is
+                    # duplicated elsewhere.
+                    "finalization": {
+                        "status": "complete",
+                        "seconds": round(finalization_seconds, 3),
+                        "max_bytes": finalization_limits["max_bytes"],
+                        "estimated_workspace_bytes": finalization_limits[
+                            "estimated_workspace_bytes"
+                        ],
+                    },
                     "factor_selection": [
                         selection.as_dict() for selection in factor_selections
                     ],
-                    "finalization_seconds": round(finalization_seconds, 3),
                     # The compact, path-free form: a completed run must stay
                     # portable, and the bulk directory it names is deleted
                     # moments later. The full manifest keeps its absolute paths
@@ -1978,9 +2055,18 @@ def main() -> None:
             # again -- never discarded because a later step failed.
             if sketch_store is not None:
                 sketch_store.mark_recoverable(f"{type(error).__name__}: {error}")
+                # The rows survive, so the run can be finished once the cause is
+                # understood. Printing the exact command is the difference
+                # between a recoverable failure and one that looks terminal.
                 print(
                     f"    finalization failed: {error}\n"
-                    f"    rows retained at {sketch_store.directory}"
+                    f"    rows retained at {sketch_store.directory}\n"
+                    f"    resume with:\n"
+                    f"      python3 scripts/resume_gradient_finalization.py "
+                    f"{sketch_store.manifest_path} \\\n"
+                    f"        --analyses-dir {run.paths.analyses_dir} \\\n"
+                    f"        --finalization-max-bytes "
+                    f"{protocol['finalization_max_bytes']}"
                 )
             raise
         if sketch_store is not None:

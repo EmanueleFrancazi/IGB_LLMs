@@ -55,6 +55,9 @@ from llm_behavior_lab.analysis.sketch_estimator import ensemble_summary
 __all__ = [
     "FinalizationInputs",
     "JobPlan",
+    "DEFAULT_FINALIZATION_MAX_BYTES",
+    "check_finalization_workspace",
+    "estimate_finalization_bytes",
     "finalize_alignment_metrics",
     "plan_jobs",
 ]
@@ -712,3 +715,106 @@ def _selection_matches(selection, job: JobPlan, inputs: FinalizationInputs) -> b
         return False
     measured = float(inputs.sampling_temperatures[job.sampling_index])
     return abs(selection.sampling_temperature - measured) <= TEMPERATURE_TOLERANCE
+
+
+# -- workspace accounting ----------------------------------------------------
+#
+# Finalization is bounded by what it holds at once, not by the store it reads.
+# The estimate below is deliberately conservative: it sums every buffer that can
+# be live simultaneously under the *current* implementation, and where two
+# groupings could in principle overlap it assumes they do. An estimate that
+# tracked the code loosely would be worse than none, because it would authorise
+# a run that then dies part-way through a reduction it cannot finish.
+
+#: Default ceiling on the accounted finalization workspace.
+#:
+#: One gibibyte, matching the acceptance criterion the design was measured
+#: against. At production scale (`D = 32768`, `K = 1024`, a few thousand classes)
+#: the measured resident increment was 512-525 MiB, so the default leaves roughly
+#: a factor of two of headroom rather than sitting on the measurement.
+DEFAULT_FINALIZATION_MAX_BYTES = 1024 ** 3
+
+
+def estimate_finalization_bytes(
+    *,
+    num_positions: int,
+    num_buckets: int,
+    num_classes: int,
+    draw_batch: int = 32,
+) -> dict[str, int]:
+    """Bytes finalization holds at once, itemised.
+
+    ``num_classes`` should be the **largest** realized class count across every
+    grouping the run will finalize, because the class-sum buffers are shaped by
+    whichever grouping is widest.
+
+    Returned itemised rather than as a bare total: a refusal that says only
+    "too big" leaves an operator guessing which dimension to change, while one
+    that names the slab, the normalized rows and the class sums separately says
+    whether to reduce ``K``, ``D`` or the grouping.
+    """
+
+    for name, value in (
+        ("num_positions", num_positions),
+        ("num_buckets", num_buckets),
+        ("num_classes", num_classes),
+        ("draw_batch", draw_batch),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{name} must be a positive integer; got {value!r}.")
+
+    rows = int(num_positions)
+    width = int(num_buckets)
+    classes = int(num_classes)
+    items = {
+        # The memmapped slab, paged in as it is read.
+        "slab_float32": rows * width * 4,
+        # `_normalize` materializes the float64 rows the estimators consume.
+        "normalized_rows_float64": rows * width * 8,
+        # `row_squared` in both `class_factors` and `permutation_null`, plus the
+        # sort/permutation index. Small beside the row block, but real.
+        "row_squared_float64": 2 * rows * 8,
+        "row_index_int64": rows * 8,
+        # Three class-sum-shaped blocks can be live together: the point
+        # estimate's factors, the null's reusable buffer, and -- during the
+        # cross-partition job -- the second grouping's sums beside the first.
+        "class_sums_float64": 3 * classes * width * 8,
+        "class_self_terms_float64": 3 * classes * 8,
+        # Permutation draws are held one bounded batch at a time.
+        "permutation_orders_int64": int(draw_batch) * rows * 8,
+    }
+    items["total"] = sum(items.values())
+    return items
+
+
+def check_finalization_workspace(
+    estimate: dict[str, int], max_bytes: int
+) -> dict[str, Any]:
+    """Refuse a finalization that would not fit, **before** anything is allocated.
+
+    The refusal is the point. A finalization that runs out of memory part-way
+    has already spent the time and still leaves the caller to recover; one that
+    declines up front leaves the sealed store untouched and recoverable, which
+    is the whole reason the store outlives a failure.
+    """
+
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+        raise ValueError(
+            f"finalization_max_bytes must be a positive integer; got {max_bytes!r}."
+        )
+    total = int(estimate["total"])
+    if total > max_bytes:
+        itemised = ", ".join(
+            f"{name}={value:,}"
+            for name, value in sorted(estimate.items())
+            if name != "total"
+        )
+        raise ValueError(
+            f"Finalization would hold about {total:,} bytes "
+            f"({total / 1024 ** 3:.2f} GiB) at once, above the "
+            f"{max_bytes:,}-byte limit. Nothing has been allocated and the "
+            f"sealed rows are untouched.\n  {itemised}\n"
+            "Raise --finalization-max-bytes deliberately, or reduce the sketch "
+            "width, the position count or the grouping cardinality."
+        )
+    return {"max_bytes": int(max_bytes), "estimated_workspace_bytes": total}

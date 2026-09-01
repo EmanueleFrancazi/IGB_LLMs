@@ -73,6 +73,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--finalization-max-bytes",
+        type=int,
+        default=None,
+        help=(
+            "The same accounted-workspace ceiling the run uses, so a resume can "
+            "be given the headroom the original attempt lacked. Defaults to "
+            "1 GiB, as the runner does."
+        ),
+    )
+    parser.add_argument(
         "--list-stale",
         action="store_true",
         help="Report resumable stores under the manifest's directory and exit.",
@@ -101,6 +111,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No manifest at {manifest_path}.", file=sys.stderr)
         return 2
 
+    from llm_behavior_lab.analysis.alignment_finalization import (
+        DEFAULT_FINALIZATION_MAX_BYTES,
+    )
+
+    limit = (
+        DEFAULT_FINALIZATION_MAX_BYTES
+        if args.finalization_max_bytes is None
+        else int(args.finalization_max_bytes)
+    )
+    if limit < 1:
+        print(
+            f"--finalization-max-bytes must be a positive integer; got {limit}.",
+            file=sys.stderr,
+        )
+        return 2
+
     store = open_store(manifest_path)
     if store.state not in RESUMABLE:
         print(
@@ -112,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"Store {store.store_id} ({store.state.value})")
+    print(f"  finalization workspace limit: {limit:,} bytes")
     print(f"  rows at {store.directory}")
     store.validate()
     print("  slabs validated against their sealed sizes and digests")

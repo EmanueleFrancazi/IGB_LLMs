@@ -1517,7 +1517,7 @@ deliberately, and the separation is visible in where each may be set:
 | | Where it may be set | Recorded |
 |---|---|---|
 | Storage **mode** (`--sketch-storage`) | experiment config, overridden by the command line, else the `metrics_only` default | `storage_mode` |
-| Resource **limits** (`--sketch-storage-max-bytes`, `--sketch-factors-max-bytes`, `--gradient-temp-max-bytes`, `--fidelity-max-*`) | command line only | `storage_limits`, `temporary_store.preflight`, `sanity.bounds` |
+| Resource **limits** (`--sketch-storage-max-bytes`, `--sketch-factors-max-bytes`, `--gradient-temp-max-bytes`, `--finalization-max-bytes`, `--fidelity-max-*`) | command line only | `storage_limits`, `temporary_store.preflight`, `finalization`, `sanity.bounds` |
 | Temporary-store location (`--gradient-temp-dir`) | command line only | as a **policy** (`output_root_gradient_tmp` or `explicit_override`), never as a path |
 
 The mode is protocol: it changes what a run *measures and keeps*, so it belongs
@@ -1526,6 +1526,18 @@ express what this machine and this operator will spend, so they stay on the
 command line where someone reading the invocation can see every ceiling that
 applied. Whichever route a value took, the **resolved** value is persisted, so a
 record can always say what admitted it.
+
+`--finalization-max-bytes` (default 1 GiB) bounds the workspace finalization
+holds at once. It is checked against an estimate from the realized dimensions
+and class counts **before** any buffer is allocated, so a run that would not fit
+declines rather than dying part-way through a reduction; the sealed rows stay
+recoverable and the run prints the command to resume with a larger ceiling. The
+resolved cap and the estimate are recorded together under `finalization`.
+
+The 2 GiB free-space reserve applied to the temporary store is a **documented
+simplification**: it is hardcoded rather than exposed, though the resolved value
+is persisted under `temporary_store.preflight.reserve_bytes` like every other
+limit.
 
 The resolved temporary directory is deliberately *not* published. A completed
 record must stay portable, and that path may be node-local scratch that no longer

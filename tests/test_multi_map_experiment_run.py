@@ -494,7 +494,10 @@ def test_the_two_single_map_runs_agree_on_everything_but_run_identity(
             "gradient_alignment"
         )
         if alignment is not None:
-            alignment.pop("finalization_seconds", None)
+            # Wall-clock only. `status`, `max_bytes` and
+            # `estimated_workspace_bytes` in the same block stay compared:
+            # they are protocol, and two identical runs must agree on them.
+            (alignment.get("finalization") or {}).pop("seconds", None)
             store = alignment.get("temporary_store")
             if store is not None:
                 for key in ("store_id", "run_id", "manifest_filename"):
