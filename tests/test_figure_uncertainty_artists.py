@@ -475,7 +475,7 @@ def test_figure_twenty_two_draws_one_se_bar_per_point(tmp_path, monkeypatch) -> 
     segments = bars[0].lines[2][0].get_segments()
     assert len(segments) == len(expected)
     for segment, value in zip(segments, expected):
-        assert float(segment[:, 1].ptp()) == pytest.approx(2.0 * value, rel=1e-6)
+        assert float(np.ptp(segment[:, 1])) == pytest.approx(2.0 * value, rel=1e-6)
 
 
 def test_figure_twenty_two_draws_no_bars_for_historical_artifacts(
